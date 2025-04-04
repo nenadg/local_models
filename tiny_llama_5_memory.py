@@ -22,6 +22,8 @@ from logit_capture_processor import TokenProbabilityCaptureProcessor
 from transformers import LogitsProcessor, LogitsProcessorList
 from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
 
+from simple_vector_store import MemoryManager
+
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
     "role": "system",
@@ -42,6 +44,11 @@ class TinyLlamaChat:
         self.stop_event = threading.Event()
         self.mcp_handler = MCPHandler(output_dir=output_dir, allow_shell_commands=True)
         self.confidence_metrics = ConfidenceMetrics()
+
+        # Initialize memory manager
+        self.memory_manager = MemoryManager(memory_dir=memory_dir, device=device)
+
+        self.current_user_id = "default_user"
 
         os.makedirs(memory_dir, exist_ok=True)
 
@@ -203,8 +210,18 @@ class TinyLlamaChat:
         # Incorporate up to 2 most recently added corrections
         recent_corrections = [c["content"] for c in self.knowledge_base["corrections"][-2:]]
 
+        # Retrieve relevant memories for this query (new code)
+        memories = ""
+        if current_query:
+            memories = self.memory_manager.retrieve_relevant_memories(
+                self.current_user_id, current_query
+            )
+
         # Create enhanced system message with knowledge
         enhanced_system_content = self.system_message["content"]
+
+        if memories:
+            enhanced_system_content += f"\n\n{memories}"
 
         if relevant_facts:
             enhanced_system_content += "\n\nRelevant information:"
@@ -479,7 +496,7 @@ class TinyLlamaChat:
             if cleaned_input == "_COMMAND_ONLY_":
                 # This was just a shell command, don't generate a response
                 return ""
-                
+
             # Replace the original user input with cleaned version
             if user_input != cleaned_input:
                 messages[-1]["content"] = cleaned_input
@@ -965,6 +982,7 @@ def main():
     print("  !toggle-filter - Toggle uncertainty filtering on/off")
     print("  !confidence: [0.0-1.0] - Set confidence threshold")
     print("  !toggle-heatmap - Toggle confidence heatmap visualization on/off")
+    print("  !memorize - Save the entire conversation to long-term memory")
     print("\nIf the model expresses uncertainty, you can ask it to speculate")
     print("by saying 'please continue anyway' or 'please speculate'")
     print("="*50 + "\n")
@@ -1033,6 +1051,11 @@ def main():
         elif user_input.lower() == '!toggle-heatmap':
             show_confidence = not show_confidence
             print(f"Confidence heatmap {'enabled' if show_confidence else 'disabled'}")
+            continue
+
+        elif user_input.lower() == '!memorize':
+            chat.memory_manager.save_conversation(chat.current_user_id, conversation)
+            print("Conversation saved to long-term memory!")
             continue
 
         # Add user message to conversation
@@ -1110,6 +1133,12 @@ def main():
 
             assistant_message = {"role": "assistant", "content": filtered_response}
             conversation.append(assistant_message)
+
+            chat.memory_manager.add_memory(
+                chat.current_user_id,
+                user_input,
+                response
+            )
 
             # Estimate tokens generated
             try:
