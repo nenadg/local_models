@@ -1,22 +1,27 @@
 import os
 import re
 import json
+import subprocess
 from typing import Dict, List, Tuple, Optional, Any, Union
 from datetime import datetime
 
 class MCPHandler:
     """
-    Model Content Protocol Handler for directing LLM outputs to files.
+    Model Content Protocol Handler for directing LLM outputs to files
+    and executing commands.
 
     MCP Syntax:
-    - User commands: "@{FILENAME.ext}" in user input will save response to file
+    - User commands:
+      - "@{FILENAME.ext}" in user input will save response to file
+      - "!{command}" in user input will execute a shell command
     - Model commands: Inside a response, use:
       >>> FILE: filename.ext
       content to save
       <<<
     """
-    def __init__(self, output_dir: str = "./output"):
+    def __init__(self, output_dir: str = "./output", allow_shell_commands: bool = False):
         self.output_dir = output_dir
+        self.allow_shell_commands = allow_shell_commands
         os.makedirs(output_dir, exist_ok=True)
 
         # The regex pattern for detecting MCP in model output
@@ -24,6 +29,9 @@ class MCPHandler:
 
         # The pattern for user commands
         self.user_command_pattern = r'@{([^}]+)}'
+
+        # The pattern for shell commands
+        self.shell_command_pattern = r'!{([^}]+)}'
 
         # Buffer for accumulating MCP content during streaming
         self.current_mcp_blocks = {}
@@ -41,17 +49,79 @@ class MCPHandler:
         commands = {}
         clean_input = user_input
 
-        # Find all MCP commands in user input
-        matches = re.findall(self.user_command_pattern, user_input)
-
-        for match in matches:
+        # Find file save commands (@{filename.ext})
+        file_matches = re.findall(self.user_command_pattern, user_input)
+        for match in file_matches:
             # Create command to save response to this file
             commands[match] = {"action": "save_response", "timestamp": datetime.now().isoformat()}
 
             # Remove command from input
             clean_input = clean_input.replace(f"@{{{match}}}", "")
 
-        # Clean up any extra spaces
+        # Check if this is a shell command only request
+        shell_matches = re.findall(self.shell_command_pattern, user_input)
+        is_command_only = len(shell_matches) > 0 and clean_input.replace(f"!{{{shell_matches[0]}}}", "").strip() == ""
+
+        # Process shell commands
+        for match in shell_matches:
+            # Execute shell command immediately if enabled
+            if self.allow_shell_commands:
+                try:
+                    print(f"[Executing command: {match}]")
+                    result = subprocess.run(match, shell=True, capture_output=True, text=True)
+                    output = result.stdout
+                    error = result.stderr
+
+                    # Save to temp file for large outputs
+                    output_file = None
+                    if len(output) > 1000:  # If output is large
+                        output_file = os.path.join(self.output_dir, f"cmd_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+                        try:
+                            with open(output_file, 'w', encoding='utf-8') as f:
+                                f.write(output)
+                            print(f"[Large output saved to: {output_file}]")
+                        except Exception as e:
+                            print(f"[Error saving output: {str(e)}]")
+                            output_file = None
+
+                    # Display the output (truncated for very large outputs)
+                    print("\n--- Command Output ---")
+                    if len(output) > 2000:
+                        print(output[:1000] + "\n...[output truncated]...\n" + output[-1000:])
+                    elif output:
+                        print(output)
+                    if error:
+                        print("Error:", error)
+                    print("--- End Output ---\n")
+
+                    # Remove the command from the input
+                    clean_input = clean_input.replace(f"!{{{match}}}", "")
+
+                    # If this was just a command with no other text, don't send to model
+                    if is_command_only:
+                        # Replace with a placeholder to avoid empty input
+                        clean_input = "_COMMAND_ONLY_"
+                    else:
+                        # Only include a summarized/truncated version of the output
+                        if len(output) > 1000:
+                            if output_file:
+                                truncated_output = f"[Large output (saved to {output_file})]\n" + output[:500] + "\n...[truncated]..."
+                            else:
+                                truncated_output = output[:500] + "\n...[output truncated, total length: " + str(len(output)) + " characters]..."
+                            clean_input = f"{clean_input}\n\nCommand output:\n{truncated_output}"
+                        else:
+                            clean_input = f"{clean_input}\n\nCommand output:\n{output}"
+
+                except Exception as e:
+                    print(f"[Error executing command: {str(e)}]")
+                    # Remove the command from input but leave an error message
+                    clean_input = clean_input.replace(f"!{{{match}}}", f"[Command error: {str(e)}]")
+            else:
+                print("[Shell command execution is disabled]")
+                # Remove the command from input and leave a message
+                clean_input = clean_input.replace(f"!{{{match}}}", "[Shell command execution is disabled]")
+
+        # Clean up any extra spaces and normalize newlines
         clean_input = clean_input.strip()
 
         return clean_input, commands
@@ -180,30 +250,10 @@ class MCPHandler:
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(content)
                 results[safe_filename] = True
-                print(f"[Content saved to: {file_path}]")
+                print(f"[SUCCESS] Content saved to: {file_path}")
             except Exception as e:
                 results[safe_filename] = False
-                print(f"[Error saving to {file_path}: {str(e)}]")
-
-        return results
-
-    def execute_commands(self, commands: Dict[str, Any]) -> Dict[str, bool]:
-        """
-        Execute user MCP commands.
-
-        Args:
-            commands: Command dictionary from extract_mcp_from_user_input
-
-        Returns:
-            Status dictionary
-        """
-        results = {}
-
-        # Currently only supports saving to files
-        for filename, cmd in commands.items():
-            if cmd.get("action") == "save_response":
-                # We'll handle this after response generation
-                results[filename] = True
+                print(f"[ERROR] Failed saving to {file_path}: {str(e)}")
 
         return results
 
@@ -231,11 +281,31 @@ class MCPHandler:
             # Write response to file
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(response)
-
             return True
         except Exception as e:
-            print(f"[Error saving response to {filename}: {str(e)}]")
+            print(f"[ERROR] Failed saving response to {filename}: {str(e)}")
             return False
+
+    def execute_commands(self, commands: Dict[str, Any]) -> Dict[str, bool]:
+        """
+        Execute user MCP commands.
+
+        Args:
+            commands: Command dictionary from extract_mcp_from_user_input
+
+        Returns:
+            Status dictionary
+        """
+        results = {}
+
+        # Currently only supports saving to files
+        # (Shell commands are executed immediately in extract_mcp_from_user_input)
+        for filename, cmd in commands.items():
+            if cmd.get("action") == "save_response":
+                # We'll handle this after response generation
+                results[filename] = True
+
+        return results
 
     def _sanitize_filename(self, filename: str) -> str:
         """
@@ -264,12 +334,12 @@ class MCPHandler:
         Returns:
             Help text string
         """
-        return """
+        help_text = f"""
 MODEL CONTENT PROTOCOL (MCP) COMMANDS:
 
 1. Save complete response to file:
-   Type @{filename.ext} anywhere in your message.
-   Example: "Explain quantum computing @{quantum.md}"
+   Type @{{filename.ext}} anywhere in your message.
+   Example: "Explain quantum computing @{{quantum.md}}"
 
 2. Save specific content to files - the model can use:
    >>> FILE: filename.ext
@@ -282,6 +352,26 @@ MODEL CONTENT PROTOCOL (MCP) COMMANDS:
    - .txt: Plain text
    - .json: JSON data
    - .csv: Comma separated values
+"""
 
-Output files are saved to: {output_dir}
-""".format(output_dir=os.path.abspath(self.output_dir))
+        # Add shell command information if enabled
+        if self.allow_shell_commands:
+            help_text += """
+4. Execute shell commands:
+   Type !{command} in your message to execute a shell command.
+   Example: "List files in the current directory !{ls -la}"
+
+   The command output will be shown immediately and included in your query.
+
+   CAUTION: Shell commands run with your current user permissions!
+"""
+        else:
+            help_text += """
+4. Shell command execution is currently disabled.
+   To enable it, initialize MCPHandler with allow_shell_commands=True
+"""
+
+        help_text += f"""
+Output files are saved to: {os.path.abspath(self.output_dir)}
+"""
+        return help_text

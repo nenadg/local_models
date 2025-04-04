@@ -20,7 +20,7 @@ from confidence_metrics import ConfidenceMetrics
 from response_filter import ResponseFilter
 from logit_capture_processor import TokenProbabilityCaptureProcessor
 from transformers import LogitsProcessor, LogitsProcessorList
-from terminal_heatmap import TerminalHeatmap
+from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -40,7 +40,7 @@ class TinyLlamaChat:
         self.memory_dir = memory_dir
         self.interrupt_handler = KeyboardInterruptHandler()
         self.stop_event = threading.Event()
-        self.mcp_handler = MCPHandler(output_dir=output_dir)
+        self.mcp_handler = MCPHandler(output_dir=output_dir, allow_shell_commands=True)
         self.confidence_metrics = ConfidenceMetrics()
 
         os.makedirs(memory_dir, exist_ok=True)
@@ -466,7 +466,8 @@ class TinyLlamaChat:
         # Install handler only in main thread
         signal.signal(signal.SIGINT, self._interrupt_handler)
 
-        heatmap = TerminalHeatmap(self.tokenizer, use_background=False)
+        # heatmap = TerminalHeatmap(self.tokenizer, use_background=False)
+        heatmap = EnhancedHeatmap(self.tokenizer, use_background=False, window_size=3)
         token_confidences = []  # To store confidence scores for each token
 
         # Reset confidence metrics
@@ -475,7 +476,10 @@ class TinyLlamaChat:
         if messages and messages[-1]["role"] == "user":
             user_input = messages[-1]["content"]
             cleaned_input, user_commands = self.mcp_handler.extract_mcp_from_user_input(user_input)
-
+            if cleaned_input == "_COMMAND_ONLY_":
+                # This was just a shell command, don't generate a response
+                return ""
+                
             # Replace the original user input with cleaned version
             if user_input != cleaned_input:
                 messages[-1]["content"] = cleaned_input
@@ -633,6 +637,13 @@ class TinyLlamaChat:
                     # Only add displayable tokens to the buffer
                     if display_token and not fallback_message_streamed:
                         # Colorize token if confidence visualization is enabled
+                        # if show_confidence:
+                        #     colored_token = heatmap.colorize_streaming_token(
+                        #         display_token, latest_confidence)
+                        #     token_buffer += colored_token
+                        # else:
+                        #     # Normal display without colorization
+                        #     token_buffer += display_token
                         if show_confidence:
                             colored_token = heatmap.colorize_streaming_token(
                                 display_token, latest_confidence)
@@ -640,6 +651,8 @@ class TinyLlamaChat:
                         else:
                             # Normal display without colorization
                             token_buffer += display_token
+
+                    token_confidences.append(latest_confidence)
 
                     # Check timing
                     current_time = time.time()
@@ -698,6 +711,15 @@ class TinyLlamaChat:
                 # Finalize MCP processing
                 complete_response = self.mcp_handler.finalize_streaming(complete_response)
 
+                if len(user_commands) > 0:
+                    for filename, cmd in user_commands.items():
+                        if cmd.get("action") == "save_response":
+                            success = self.mcp_handler.save_response_to_file(complete_response, filename)
+                            if success:
+                                print(f"[Response saved to: {filename}]")
+                            else:
+                                print(f"[Failed to save response to: {filename}]")
+
                 return complete_response
 
             except Exception as e:
@@ -726,6 +748,11 @@ class TinyLlamaChat:
                 self.confidence_metrics.add_token_score(dummy_logits, 0)
 
             signal.signal(signal.SIGINT, signal.default_int_handler)
+
+        if show_confidence and not self.stop_event.is_set() and not fallback_message_streamed:
+            # Print the legend after the response is complete
+            print()  # Add a newline
+            heatmap.print_legend()
 
     def ensure_metrics(self, response_length=None):
         """
@@ -793,6 +820,70 @@ class TinyLlamaChat:
         # Fallback to using just confidence if other metrics aren't available
         else:
             return confidence
+
+    def format_metric_bar(self, value, min_val=0.0, max_val=1.0, width=20, label="", reverse=False):
+        """
+        Format a metric as a progress bar.
+
+        Args:
+            value: The metric value
+            min_val: Minimum value for the scale
+            max_val: Maximum value for the scale
+            width: Width of the progress bar in characters
+            label: Label for the metric
+            reverse: If True, lower values are better (like perplexity)
+
+        Returns:
+            Formatted string with the metric and progress bar
+        """
+        # Normalize value to 0-1 range
+        normalized = (value - min_val) / (max_val - min_val)
+        normalized = max(0.0, min(1.0, normalized))
+
+        # For reverse metrics (where lower is better), invert the value
+        if reverse:
+            normalized = 1.0 - normalized
+
+        # Calculate filled and empty portions
+        filled_length = int(width * normalized)
+        empty_length = width - filled_length
+
+        # Create the bar
+        bar = "█" * filled_length + "░" * empty_length
+
+        # Format the output
+        return f"[{bar}] {label}: {value:.2f}"
+
+    def print_generation_metrics(self, metrics, generation_time, response_tokens):
+        """
+        Print generation metrics with progress bars.
+
+        Args:
+            metrics: Dictionary of metrics
+            generation_time: Time taken for generation
+            response_tokens: Number of tokens generated
+        """
+        # Calculate tokens per second
+        tokens_per_second = response_tokens / max(0.01, generation_time)
+
+        # Print header
+        print(f"\n[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec]")
+
+        # Quality score (higher is better)
+        quality = metrics.get('quality', 0.0)
+        print(self.format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
+
+        # Confidence (higher is better)
+        confidence = metrics.get('confidence', 0.0)
+        print(self.format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
+
+        # Perplexity (lower is better)
+        perplexity = metrics.get('perplexity', 0.0)
+        print(self.format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
+
+        # Entropy (lower is better)
+        entropy = metrics.get('entropy', 0.0)
+        print(self.format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
 
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
@@ -1023,7 +1114,8 @@ def main():
             # Estimate tokens generated
             try:
                 response_tokens = len(chat.tokenizer.encode(response))
-                tokens_per_second = response_tokens / generation_time
+                # tokens_per_second = response_tokens / generation_time
+                tokens_per_second = response_tokens / max(0.01, generation_time)
                 quality = chat.quality_score(
                     confidence_data.get('confidence', 0),
                     confidence_data.get('perplexity', 0),
@@ -1032,11 +1124,22 @@ def main():
 
                 # print(f"[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f} | Perplexity: {confidence_data['perplexity']:.2f} | Entropy: {confidence_data['entropy']:.2f}]")
 
-                print(f"[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | "
-                  f"Quality: {quality:.2f} | "
-                  f"Confidence: {confidence_data.get('confidence', 0):.2f} | "
-                  f"Perplexity: {confidence_data.get('perplexity', 0):.2f} | "
-                  f"Entropy: {confidence_data.get('entropy', 0):.2f}]")
+                # print(f"[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | "
+                #   f"Quality: {quality:.2f} | "
+                #   f"Confidence: {confidence_data.get('confidence', 0):.2f} | "
+                #   f"Perplexity: {confidence_data.get('perplexity', 0):.2f} | "
+                #   f"Entropy: {confidence_data.get('entropy', 0):.2f}]")
+
+                chat.print_generation_metrics(
+                    {
+                        'quality': quality,
+                        'confidence': confidence_data.get('confidence', 0),
+                        'perplexity': confidence_data.get('perplexity', 0),
+                        'entropy': confidence_data.get('entropy', 0)
+                    },
+                    generation_time,
+                    response_tokens
+                )
             except:
                 # Fallback to maximum tokens estimate
                 if args.max_tokens > 0:
