@@ -106,7 +106,7 @@ To exit the chat, type `exit`.
 
 ## Model Content Protocol (MCP)
 
-TinyLlama Chat supports special commands for directing model outputs to files:
+Local models Chat supports special commands for directing model outputs to files:
 
 ### User-Directed Output
 
@@ -136,7 +136,7 @@ You can execute shell commands (if enabled) using:
 
 ## Memory System
 
-TinyLlama Chat features an advanced memory system:
+Local models Chat features an advanced memory system:
 
 - **Automatic Memorization**: The model automatically saves key information from conversations
 - **Vector Embeddings**: Uses FAISS for efficient similarity search
@@ -159,7 +159,7 @@ Memories are stored in the `./memory` directory and persist between sessions.
 
 ### Speculative Decoding
 
-TinyLlama Chat uses speculative decoding to accelerate generation by:
+Local models Chat uses speculative decoding to accelerate generation by:
 
 1. Creating a reduced-layer "draft" model from the full model
 2. Generating candidate tokens with the faster draft model
