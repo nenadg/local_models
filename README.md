@@ -201,16 +201,28 @@ The confidence system:
 - **Model not found**: Check internet connection, model name spelling
 - **Unexpected hallucinations**: Increase confidence threshold, add corrections
 
+# GPU
+
 If you're experiencing problems with GPU, try these:
 
+```bash
 export HSA_OVERRIDE_GFX_VERSION=10.3.0
 export GPU_MAX_HEAP_SIZE=100
 export GPU_MAX_ALLOC_PERCENT=100
 export GPU_SINGLE_ALLOC_PERCENT=100
 export HSA_ENABLE_SDMA=0
+```
 
 or try running with:
 
 ```bash
 HSA_OVERRIDE_GFX_VERSION=10.3.0 python local_ai.py --temperature 0.4 --max-tokens 512 --heatmap
+```
+
+# ROCm
+
+For ROCm you have to install
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.0
 ```
