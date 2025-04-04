@@ -22,7 +22,8 @@ from logit_capture_processor import TokenProbabilityCaptureProcessor
 from transformers import LogitsProcessor, LogitsProcessorList
 from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
 
-from simple_vector_store import MemoryManager
+# from simple_vector_store import MemoryManager
+from enhanced_memory_store import EnhancedMemoryManager
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -37,7 +38,7 @@ DEFAULT_SYSTEM_MESSAGE = {
 }
 
 class TinyLlamaChat:
-    def __init__(self, model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0", device=None, memory_dir="./memory", output_dir="./output", confidence_threshold=0.7):
+    def __init__(self, model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0", device=None, memory_dir="./memory", output_dir="./output", confidence_threshold=0.7, auto_memorize=True):
         self.model_name = model_name
         self.memory_dir = memory_dir
         self.interrupt_handler = KeyboardInterruptHandler()
@@ -46,7 +47,11 @@ class TinyLlamaChat:
         self.confidence_metrics = ConfidenceMetrics()
 
         # Initialize memory manager
-        self.memory_manager = MemoryManager(memory_dir=memory_dir, device=device)
+        self.memory_manager = EnhancedMemoryManager(
+            memory_dir=memory_dir,
+            device=device,
+            auto_memorize=auto_memorize
+        )
 
         self.current_user_id = "default_user"
 
@@ -193,45 +198,32 @@ class TinyLlamaChat:
         self.save_knowledge()
 
     def create_prompt_with_knowledge(self, messages):
-        """Create a prompt that incorporates relevant knowledge"""
+        """Create a prompt that incorporates relevant knowledge with emphasis on corrections"""
         # Extract the user's current query
         current_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
 
-        # Find relevant knowledge using simple keyword matching
-        relevant_facts = []
-        if current_query:
-            query_words = set(current_query.lower().split())
-            for fact in self.knowledge_base["facts"]:
-                fact_words = set(fact["content"].lower().split())
-                # If there's word overlap, consider the fact relevant
-                if query_words.intersection(fact_words):
-                    relevant_facts.append(fact["content"])
-
-        # Incorporate up to 2 most recently added corrections
-        recent_corrections = [c["content"] for c in self.knowledge_base["corrections"][-2:]]
-
-        # Retrieve relevant memories for this query (new code)
+        # Retrieve relevant memories for this query
         memories = ""
         if current_query:
             memories = self.memory_manager.retrieve_relevant_memories(
-                self.current_user_id, current_query
+                self.current_user_id, current_query, top_k=8  # Increased from default
             )
 
         # Create enhanced system message with knowledge
         enhanced_system_content = self.system_message["content"]
 
         if memories:
-            enhanced_system_content += f"\n\n{memories}"
+            # Add more explicit, direct instructions
+            enhanced_system_content += "\n\nIMPORTANT: You MUST apply the following information in all your responses:"
+            # enhanced_system_content += f"\n{memories}"
 
-        if relevant_facts:
-            enhanced_system_content += "\n\nRelevant information:"
-            for fact in relevant_facts[:2]:  # Limit to 2 relevant facts for speed
-                enhanced_system_content += f"\n- {fact}"
+            # Add a stronger instruction to honor corrections
+            # if "IMPORTANT CORRECTIONS" in memories:
+            #     enhanced_system_content += "\n\nIMPORTANT: You MUST incorporate the following corrections from previous conversations - they override any other information you have:"
+            # else:
+            #     enhanced_system_content += "\n\nRelevant information from our previous conversations:"
 
-        if recent_corrections:
-            enhanced_system_content += "\n\nPlease remember these corrections:"
-            for correction in recent_corrections:
-                enhanced_system_content += f"\n- {correction}"
+            enhanced_system_content += f"\n{memories}"
 
         # Create messages with enhanced system prompt
         enhanced_messages = [
@@ -241,11 +233,65 @@ class TinyLlamaChat:
             }
         ]
 
-        # Add conversation history (limiting to last 3 exchanges)
+        # Add conversation history - keep more history for context
         history_messages = messages[1:] if len(messages) > 1 else []
-        enhanced_messages.extend(history_messages[-3:])
+        enhanced_messages.extend(history_messages[-5:])  # Keep up to 5 recent messages
 
         return enhanced_messages
+    # def create_prompt_with_knowledge(self, messages):
+    #     """Create a prompt that incorporates relevant knowledge"""
+    #     # Extract the user's current query
+    #     current_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
+
+    #     # Find relevant knowledge using simple keyword matching
+    #     relevant_facts = []
+    #     if current_query:
+    #         query_words = set(current_query.lower().split())
+    #         for fact in self.knowledge_base["facts"]:
+    #             fact_words = set(fact["content"].lower().split())
+    #             # If there's word overlap, consider the fact relevant
+    #             if query_words.intersection(fact_words):
+    #                 relevant_facts.append(fact["content"])
+
+    #     # Incorporate up to 2 most recently added corrections
+    #     recent_corrections = [c["content"] for c in self.knowledge_base["corrections"][-2:]]
+
+    #     # Retrieve relevant memories for this query (new code)
+    #     memories = ""
+    #     if current_query:
+    #         memories = self.memory_manager.retrieve_relevant_memories(
+    #             self.current_user_id, current_query
+    #         )
+
+    #     # Create enhanced system message with knowledge
+    #     enhanced_system_content = self.system_message["content"]
+
+    #     if memories:
+    #         enhanced_system_content += f"\n\n{memories}"
+
+    #     if relevant_facts:
+    #         enhanced_system_content += "\n\nRelevant information:"
+    #         for fact in relevant_facts[:2]:  # Limit to 2 relevant facts for speed
+    #             enhanced_system_content += f"\n- {fact}"
+
+    #     if recent_corrections:
+    #         enhanced_system_content += "\n\nPlease remember these corrections:"
+    #         for correction in recent_corrections:
+    #             enhanced_system_content += f"\n- {correction}"
+
+    #     # Create messages with enhanced system prompt
+    #     enhanced_messages = [
+    #         {
+    #             "role": "system",
+    #             "content": enhanced_system_content
+    #         }
+    #     ]
+
+    #     # Add conversation history (limiting to last 3 exchanges)
+    #     history_messages = messages[1:] if len(messages) > 1 else []
+    #     enhanced_messages.extend(history_messages[-3:])
+
+    #     return enhanced_messages
 
     def speculative_decode(self,
                          input_ids: torch.Tensor,
@@ -871,14 +917,15 @@ class TinyLlamaChat:
         # Format the output
         return f"[{bar}] {label}: {value:.2f}"
 
-    def print_generation_metrics(self, metrics, generation_time, response_tokens):
+    def print_generation_metrics(self, metrics, generation_time, response_tokens, show_all_metrics=False):
         """
-        Print generation metrics with progress bars.
+        Print generation metrics with a single 'truthiness' bar or all metrics if toggled.
 
         Args:
             metrics: Dictionary of metrics
             generation_time: Time taken for generation
             response_tokens: Number of tokens generated
+            show_all_metrics: Whether to show all individual metrics
         """
         # Calculate tokens per second
         tokens_per_second = response_tokens / max(0.01, generation_time)
@@ -886,22 +933,41 @@ class TinyLlamaChat:
         # Print header
         print(f"\n[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec]")
 
-        # Quality score (higher is better)
+        # Calculate a combined "truthiness" score
+        # Combine quality, confidence, normalized perplexity and entropy
         quality = metrics.get('quality', 0.0)
-        print(self.format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
-
-        # Confidence (higher is better)
         confidence = metrics.get('confidence', 0.0)
-        print(self.format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
 
-        # Perplexity (lower is better)
+        # For perplexity and entropy, lower is better, so normalize them inversely
         perplexity = metrics.get('perplexity', 0.0)
-        print(self.format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
+        perplexity_score = max(0.0, min(1.0, 1.0 - (perplexity / 10.0)))
 
-        # Entropy (lower is better)
         entropy = metrics.get('entropy', 0.0)
-        print(self.format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
+        entropy_score = max(0.0, min(1.0, 1.0 - (entropy / 3.0)))
 
+        # Combine all metrics with equal weights
+        truthiness = (quality * 0.25) + (confidence * 0.25) + (perplexity_score * 0.25) + (entropy_score * 0.25)
+
+        # Print truthiness bar
+        print(self.format_metric_bar(truthiness, 0.0, 1.0, 30, "Truthiness"))
+
+        # If all metrics are toggled on, show individual metrics
+        if show_all_metrics:
+            print("\nDetailed metrics:")
+            print(self.format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
+            print(self.format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
+            print(self.format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
+            print(self.format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
+
+    def add_conversation_to_memory(self, query, response):
+        """Add the current exchange to memory if auto-memorize is enabled"""
+        memories_added = self.memory_manager.add_memory(
+            self.current_user_id,
+            query,
+            response
+        )
+        if memories_added > 0:
+            print(f"[Memory] Added {memories_added} new memories")
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
     parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
@@ -925,12 +991,17 @@ def main():
                       help="Filter confidence")
     parser.add_argument("--heatmap", action="store_true", default=False,
                    help="Show confidence heatmap visualization")
+    parser.add_argument("--no-memory", action="store_true",
+                  help="Disable automatic memory features")
+    parser.add_argument("--all-metrics", action="store_true", default=False,
+                  help="Show all detailed metrics instead of just truthiness")
 
     args = parser.parse_args()
 
 
     filter_enabled = True  # Add this to track filtering state
     user_context = {}  # Shared context for the ResponseFilter
+    show_all_metrics = args.all_metrics  # Add this to track whether to show all metrics
 
     # Initialize chat with speculative decoding support
     chat = TinyLlamaChat(
@@ -938,7 +1009,8 @@ def main():
         device=args.device,
         memory_dir="./memory",  # Add this explicitly if you want to keep the default
         output_dir=args.output_dir,  # Pass the output_dir parameter here
-        confidence_threshold=args.confidence_threshold
+        confidence_threshold=args.confidence_threshold,
+        auto_memorize=not args.no_memory
     )
 
     response_filter = ResponseFilter(
@@ -982,9 +1054,14 @@ def main():
     print("  !toggle-filter - Toggle uncertainty filtering on/off")
     print("  !confidence: [0.0-1.0] - Set confidence threshold")
     print("  !toggle-heatmap - Toggle confidence heatmap visualization on/off")
-    print("  !memorize - Save the entire conversation to long-term memory")
+    print("  !toggle-all-metrics - Toggle between showing all metrics or just truthiness")
+    print("  !memorize - Force save the entire conversation to memory")
+    print("  !toggle-memory - Toggle automatic memorization on/off")
+    print("  !memory-stats - Display info about memories")
+    print("\n")
     print("\nIf the model expresses uncertainty, you can ask it to speculate")
     print("by saying 'please continue anyway' or 'please speculate'")
+
     print("="*50 + "\n")
 
     # Set initial mode settings
@@ -1001,6 +1078,24 @@ def main():
 
         # Handle special commands
         if user_input.lower() == 'exit':
+            feedback_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+            feedback = input(f"\n{feedback_time} Was this response helpful? (y/n, or provide feedback): ")
+            if feedback.lower() != 'y' and feedback.lower() != 'yes' and feedback.strip():
+                # If the user provided specific feedback, add it to knowledge
+                if len(feedback) > 2:
+                    correction = f"Regarding '{user_input}', remember: {feedback}"
+                    chat.add_to_knowledge(correction, fact_type="correction")
+                    print("Feedback saved as correction. I'll try to do better next time.")
+                else:
+                    print("Sorry the response wasn't helpful.")
+
+            print("Consolidating memories before exit...")
+            chat.memory_manager.consolidate_memories(chat.current_user_id)
+
+            # Show final stats
+            stats = chat.memory_manager.get_stats(chat.current_user_id)
+            print(f"Total memories saved this session: {stats['total_memories']}")
+            break
             break
 
         elif user_input.lower().startswith('!teach:'):
@@ -1053,9 +1148,27 @@ def main():
             print(f"Confidence heatmap {'enabled' if show_confidence else 'disabled'}")
             continue
 
+        elif user_input.lower() == '!toggle-all-metrics':
+            show_all_metrics = not show_all_metrics
+            print(f"Detailed metrics display {'enabled' if show_all_metrics else 'disabled'}")
+            continue
+
         elif user_input.lower() == '!memorize':
-            chat.memory_manager.save_conversation(chat.current_user_id, conversation)
-            print("Conversation saved to long-term memory!")
+            memories_added = chat.memory_manager.save_conversation(chat.current_user_id, conversation)
+            print(f"Conversation saved to long-term memory! Added {memories_added} memories.")
+            continue
+
+        elif user_input.lower() == '!toggle-memory':
+            is_enabled = chat.memory_manager.toggle_auto_memorize()
+            print(f"Automatic memorization {'enabled' if is_enabled else 'disabled'}")
+            continue
+
+        elif user_input.lower() == '!memory-stats':
+            stats = chat.memory_manager.get_stats(chat.current_user_id)
+            print("\nMemory System Statistics:")
+            print(f"Total memories: {stats['total_memories']}")
+            print(f"Auto-memorize: {'Enabled' if stats['auto_memorize'] else 'Disabled'}")
+            print(f"Last consolidation: {stats['last_consolidation']}")
             continue
 
         # Add user message to conversation
@@ -1134,11 +1247,7 @@ def main():
             assistant_message = {"role": "assistant", "content": filtered_response}
             conversation.append(assistant_message)
 
-            chat.memory_manager.add_memory(
-                chat.current_user_id,
-                user_input,
-                response
-            )
+            chat.add_conversation_to_memory(user_input, filtered_response)
 
             # Estimate tokens generated
             try:
@@ -1167,7 +1276,8 @@ def main():
                         'entropy': confidence_data.get('entropy', 0)
                     },
                     generation_time,
-                    response_tokens
+                    response_tokens,
+                    show_all_metrics
                 )
             except:
                 # Fallback to maximum tokens estimate
@@ -1176,17 +1286,17 @@ def main():
                     print(f"[Generated in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f}]")
 
             # Get feedback with timestamp
-            feedback_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-            feedback = input(f"\n{feedback_time} Was this response helpful? (y/n, or provide feedback): ")
+            # feedback_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+            # feedback = input(f"\n{feedback_time} Was this response helpful? (y/n, or provide feedback): ")
             
-            if feedback.lower() != 'y' and feedback.lower() != 'yes' and feedback.strip():
-                # If the user provided specific feedback, add it to knowledge
-                if len(feedback) > 2:
-                    correction = f"Regarding '{user_input}', remember: {feedback}"
-                    chat.add_to_knowledge(correction, fact_type="correction")
-                    print("Feedback saved as correction. I'll try to do better next time.")
-                else:
-                    print("Sorry the response wasn't helpful.")
+            # if feedback.lower() != 'y' and feedback.lower() != 'yes' and feedback.strip():
+            #     # If the user provided specific feedback, add it to knowledge
+            #     if len(feedback) > 2:
+            #         correction = f"Regarding '{user_input}', remember: {feedback}"
+            #         chat.add_to_knowledge(correction, fact_type="correction")
+            #         print("Feedback saved as correction. I'll try to do better next time.")
+            #     else:
+            #         print("Sorry the response wasn't helpful.")
         
         except Exception as e:
             print(f"Error generating response: {e}")

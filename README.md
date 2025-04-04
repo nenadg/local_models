@@ -25,23 +25,23 @@ A lightweight, local LLM chat application with memory capabilities, confidence v
 
 ```bash
 git clone https://github.com/nenadg/local_models.git
-cd tiny-llama-chat
+cd local_models
 ```
 
 ### 2. Create and activate a virtual environment (recommended)
 
 ```bash
-python -m venv venv
+python -m venv local_models_venv
 # On Windows
-venv\Scripts\activate
+local_models_venv\Scripts\activate
 # On Linux/Mac
-source venv/bin/activate
+source local_models_venv/bin/activate
 ```
 
 ### 3. Install dependencies
 
 ```bash
-pip install torch transformers faiss-cpu numpy scikit-learn
+pip install torch transformers faiss-cpu numpy scikit-learn accelerate
 ```
 
 If you have CUDA, install the GPU version of FAISS for better performance:
@@ -200,3 +200,17 @@ The confidence system:
 - **Slow generation**: Enable --turbo mode, use GPU if available
 - **Model not found**: Check internet connection, model name spelling
 - **Unexpected hallucinations**: Increase confidence threshold, add corrections
+
+If you're experiencing problems with GPU, try these:
+
+export HSA_OVERRIDE_GFX_VERSION=10.3.0
+export GPU_MAX_HEAP_SIZE=100
+export GPU_MAX_ALLOC_PERCENT=100
+export GPU_SINGLE_ALLOC_PERCENT=100
+export HSA_ENABLE_SDMA=0
+
+or try running with:
+
+```bash
+HSA_OVERRIDE_GFX_VERSION=10.3.0 python local_ai.py --temperature 0.4 --max-tokens 512 --heatmap
+```
