@@ -459,7 +459,7 @@ class TinyLlamaChat:
             except:
                 pass
 
-    def generate_response(self, messages, max_new_tokens=128, temperature=0.7, stream=True, turbo_mode=True, show_confidence=False):
+    def generate_response(self, messages, max_new_tokens=128, temperature=0.7, stream=True, turbo_mode=True, show_confidence=False, response_filter=None):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
 
         self.stop_event.clear()  # Reset the event
@@ -545,6 +545,13 @@ class TinyLlamaChat:
             max_buffer_size = 16  # Reasonable buffer size
             stop_sequences = ["<|user|>", "<|assistant|>"]
 
+            # Variables to track streaming state
+            tokens_received = 0
+            early_confidence_check_threshold = 10  # Check confidence after this many tokens
+            low_confidence_detected = False
+            fallback_message_streamed = False
+            user_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
+
             try:
                 for token in streamer:
                     # Process stop event more gracefully
@@ -554,6 +561,8 @@ class TinyLlamaChat:
                         complete_response += token
                         print("\n[Generation stopped by user]")
                         break
+
+                    tokens_received += 1
 
                     # Process token for MCP
                     display_token, mcp_buffer = self.mcp_handler.process_streaming_token(token, mcp_buffer)
@@ -570,8 +579,59 @@ class TinyLlamaChat:
                         latest_confidence = 0.8
                         token_confidences.append(latest_confidence)
 
+                    # Check confidence early enough to stop generation if needed
+                    # But only if we have a response filter and after receiving some tokens
+                    if (response_filter is not None and
+                        not low_confidence_detected and
+                        tokens_received >= early_confidence_check_threshold):
+
+                        # Get current metrics
+                        current_metrics = self.confidence_metrics.get_metrics()
+
+                        # Should we show fallback instead of continuing?
+                        if response_filter.should_stream_fallback(current_metrics, user_query):
+                            # Set flag to avoid checking again
+                            low_confidence_detected = True
+
+                            # Set the stop event to interrupt generation
+                            self.stop_event.set()
+
+                            # Display notification about filtering
+                            # print("\n                                           [Response filtered due to low confidence]")
+
+                            # Get fallback message
+                            fallback = response_filter.get_streamable_fallback(user_query)
+
+                            # Stream the fallback message with variable delays to mimic LLM output
+                            # Break into words for more natural streaming
+                            fallback_words = fallback.split()
+
+                            for i, word in enumerate(fallback_words):
+                                # Print the word
+                                print(word, end="", flush=True)
+
+                                # Add space after word (except for last word)
+                                if i < len(fallback_words) - 1:
+                                    print(" ", end="", flush=True)
+
+                                # Variable delays between words
+                                # Occasional longer pauses at punctuation or every few words
+                                if i > 0 and word[-1] in ".,:;?!":
+                                    time.sleep(0.3)  # Longer pause after punctuation
+                                elif i % 3 == 0:
+                                    time.sleep(0.15)  # Medium pause every few words
+                                else:
+                                    time.sleep(0.07)  # Regular pause between words
+
+                            # Mark fallback as streamed
+                            fallback_message_streamed = True
+
+                            # Update complete response with fallback
+                            complete_response = fallback
+                            break
+
                     # Only add displayable tokens to the buffer
-                    if display_token:
+                    if display_token and not fallback_message_streamed:
                         # Colorize token if confidence visualization is enabled
                         if show_confidence:
                             colored_token = heatmap.colorize_streaming_token(
@@ -715,6 +775,24 @@ class TinyLlamaChat:
                 json.dump(conversation, f, indent=2)
         except Exception as e:
             print(f"Error saving conversation: {e}")
+
+    def quality_score(self, confidence, perplexity=None, entropy=None, max_perplexity=10, max_entropy=3, w1=0.4, w2=0.4, w3=0.2):
+         # If all metrics are available
+        if perplexity is not None and entropy is not None:
+            # Use sigmoid function to get better distribution for perplexity
+            perplexity_score = 1 / (1 + np.exp((perplexity - 3) / 0.5))
+
+            # Use sigmoid for entropy too
+            entropy_score = 1 / (1 + np.exp((entropy - 1.5) / 0.3))
+
+            # Adjust confidence to be more critical
+            adjusted_confidence = confidence * 0.8  # Reduce the impact of inflated confidence
+
+            return (w1 * adjusted_confidence) + (w2 * perplexity_score) + (w3 * entropy_score)
+
+        # Fallback to using just confidence if other metrics aren't available
+        else:
+            return confidence
 
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
@@ -888,7 +966,8 @@ def main():
                 max_new_tokens=args.max_tokens,
                 stream=streaming_enabled,
                 turbo_mode=turbo_mode,
-                show_confidence=show_confidence
+                show_confidence=show_confidence,
+                response_filter=response_filter if filter_enabled else None  # Pass the filter only if enabled
             )
 
             # Add a newline after streaming output is complete
@@ -916,7 +995,8 @@ def main():
 
                 # Check if response was filtered and print notification
                 if filtered_response != response:
-                    print("\n                                           [Response filtered due to low confidence]")
+                    response = filtered_response
+
                     # PRINT THE FILTERED RESPONSE HERE with legend
                     if show_confidence:
                         # Show confidence legend and add separator for clarity
@@ -924,11 +1004,6 @@ def main():
                         heatmap.print_legend()
                         print("\nFiltered response:")
 
-                    print(filtered_response)
-                    print("\n")
-
-                    # PRINT THE FILTERED RESPONSE HERE
-                    print(filtered_response)
                 else:
                     # If not filtered, print the original response
                     # (This is already happening in the stream)
@@ -949,7 +1024,19 @@ def main():
             try:
                 response_tokens = len(chat.tokenizer.encode(response))
                 tokens_per_second = response_tokens / generation_time
-                print(f"[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f} | Perplexity: {confidence_data['perplexity']:.2f} | Entropy: {confidence_data['entropy']:.2f}]")
+                quality = chat.quality_score(
+                    confidence_data.get('confidence', 0),
+                    confidence_data.get('perplexity', 0),
+                    confidence_data.get('entropy', 0)
+                )
+
+                # print(f"[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f} | Perplexity: {confidence_data['perplexity']:.2f} | Entropy: {confidence_data['entropy']:.2f}]")
+
+                print(f"[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | "
+                  f"Quality: {quality:.2f} | "
+                  f"Confidence: {confidence_data.get('confidence', 0):.2f} | "
+                  f"Perplexity: {confidence_data.get('perplexity', 0):.2f} | "
+                  f"Entropy: {confidence_data.get('entropy', 0):.2f}]")
             except:
                 # Fallback to maximum tokens estimate
                 if args.max_tokens > 0:
@@ -972,6 +1059,8 @@ def main():
         except Exception as e:
             print(f"Error generating response: {e}")
             print("Please try again with a different question.")
+
+
 
 if __name__ == "__main__":
 

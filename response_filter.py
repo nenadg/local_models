@@ -26,11 +26,12 @@ class ResponseFilter:
 
         # Default fallback messages when low confidence is detected
         self.fallback_messages = fallback_messages or [
-            "I don't know enough about this topic to provide a reliable answer. If you'd like me to speculate anyway, please let me know by saying 'please continue' or 'speculate anyway'.",
-            "I'm not confident in my knowledge about this. I might make mistakes if I answer. If you still want me to try, please say 'continue anyway' or 'please speculate'.",
-            "I don't have enough information to answer this accurately. I could try to speculate if you reply with 'please continue' or 'give it your best guess'.",
-            "I'm not familiar enough with this topic to give a reliable response. If you'd like me to attempt an answer despite my uncertainty, please say 'go ahead anyway'.",
-            "I should acknowledge that I don't have sufficient knowledge on this subject. If you'd still like me to provide my best attempt, please reply with 'please continue'."
+            "... I don't know man, but I've heard some theories about that, if you want me to continue just say 'please continue' or 'speculate anyway'"
+            # "... I don't know enough about this topic to provide a reliable answer. If you'd like me to speculate anyway, please let me know by saying 'please continue' or 'speculate anyway'.",
+            # "... I'm not confident in my knowledge about this. I might make mistakes if I answer. If you still want me to try, please say 'continue anyway' or 'please speculate'.",
+            # "... I don't have enough information to answer this accurately. I could try to speculate if you reply with 'please continue' or 'give it your best guess'.",
+            # "... I'm not familiar enough with this topic to give a reliable response. If you'd like me to attempt an answer despite my uncertainty, please say 'go ahead anyway'.",
+            # "... I should acknowledge that I don't have sufficient knowledge on this subject. If you'd still like me to provide my best attempt, please reply with 'please continue'."
         ]
 
         # Phrases that indicate user wants to continue despite uncertainty
@@ -57,14 +58,16 @@ class ResponseFilter:
         Returns:
             Tuple of (should_filter, reason)
         """
-        if metrics["confidence"] < self.confidence_threshold:
+        # if metrics["confidence"] < self.confidence_threshold:
+        #     return True, "low_confidence"
+
+        # if metrics["entropy"] > self.entropy_threshold:
+        #     return True, "high_entropy"
+
+        # if metrics["perplexity"] > self.perplexity_threshold:
+        #     return True, "high_perplexity"
+        if (metrics["confidence"] < self.confidence_threshold and metrics["entropy"] > self.entropy_threshold and metrics["perplexity"] > self.perplexity_threshold):
             return True, "low_confidence"
-
-        if metrics["entropy"] > self.entropy_threshold:
-            return True, "high_entropy"
-
-        if metrics["perplexity"] > self.perplexity_threshold:
-            return True, "high_perplexity"
 
         return False, "acceptable"
 
@@ -213,3 +216,56 @@ class ResponseFilter:
         """Add a new continuation phrase to the list."""
         if phrase.lower() not in [p.lower() for p in self.continuation_phrases]:
             self.continuation_phrases.append(phrase.lower())
+
+    def should_stream_fallback(self, metrics: Dict[str, float], query: str) -> bool:
+        """
+        Determine if we should stream a fallback message based on metrics.
+
+        Args:
+            metrics: Dictionary containing confidence metrics
+            query: User query for context
+
+        Returns:
+            Boolean indicating whether to stream a fallback
+        """
+        # Check if filtering should occur
+        should_filter, reason = self.should_filter(metrics)
+        if not should_filter:
+            return False
+
+        # Check for override instruction
+        if query and self.check_override_instruction(query):
+            return False
+
+        # Check if this is a follow-up with override
+        if "last_uncertain_query" in self.user_context and query:
+            if self.check_override_instruction(query):
+                return False
+
+        # If we reach here, we should stream a fallback
+        return True
+
+    def get_streamable_fallback(self, query: Optional[str] = None) -> str:
+        """
+        Get a fallback message that can be streamed.
+
+        Args:
+            query: Original query for context
+
+        Returns:
+            Fallback message as a string
+        """
+        # Choose a fallback message
+        import random
+        fallback = random.choice(self.fallback_messages)
+
+        # Add the query topic to the fallback message if available
+        if query:
+            import re
+            topic_match = re.search(r'(?:about|on|regarding)\s+(["\']?[\w\s]+["\']?)', query)
+            if topic_match:
+                topic = topic_match.group(1)
+                fallback = fallback.replace("this topic", f"'{topic}'")
+                fallback = fallback.replace("this subject", f"'{topic}'")
+
+        return fallback
