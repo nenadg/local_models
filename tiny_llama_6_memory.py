@@ -33,6 +33,7 @@ from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
 
 # from simple_vector_store import MemoryManager
 from enhanced_memory_store import EnhancedMemoryManager
+from enhanced_memory_manager_with_sharpening import EnhancedMemoryManagerWithSharpening
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -47,7 +48,7 @@ DEFAULT_SYSTEM_MESSAGE = {
 }
 
 class TinyLlamaChat:
-    def __init__(self, model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0", device=None, memory_dir="./memory", output_dir="./output", confidence_threshold=0.7, auto_memorize=True):
+    def __init__(self, model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0", device=None, memory_dir="./memory", output_dir="./output", confidence_threshold=0.7, auto_memorize=True,  enable_sharpening=True, sharpening_factor=0.3):
         self.model_name = model_name
         self.memory_dir = memory_dir
         self.interrupt_handler = KeyboardInterruptHandler()
@@ -56,10 +57,12 @@ class TinyLlamaChat:
         self.confidence_metrics = ConfidenceMetrics()
 
         # Initialize memory manager
-        self.memory_manager = EnhancedMemoryManager(
+        self.memory_manager = EnhancedMemoryManagerWithSharpening(
             memory_dir=memory_dir,
             device=device,
-            auto_memorize=auto_memorize
+            auto_memorize=auto_memorize,
+            sharpening_enabled=enable_sharpening,
+            sharpening_factor=sharpening_factor
         )
 
         self.current_user_id = "default_user"
@@ -992,37 +995,37 @@ class TinyLlamaChat:
         print(self.format_metric_bar(truthiness, 0.0, 1.0, 30, "Truthiness"))
 
         # If all metrics are toggled on, show individual metrics
-        if show_all_metrics:
-            print("\nDetailed metrics:")
-            print(self.format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
-            print(self.format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
-            print(self.format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
-            print(self.format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
-        # # If all metrics are toggled on, show individual metrics
         # if show_all_metrics:
         #     print("\nDetailed metrics:")
-        #     print(format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
+        #     print(self.format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
+        #     print(self.format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
+        #     print(self.format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
+        #     print(self.format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
 
-        #     # Show confidence with comparison if available
-        #     if has_sharpening:
-        #         orig_conf = metrics["original"]["confidence"]
-        #         print(format_metric_bar(confidence, 0.0, 1.0, 20,
-        #                                f"Confidence (was {orig_conf:.2f})"))
-        #     else:
-        #         print(format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
+        if show_all_metrics:
+            print("\nDetailed metrics:")
+            print(format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
 
-        #     # Show other metrics with comparison
-        #     if has_sharpening:
-        #         orig_perp = metrics["original"]["perplexity"]
-        #         print(format_metric_bar(perplexity, 1.0, 10.0, 20,
-        #                                f"Perplexity (was {orig_perp:.2f})", reverse=True))
+            # Show confidence with comparison if available
+            if has_sharpening:
+                orig_conf = metrics["original"]["confidence"]
+                print(format_metric_bar(confidence, 0.0, 1.0, 20,
+                                       f"Confidence (was {orig_conf:.2f})"))
+            else:
+                print(format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
 
-        #         orig_entropy = metrics["original"]["entropy"]
-        #         print(format_metric_bar(entropy, 0.0, 3.0, 20,
-        #                                f"Entropy (was {orig_entropy:.2f})", reverse=True))
-        #     else:
-        #         print(format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
-        #         print(format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
+            # Show other metrics with comparison
+            if has_sharpening:
+                orig_perp = metrics["original"]["perplexity"]
+                print(format_metric_bar(perplexity, 1.0, 10.0, 20,
+                                       f"Perplexity (was {orig_perp:.2f})", reverse=True))
+
+                orig_entropy = metrics["original"]["entropy"]
+                print(format_metric_bar(entropy, 0.0, 3.0, 20,
+                                       f"Entropy (was {orig_entropy:.2f})", reverse=True))
+            else:
+                print(format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
+                print(format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
 
     def add_conversation_to_memory(self, query, response):
         """Add the current exchange to memory if auto-memorize is enabled"""
@@ -1098,6 +1101,12 @@ class TinyLlamaChat:
 
         return False
 
+    def toggle_sharpening(self):
+        """Toggle vector space sharpening on/off"""
+        return self.memory_manager.toggle_sharpening()
+
+
+
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
     parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
@@ -1125,6 +1134,11 @@ def main():
                   help="Disable automatic memory features")
     parser.add_argument("--all-metrics", action="store_true", default=False,
                   help="Show all detailed metrics instead of just truthiness")
+    parser.add_argument("--enable-sharpening", action="store_true", default=True,
+                      help="Enable vector space and confidence sharpening")
+    parser.add_argument("--sharpening-factor", type=float, default=0.3,
+                      help="Sharpening factor for vector embeddings (0.0-1.0)")
+
 
     args = parser.parse_args()
 
@@ -1140,7 +1154,9 @@ def main():
         memory_dir="./memory",  # Add this explicitly if you want to keep the default
         output_dir=args.output_dir,  # Pass the output_dir parameter here
         confidence_threshold=args.confidence_threshold,
-        auto_memorize=not args.no_memory
+        auto_memorize=not args.no_memory,
+        enable_sharpening=args.enable_sharpening,
+        sharpening_factor=args.sharpening_factor
     )
 
     response_filter = ResponseFilter(
@@ -1185,6 +1201,8 @@ def main():
     print("  !confidence: [0.0-1.0] - Set confidence threshold")
     print("  !toggle-heatmap - Toggle confidence heatmap visualization on/off")
     print("  !toggle-all-metrics - Toggle between showing all metrics or just truthiness")
+    print("  !toggle-sharpening - Toggle vector space sharpening on/off")
+    print("  !sharpening-factor: [0.0-1.0] - Set the sharpening factor for vector embeddings")
     print("  !memorize - Force save the entire conversation to memory")
     print("  !toggle-memory - Toggle automatic memorization on/off")
     print("  !memory-stats - Display info about memories")
@@ -1281,6 +1299,22 @@ def main():
         elif user_input.lower() == '!toggle-all-metrics':
             show_all_metrics = not show_all_metrics
             print(f"Detailed metrics display {'enabled' if show_all_metrics else 'disabled'}")
+            continue
+        elif user_input.lower() == '!toggle-sharpening':
+            is_enabled = chat.toggle_sharpening()
+            print(f"Vector space sharpening {'enabled' if is_enabled else 'disabled'}")
+            continue
+
+        elif user_input.lower().startswith('!sharpening-factor:'):
+            try:
+                factor = float(user_input.split(':')[1].strip())
+                if 0.0 <= factor <= 1.0:
+                    chat.set_sharpening_factor(factor)
+                    print(f"Sharpening factor set to {factor}")
+                else:
+                    print("Sharpening factor must be between 0.0 and 1.0")
+            except:
+                print("Invalid value. Please specify a number between 0.0 and 1.0")
             continue
 
         elif user_input.lower() == '!memorize':

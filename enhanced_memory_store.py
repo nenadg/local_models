@@ -2,7 +2,7 @@ import os
 import json
 import numpy as np
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple, Set
+from typing import List, Dict, Any, Optional, Tuple, Set, Callable
 import torch
 from transformers import AutoTokenizer, AutoModel
 import re
@@ -17,10 +17,13 @@ class IndexedVectorStore:
     A vector store using FAISS for efficient similarity search.
     Supports memory consolidation and deduplication.
     """
-    def __init__(self, storage_path: str = "./memory/vector_store"):
+    def __init__(self, storage_path: str = "./memory/vector_store", embedding_function: Optional[Callable] = None):
         self.storage_path = storage_path
         self.index_path = f"{storage_path}.index"
         self.data_path = f"{storage_path}.pkl"
+
+        # Store the embedding function
+        self.embedding_function = embedding_function
 
         # Document storage
         self.documents = []
@@ -188,16 +191,12 @@ class IndexedVectorStore:
               print(f"Rebuilding index with {len(new_docs)} documents (removed {doc_count - len(new_docs)})")
 
               # Generate new embeddings for all kept documents
-              # NOTE: This assumes we have access to an embedding function
-              # If this is not available, this approach won't work
-
-              # Create a temporary replacement in-memory index
-              if hasattr(self, 'generate_embedding'):
-                  # If the class has a generate_embedding method, use it
+              if self.embedding_function is not None:
+                  # If the embedding function is available, use it
                   new_embeddings = np.zeros((len(new_docs), self.embedding_dim), dtype=np.float32)
                   for i, doc in enumerate(new_docs):
-                      # This assumes generate_embedding is available
-                      embedding = self.generate_embedding(doc)
+                      # Use the provided embedding function
+                      embedding = self.embedding_function(doc)
                       new_embeddings[i] = embedding / np.linalg.norm(embedding)  # Normalize
 
                   # Create new index
@@ -217,6 +216,37 @@ class IndexedVectorStore:
               else:
                   print("Cannot rebuild index - no embedding function available")
                   return False
+
+              # Generate new embeddings for all kept documents
+              # NOTE: This assumes we have access to an embedding function
+              # If this is not available, this approach won't work
+
+              # # Create a temporary replacement in-memory index
+              # if hasattr(self, 'generate_embedding'):
+              #     # If the class has a generate_embedding method, use it
+              #     new_embeddings = np.zeros((len(new_docs), self.embedding_dim), dtype=np.float32)
+              #     for i, doc in enumerate(new_docs):
+              #         # This assumes generate_embedding is available
+              #         embedding = self.generate_embedding(doc)
+              #         new_embeddings[i] = embedding / np.linalg.norm(embedding)  # Normalize
+
+              #     # Create new index
+              #     new_index = faiss.IndexFlatIP(self.embedding_dim)
+              #     if len(new_embeddings) > 0:
+              #         new_index.add(new_embeddings)
+
+              #     # Update instance variables
+              #     self.index = new_index
+              #     self.documents = new_docs
+              #     self.metadata = new_metadata
+              #     self.doc_hashes = new_hashes
+
+              #     # Save changes
+              #     self.save()
+              #     return True
+              # else:
+              #     print("Cannot rebuild index - no embedding function available")
+              #     return False
 
           return False
 
@@ -407,7 +437,7 @@ class EnhancedMemoryManager:
         """Get or create a vector store for a user"""
         if user_id not in self.user_stores:
             store_path = os.path.join(self.memory_dir, f"{user_id}_store")
-            self.user_stores[user_id] = IndexedVectorStore(store_path)
+            self.user_stores[user_id] = IndexedVectorStore(store_path, embedding_function=self.generate_embedding)
         return self.user_stores[user_id]
 
     def generate_embedding(self, text: str) -> np.ndarray:

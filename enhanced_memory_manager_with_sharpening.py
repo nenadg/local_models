@@ -34,13 +34,16 @@ class EnhancedMemoryManagerWithSharpening(EnhancedMemoryManager):
         if user_id not in self.user_stores:
             store_path = os.path.join(self.memory_dir, f"{user_id}_store")
             store = super()._get_user_store(user_id)
-            
+
             # Extend store with sharpening capabilities
             sharpening_store = SharpenedVectorStore()
-            
+
             # Enhance the store's search method with sharpening
             original_search = store.search
-            store.search = sharpening_store.update_search_with_sharpening(original_search)
+            store.search = sharpening_store.update_search_with_sharpening(
+                original_search,
+                sharpening_factor=self.sharpening_factor
+            )
             
             # Add sharpening methods directly to store
             store.sharpen_embeddings = sharpening_store.sharpen_embeddings
@@ -112,5 +115,29 @@ class EnhancedMemoryManagerWithSharpening(EnhancedMemoryManager):
         return self.sharpening_enabled
         
     def set_sharpening_factor(self, factor: float) -> None:
-        """Set the sharpening factor (0-1)"""
+        """
+        Set the sharpening factor (0-1) and update existing stores
+
+        Args:
+            factor: New sharpening factor between 0 and 1
+        """
         self.sharpening_factor = max(0.0, min(1.0, factor))
+
+        # Update all existing stores with the new sharpening factor
+        for user_id, store in self.user_stores.items():
+            # Get the original search method (before our enhancement)
+            if hasattr(store, 'original_search'):
+                original_search = store.original_search
+            else:
+                # Store the original search method for future reference
+                original_search = store.search
+                store.original_search = original_search
+
+            # Create a new sharpening store with updated factor
+            sharpening_store = SharpenedVectorStore()
+
+            # Replace the search method with the updated one
+            store.search = sharpening_store.update_search_with_sharpening(
+                original_search,
+                sharpening_factor=self.sharpening_factor
+            )
