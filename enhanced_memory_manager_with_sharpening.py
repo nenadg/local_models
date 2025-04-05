@@ -110,46 +110,24 @@ class EnhancedMemoryManagerWithSharpening(EnhancedMemoryManager):
         if corrections:
             memory_text += "IMPORTANT CORRECTIONS (You MUST apply these):\n"
             for i, result in enumerate(corrections):
-                improvement = ""
-                if 'original_similarity' in result and apply_sharpening:
-                    original = result.get('original_similarity', 0)
-                    sharpened = result.get('similarity', 0)
-                    if original > 0:  # Avoid division by zero
-                        change = ((sharpened - original) / original) * 100
-                        if abs(change) > 1:
-                            improvement = f" (relevance {'increased' if change > 0 else 'decreased'} by {abs(change):.1f}%)"
-                memory_text += f"- {result['text']}{improvement}\n"
+                # REMOVE the improvement text that was showing up in responses
+                memory_text += f"- {result['text']}\n"
             memory_text += "\n"
 
         if factual_info:
             memory_text += "FACTUAL INFORMATION:\n"
             for i, result in enumerate(factual_info):
-                improvement = ""
-                if 'original_similarity' in result and apply_sharpening:
-                    original = result.get('original_similarity', 0)
-                    sharpened = result.get('similarity', 0)
-                    if original > 0:  # Avoid division by zero
-                        change = ((sharpened - original) / original) * 100
-                        if abs(change) > 1:
-                            improvement = f" (relevance {'increased' if change > 0 else 'decreased'} by {abs(change):.1f}%)"
-                memory_text += f"- {result['text']}{improvement}\n"
+                # REMOVE the improvement text
+                memory_text += f"- {result['text']}\n"
             memory_text += "\n"
 
         if general_info and (not corrections or not factual_info):
             memory_text += "OTHER RELEVANT INFORMATION:\n"
             for i, result in enumerate(general_info):
-                improvement = ""
-                if 'original_similarity' in result and apply_sharpening:
-                    original = result.get('original_similarity', 0)
-                    sharpened = result.get('similarity', 0)
-                    if original > 0:  # Avoid division by zero
-                        change = ((sharpened - original) / original) * 100
-                        if abs(change) > 1:
-                            improvement = f" (relevance {'increased' if change > 0 else 'decreased'} by {abs(change):.1f}%)"
-                memory_text += f"- {result['text']}{improvement}\n"
+                # REMOVE the improvement text
+                memory_text += f"- {result['text']}\n"
 
         return memory_text
-
     def toggle_sharpening(self) -> bool:
         """Toggle vector space sharpening on/off"""
         self.sharpening_enabled = not self.sharpening_enabled

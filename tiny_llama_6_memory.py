@@ -6,7 +6,7 @@ import time
 import sys
 import threading
 import signal
-
+import re
 
 import argparse
 from typing import Dict, Any
@@ -27,6 +27,8 @@ from response_filter import ResponseFilter
 from enhanced_memory_manager_with_sharpening import EnhancedMemoryManagerWithSharpening
 from enhanced_memory_store import EnhancedMemoryManager
 from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
+from question_classifier import QuestionClassifier
+from weighted_memory_integrator import WeightedMemoryIntegrator
 
 
 # Default system message with uncertainty guidelines
@@ -42,7 +44,7 @@ DEFAULT_SYSTEM_MESSAGE = {
 }
 
 class TinyLlamaChat:
-    def __init__(self, model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0", device=None, memory_dir="./memory", output_dir="./output", confidence_threshold=0.7, auto_memorize=True,  enable_sharpening=True, sharpening_factor=0.3):
+    def __init__(self, model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0", device=None, memory_dir="./memory", output_dir="./output", confidence_threshold=0.7, auto_memorize=True, enable_sharpening=True, sharpening_factor=0.3):
         self.model_name = model_name
         self.memory_dir = memory_dir
         self.interrupt_handler = KeyboardInterruptHandler()
@@ -59,12 +61,21 @@ class TinyLlamaChat:
             sharpening_factor=sharpening_factor
         )
 
+        # Initialize the question classifier
+        self.question_classifier = QuestionClassifier()
+
+        # Initialize the weighted memory integrator
+        self.memory_integrator = WeightedMemoryIntegrator(
+            memory_manager=self.memory_manager,
+            question_classifier=self.question_classifier
+        )
+
         self.current_user_id = "default_user"
 
         os.makedirs(memory_dir, exist_ok=True)
 
         current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-        print(f"{current_time} let's go")
+
         # Determine the device to use
         if device:
             self.device = device
@@ -204,32 +215,34 @@ class TinyLlamaChat:
         self.save_knowledge()
 
     def create_prompt_with_knowledge(self, messages):
-        """Create a prompt that incorporates relevant knowledge with emphasis on corrections"""
+        """Create a prompt that incorporates relevant knowledge with domain-aware weighting"""
         # Extract the user's current query
         current_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
-
-        # Retrieve relevant memories for this query
-        memories = ""
-        if current_query:
-            memories = self.memory_manager.retrieve_relevant_memories(
-                self.current_user_id, current_query, top_k=8  # Increased from default
-            )
 
         # Create enhanced system message with knowledge
         enhanced_system_content = self.system_message["content"]
 
-        if memories:
-            # Add more explicit, direct instructions
-            enhanced_system_content += "\n\nIMPORTANT: You MUST apply the following information in all your responses:"
-            # enhanced_system_content += f"\n{memories}"
+        # Use the weighted memory integrator for domain-aware memory retrieval
+        if current_query:
+            result = self.memory_integrator.retrieve_and_integrate(
+                self.current_user_id,
+                current_query
+            )
 
-            # Add a stronger instruction to honor corrections
-            # if "IMPORTANT CORRECTIONS" in memories:
-            #     enhanced_system_content += "\n\nIMPORTANT: You MUST incorporate the following corrections from previous conversations - they override any other information you have:"
-            # else:
-            #     enhanced_system_content += "\n\nRelevant information from our previous conversations:"
+            memories = result['memory_text']
+            settings = result['settings']
 
-            enhanced_system_content += f"\n{memories}"
+            # Log domain detection for debugging
+            domain = settings['domain']
+            confidence = settings['domain_confidence']
+            if domain != 'unknown':
+                print(f"[Domain Detection] Query type: {domain} (confidence: {confidence:.2f})")
+                print(f"[Memory Settings] Weight: {settings['memory_weight']}, Sharpening: {settings['sharpening_factor']}")
+
+            if memories:
+                # Add more explicit, direct instructions
+                enhanced_system_content += "\n\nIMPORTANT: You MUST apply the following information in all your responses:"
+                enhanced_system_content += f"\n{memories}"
 
         # Create messages with enhanced system prompt
         enhanced_messages = [
@@ -244,60 +257,45 @@ class TinyLlamaChat:
         enhanced_messages.extend(history_messages[-5:])  # Keep up to 5 recent messages
 
         return enhanced_messages
-    # def create_prompt_with_knowledge(self, messages):
-    #     """Create a prompt that incorporates relevant knowledge"""
-    #     # Extract the user's current query
-    #     current_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
 
-    #     # Find relevant knowledge using simple keyword matching
-    #     relevant_facts = []
-    #     if current_query:
-    #         query_words = set(current_query.lower().split())
-    #         for fact in self.knowledge_base["facts"]:
-    #             fact_words = set(fact["content"].lower().split())
-    #             # If there's word overlap, consider the fact relevant
-    #             if query_words.intersection(fact_words):
-    #                 relevant_facts.append(fact["content"])
+    def get_domain_specific_generation_config(self, query, base_config):
+        """
+        Get domain-specific generation configuration.
 
-    #     # Incorporate up to 2 most recently added corrections
-    #     recent_corrections = [c["content"] for c in self.knowledge_base["corrections"][-2:]]
+        Args:
+            query: The user query
+            base_config: The base generation configuration
 
-    #     # Retrieve relevant memories for this query (new code)
-    #     memories = ""
-    #     if current_query:
-    #         memories = self.memory_manager.retrieve_relevant_memories(
-    #             self.current_user_id, current_query
-    #         )
+        Returns:
+            Modified configuration dictionary
+        """
+        # Get domain settings from the classifier
+        settings = self.question_classifier.get_domain_settings(query)
+        domain = settings['domain']
 
-    #     # Create enhanced system message with knowledge
-    #     enhanced_system_content = self.system_message["content"]
+        # Create a copy of the base configuration
+        config = base_config.copy()
 
-    #     if memories:
-    #         enhanced_system_content += f"\n\n{memories}"
+        # Apply domain-specific adjustments
+        if domain == 'arithmetic':
+            # More deterministic for math
+            config['temperature'] = min(config.get('temperature', 0.7), 0.3)
+            config['top_p'] = 0.85
 
-    #     if relevant_facts:
-    #         enhanced_system_content += "\n\nRelevant information:"
-    #         for fact in relevant_facts[:2]:  # Limit to 2 relevant facts for speed
-    #             enhanced_system_content += f"\n- {fact}"
+        elif domain == 'translation':
+            # More deterministic for translations too
+            config['temperature'] = min(config.get('temperature', 0.7), 0.4)
+            config['top_p'] = 0.9
 
-    #     if recent_corrections:
-    #         enhanced_system_content += "\n\nPlease remember these corrections:"
-    #         for correction in recent_corrections:
-    #             enhanced_system_content += f"\n- {correction}"
+        elif domain == 'factual':
+            # Slightly more deterministic for facts
+            config['temperature'] = min(config.get('temperature', 0.7), 0.5)
 
-    #     # Create messages with enhanced system prompt
-    #     enhanced_messages = [
-    #         {
-    #             "role": "system",
-    #             "content": enhanced_system_content
-    #         }
-    #     ]
+        elif domain == 'conceptual' or domain == 'procedural':
+            # More creative for concepts and procedures
+            config['temperature'] = max(config.get('temperature', 0.7), 0.6)
 
-    #     # Add conversation history (limiting to last 3 exchanges)
-    #     history_messages = messages[1:] if len(messages) > 1 else []
-    #     enhanced_messages.extend(history_messages[-3:])
-
-    #     return enhanced_messages
+        return config
 
     def speculative_decode(self,
                          input_ids: torch.Tensor,
@@ -545,6 +543,7 @@ class TinyLlamaChat:
         if messages and messages[-1]["role"] == "user":
             user_input = messages[-1]["content"]
             cleaned_input, user_commands = self.mcp_handler.extract_mcp_from_user_input(user_input)
+
             if cleaned_input == "_COMMAND_ONLY_":
                 # This was just a shell command, don't generate a response
                 return ""
@@ -601,6 +600,10 @@ class TinyLlamaChat:
                 "eos_token_id": self.tokenizer.eos_token_id,
                 "use_cache": True
             }
+
+            if messages and messages[-1]["role"] == "user":
+                user_query = messages[-1]["content"]
+                generation_config = self.get_domain_specific_generation_config(user_query, generation_config)
 
             # Start generation in background
             thread = Thread(target=self.generate_speculative, args=(input_ids, streamer, max_new_tokens, generation_config, turbo_mode))
@@ -774,6 +777,17 @@ class TinyLlamaChat:
                         dummy_logits[i % 100] = confidence_val
                         self.confidence_metrics.add_token_score(dummy_logits, i % 100)
 
+                # Get domain information if available
+                domain = None
+                settings = None
+                if hasattr(self, 'question_classifier') and messages[-1]["role"] == "user":
+                    user_query = messages[-1]["content"]
+                    settings = self.question_classifier.get_domain_settings(user_query)
+                    domain = settings['domain']
+
+                # Apply post-processing to clean up the response
+                complete_response = self.post_process_response(complete_response, user_query, domain)
+
                 # Finalize MCP processing
                 complete_response = self.mcp_handler.finalize_streaming(complete_response)
 
@@ -819,6 +833,7 @@ class TinyLlamaChat:
             # Print the legend after the response is complete
             print()  # Add a newline
             heatmap.print_legend()
+
     def ensure_metrics(self, response_length=None):
         """
         Ensure confidence metrics exist with reasonable values.
@@ -919,6 +934,9 @@ class TinyLlamaChat:
         # Format the output
         return f"[{bar}] {label}: {value:.2f}"
 
+    # This patch fixes the sharpening metrics display issue in tiny_llama_6_memory.py
+    # Add this to the print_generation_metrics function in the TinyLlamaChat class
+
     def print_generation_metrics(self, metrics, generation_time, response_tokens, show_all_metrics=False):
         """
         Print generation metrics with sharpening information if available.
@@ -935,21 +953,41 @@ class TinyLlamaChat:
         # Print header
         print(f"\n[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec]")
 
-        # Check if we have original metrics for comparison
-        has_sharpening = "original" in metrics and "enhancement" in metrics
+        # Get confidence metrics with sharpening applied
+        confidence_data = self.confidence_metrics.get_metrics(apply_sharpening=self.memory_manager.sharpening_enabled)
 
-        # Calculate a combined "truthiness" score
-        quality = metrics.get('quality', 0.0)
-        confidence = metrics.get('confidence', 0.0)
+        # Check if we have original metrics for comparison (this is where the bug was)
+        has_sharpening = "original" in confidence_data and self.memory_manager.sharpening_enabled
+
+        # Get the metrics from the right source
+        if has_sharpening:
+            # We have both sharpened and original metrics
+            sharpened = {
+                'confidence': confidence_data.get('confidence', 0.0),
+                'perplexity': confidence_data.get('perplexity', 0.0),
+                'entropy': confidence_data.get('entropy', 0.0)
+            }
+            original = confidence_data['original']
+            enhancement = confidence_data.get('enhancement', 0.0)
+        else:
+            # Just use the metrics provided
+            sharpened = metrics
+            original = None
+            enhancement = None
+
+        # Calculate quality score using either provided or confidence_data values
+        confidence = sharpened.get('confidence', metrics.get('confidence', 0.0))
+        perplexity = sharpened.get('perplexity', metrics.get('perplexity', 0.0))
+        entropy = sharpened.get('entropy', metrics.get('entropy', 0.0))
 
         # For perplexity and entropy, lower is better, so normalize them inversely
-        perplexity = metrics.get('perplexity', 0.0)
         perplexity_score = max(0.0, min(1.0, 1.0 - (perplexity / 10.0)))
-
-        entropy = metrics.get('entropy', 0.0)
         entropy_score = max(0.0, min(1.0, 1.0 - (entropy / 3.0)))
 
-        # Combine all metrics with equal weights
+        # Combine all metrics with equal weights to get quality
+        quality = metrics.get('quality', (confidence * 0.25) + (perplexity_score * 0.25) + (entropy_score * 0.25) + 0.25)
+
+        # Combine all metrics with equal weights for truthiness
         truthiness = (quality * 0.25) + (confidence * 0.25) + (perplexity_score * 0.25) + (entropy_score * 0.25)
 
         # If all metrics are toggled on, show individual metrics
@@ -959,19 +997,19 @@ class TinyLlamaChat:
 
             # Show confidence with comparison if available
             if has_sharpening:
-                orig_conf = metrics["original"]["confidence"]
+                orig_conf = original["confidence"]
                 print(self.format_metric_bar(confidence, 0.0, 1.0, 20,
-                                       f"Confidence (was {orig_conf:.2f})"))
+                                       f"Confidence (was {orig_conf:.2f}, {enhancement:+.1f}%)"))
             else:
                 print(self.format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
 
             # Show other metrics with comparison
             if has_sharpening:
-                orig_perp = metrics["original"]["perplexity"]
+                orig_perp = original["perplexity"]
                 print(self.format_metric_bar(perplexity, 1.0, 10.0, 20,
                                        f"Perplexity (was {orig_perp:.2f})", reverse=True))
 
-                orig_entropy = metrics["original"]["entropy"]
+                orig_entropy = original["entropy"]
                 print(self.format_metric_bar(entropy, 0.0, 3.0, 20,
                                        f"Entropy (was {orig_entropy:.2f})", reverse=True))
             else:
@@ -980,6 +1018,10 @@ class TinyLlamaChat:
 
         # Print truthiness bar
         print(self.format_metric_bar(truthiness, 0.0, 1.0, 30, "Truthiness"))
+
+        # Show sharpening status if enabled
+        if self.memory_manager.sharpening_enabled:
+            print(f"[Sharpening enabled: factor={self.memory_manager.sharpening_factor:.2f}]")
 
     def add_conversation_to_memory(self, query, response):
         """Add the current exchange to memory if auto-memorize is enabled"""
@@ -1045,6 +1087,129 @@ class TinyLlamaChat:
         self.memory_manager.set_sharpening_factor(factor)
 
         print(f"Sharpening factor set to {factor}")
+
+    def post_process_response(self, response, query, domain=None):
+        """
+        Clean up the response after generation.
+
+        Args:
+            response: The generated response text
+            query: The user query
+            domain: The detected domain (if available)
+
+        Returns:
+            Cleaned response text
+        """
+        if not response:
+            return response
+
+        # If domain wasn't provided, try to detect it
+        if domain is None and hasattr(self, 'question_classifier'):
+            domain, _ = self.question_classifier.classify(query)
+
+        # Apply domain-specific post-processing
+        if domain == 'translation':
+            # Clean up translation responses
+            return self._clean_translation_response(response, query)
+        elif domain == 'arithmetic':
+            # Clean up arithmetic responses
+            return self._clean_arithmetic_response(response, query)
+
+        # General cleanup for all responses
+        return self._clean_general_response(response)
+
+    def _clean_translation_response(self, response, query):
+        """Clean up translation responses"""
+        # Extract the core translation from verbose responses
+        first_line = response.split('\n')[0].strip()
+
+        # If the response has notes or explanations, keep only the essential part
+        if len(response.split('\n')) > 1:
+            # Use regex to find the translation pattern
+            match = re.search(r'["\'«]([^"\'»]+)["\'\»]\s+(?:in|en|na|в|på)\s+\w+', first_line)
+            if match:
+                translation = match.group(1).strip()
+                # Return a cleaner version
+                lang_match = re.search(r'(?:in|to|into)\s+(\w+)', query)
+                if lang_match:
+                    language = lang_match.group(1)
+                    return f'"{translation}" in {language}'
+
+        # Remove duplicated text like "Prikaz:" and redundant notes
+        response = re.sub(r'Prikaz:\s*-\s*', '', response)
+        response = re.sub(r'(?:Note|Примечание):\s*"[^"]+"\s+(?:may|peut|puede|может|kan).*?$', '', response, flags=re.MULTILINE)
+
+        # Remove duplicated translations
+        lines = response.split('\n')
+        unique_lines = []
+        seen = set()
+        for line in lines:
+            # Create a simplified key for comparison
+            simplified = re.sub(r'[^\w\s]', '', line.lower())
+            if simplified and simplified not in seen:
+                seen.add(simplified)
+                unique_lines.append(line)
+
+        return '\n'.join(unique_lines)
+
+    def _clean_arithmetic_response(self, response, query):
+        """Clean up arithmetic responses"""
+        # Extract the expression from the query
+        expression = None
+        if hasattr(self, 'memory_integrator'):
+            expression = self.memory_integrator._extract_arithmetic_expression(query)
+
+        if not expression:
+            # Try a simple regex fallback
+            match = re.search(r'(\d+\s*[\+\-\*\/]\s*\d+)', query)
+            if match:
+                expression = match.group(1).replace(' ', '')
+
+        if expression:
+            # Calculate the correct result
+            try:
+                correct_result = eval(expression)
+
+                # Check if the response has the correct result
+                if str(correct_result) not in response:
+                    # Replace with correct calculation
+                    return f"The result of {expression} is {correct_result}."
+
+                # If it has the correct result, just clean up any verbose explanations
+                match = re.search(r'.*?(\d+\s*[\+\-\*\/]\s*\d+).*?(\d+)', response)
+                if match:
+                    return f"The result of {expression} is {correct_result}."
+            except:
+                pass
+
+        return response
+
+    def _clean_general_response(self, response):
+        """General cleanup for all responses"""
+        # Remove repeated sections
+        lines = response.split('\n')
+        unique_lines = []
+        seen = set()
+
+        for line in lines:
+            # Skip empty lines
+            if not line.strip():
+                unique_lines.append(line)
+                continue
+
+            # Create a simplified key for comparison
+            simplified = re.sub(r'[^\w\s]', '', line.lower())
+            if simplified and simplified not in seen:
+                seen.add(simplified)
+                unique_lines.append(line)
+
+        cleaned = '\n'.join(unique_lines)
+
+        # Remove any debugging information that might have leaked
+        cleaned = re.sub(r'(?:relevance|similarity)\s+(?:increased|decreased)\s+by\s+[\d\.]+%.*?$', '', cleaned, flags=re.MULTILINE)
+
+        return cleaned
+
 
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
@@ -1360,21 +1525,14 @@ def main():
                     confidence_data.get('entropy', 0)
                 )
 
-                # print(f"[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f} | Perplexity: {confidence_data['perplexity']:.2f} | Entropy: {confidence_data['entropy']:.2f}]")
-
-                # print(f"[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | "
-                #   f"Quality: {quality:.2f} | "
-                #   f"Confidence: {confidence_data.get('confidence', 0):.2f} | "
-                #   f"Perplexity: {confidence_data.get('perplexity', 0):.2f} | "
-                #   f"Entropy: {confidence_data.get('entropy', 0):.2f}]")
-
                 chat.print_generation_metrics(
-                    {
-                        'quality': quality,
-                        'confidence': confidence_data.get('confidence', 0),
-                        'perplexity': confidence_data.get('perplexity', 0),
-                        'entropy': confidence_data.get('entropy', 0)
-                    },
+                    # {
+                    #     'quality': quality,
+                    #     'confidence': confidence_data.get('confidence', 0),
+                    #     'perplexity': confidence_data.get('perplexity', 0),
+                    #     'entropy': confidence_data.get('entropy', 0)
+                    # },
+                    confidence_data,
                     generation_time,
                     response_tokens,
                     show_all_metrics
@@ -1402,8 +1560,6 @@ def main():
         except Exception as e:
             print(f"Error generating response: {e}")
             print("Please try again with a different question.")
-
-
 
 if __name__ == "__main__":
 

@@ -100,31 +100,52 @@ class SharpenedVectorStore:
             if not results or not apply_sharpening:
                 return results[:top_k]
 
-            # We need to have the embeddings directly
-            # Extract embeddings using FAISS when possible or skip sharpening
             try:
-                # First, let's try to get embeddings for the results
-                # We'll use normalized query for similarity calculations
+                # Normalize query for similarity calculations
                 normalized_query = query_embedding / np.linalg.norm(query_embedding)
 
-                # Since we don't have direct access to the vectors, we'll use a different approach
-                # Instead of sharpening the result vectors, we'll just sharpen the similarity scores
+                # Improved sharpening approach
                 for result in results:
                     # Store the original similarity for comparison
                     result['original_similarity'] = result['similarity']
                     similarity = result['similarity']
 
-                    # Apply a simplified sharpening to the similarity score
-                    if similarity > 0.6:  # High similarity scores get boosted
-                        sharpened_similarity = similarity + ((similarity - 0.6) * sharpening_factor * 2.0)
-                    else:  # Low similarity scores get reduced
-                        sharpened_similarity = similarity * (1.0 - (0.3 * sharpening_factor))
+                    # Check if this is a correction (should be prioritized)
+                    is_correction = result.get('metadata', {}).get('is_correction', False)
 
-                    # Store updated similarity
+                    # Apply different sharpening based on similarity ranges and correction status
+                    if is_correction:
+                        # Always boost corrections significantly
+                        boost_factor = 0.3 + (sharpening_factor * 0.2)
+                        sharpened_similarity = similarity + boost_factor
+                    elif similarity > 0.7:  # Very high similarity
+                        # Logarithmic boost (diminishing returns for very high similarities)
+                        boost = np.log1p(similarity) * sharpening_factor * 0.3
+                        sharpened_similarity = similarity + boost
+                    elif similarity > 0.5:  # Medium-high similarity
+                        # Linear boost
+                        boost = (similarity - 0.5) * sharpening_factor * 0.5
+                        sharpened_similarity = similarity + boost
+                    elif similarity > 0.35:  # Medium similarity
+                        # Neutral zone - minimal change
+                        sharpened_similarity = similarity
+                    else:  # Low similarity
+                        # Decrease low similarities more aggressively with higher sharpening factors
+                        reduction = (0.35 - similarity) * sharpening_factor * 0.6
+                        sharpened_similarity = similarity - reduction
+
+                    # Store updated similarity (clamped to valid range)
                     result['similarity'] = min(1.0, max(0.0, sharpened_similarity))
 
+                    # For debugging only: calculate change percentage
+                    if similarity > 0:
+                        change = ((sharpened_similarity - similarity) / similarity) * 100
+                        result['change_percent'] = change
+                    else:
+                        result['change_percent'] = 0
+
                 # Resort based on new similarity scores
-                results.sort(key=lambda x: x['similarity'], reverse=True)
+                results.sort(key=lambda x: x.get('similarity', 0), reverse=True)
 
                 return results[:top_k]
 
