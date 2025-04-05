@@ -623,16 +623,7 @@ class EnhancedMemoryManager:
 
     def retrieve_relevant_memories(self, user_id: str, query: str, top_k: int = 8) -> str:
       """
-      Retrieve relevant memories for a query with improved relevance and context awareness.
-      Handles follow-up questions and prioritizes corrections.
-
-      Args:
-          user_id: The user ID to retrieve memories for
-          query: The current query
-          top_k: Maximum number of memories to return
-
-      Returns:
-          Formatted string of relevant memories
+      Enhanced memory retrieval with better relevance sorting and contextual understanding.
       """
       # Get user's vector store
       store = self._get_user_store(user_id)
@@ -640,158 +631,88 @@ class EnhancedMemoryManager:
       # Generate embedding for query
       query_embedding = self.generate_embedding(query)
 
-      # Use lower similarity threshold to catch more potential matches
-      results = store.search(query_embedding, top_k=top_k*2, min_similarity=0.25)
+      # Get more initial results with lower threshold for post-processing
+      results = store.search(query_embedding, top_k=top_k*3, min_similarity=0.2)
 
-      # Add context awareness by looking at recent conversation
-      if hasattr(self, 'recent_queries') and self.recent_queries:
-          # Check if this is a follow-up question referring to previous content
-          follow_up_indicators = ["that", "it", "this", "those", "these", "the same", "the answer"]
-          vague_queries = ["how much", "what is", "how many", "convert", "in inches", "in mm", "in centimeters"]
+      # Detect specific query types
+      is_math_query = bool(re.search(r'\d+\s*[\+\-\*\/]\s*\d+', query))
+      is_transliteration_query = bool(re.search(r'transliterate|script|alphabet|letter', query.lower()))
+      is_ordering_query = bool(re.search(r'(first|last|next|previous|order|sequence|position|number|place)\s+(letter|word|item)', query.lower()))
 
-          is_follow_up = False
-          query_lower = query.lower()
-
-          # Check if this is a vague follow-up query
-          if any(query_lower.startswith(vq) for vq in vague_queries) and any(fi in query_lower for fi in follow_up_indicators):
-              is_follow_up = True
-
-          if is_follow_up:
-              # Get the most recent non-follow-up query for context
-              context_query = None
-              for prev_query in reversed(self.recent_queries):
-                  prev_lower = prev_query.lower()
-                  if not any(prev_lower.startswith(vq) for vq in vague_queries):
-                      context_query = prev_query
-                      break
-
-              if context_query:
-                  print(f"[Memory] Treating '{query}' as follow-up to '{context_query}'")
-                  # Create a combined query for better search
-                  combined_query = f"{context_query} {query}"
-                  combined_embedding = self.generate_embedding(combined_query)
-
-                  # Search with combined context
-                  context_results = store.search(combined_embedding, top_k=5, min_similarity=0.25)
-
-                  # Also search directly with the context query
-                  direct_context_results = store.search(self.generate_embedding(context_query), top_k=3, min_similarity=0.3)
-
-                  # Combine all results
-                  all_results = results + context_results + direct_context_results
-
-                  # Remove duplicates while preserving order
-                  seen_indices = set()
-                  unique_results = []
-                  for r in all_results:
-                      idx = r.get('index')
-                      if idx not in seen_indices:
-                          seen_indices.add(idx)
-                          unique_results.append(r)
-
-                  results = unique_results
-
-      # Store this query for context in future queries
-      if not hasattr(self, 'recent_queries'):
-          self.recent_queries = []
-      self.recent_queries.append(query)
-      if len(self.recent_queries) > 5:  # Keep last 5 queries for context
-          self.recent_queries.pop(0)
-
-      if not results:
-          return ""
-
-      # KEYWORD MATCHING for corrections and specific terms
-      # This helps catch cases where vector similarity might miss corrections
-      query_terms = set(query.lower().split())
-
-      # Extract unit conversion related terms
-      conversion_terms = {"mm", "millimeter", "millimeters", "inch", "inches", "cm", "centimeter", "centimeters",
-                        "convert", "conversion", "meter", "meters", "foot", "feet", "yard", "yards"}
-      query_has_conversion = any(term in query_terms for term in conversion_terms)
-
-      # Extract measurement terms
-      measurement_terms = {"length", "width", "height", "distance", "size", "focal", "diameter", "radius", "depth",
-                         "thickness", "how long", "how far", "how big", "measure", "measurement"}
-      query_has_measurement = any(term in query_terms for term in measurement_terms)
-
-      # Boost scores for keyword matches, corrections, and topic relevance
+      # Boost memories based on query type
       for result in results:
-          # Start with base similarity score
-          result['adjusted_score'] = result['similarity']
-          metadata = result.get('metadata', {})
+          result['boost'] = 0
 
-          # Major boost for corrections
-          if metadata.get('is_correction', False):
-              result['adjusted_score'] += 0.3  # Significant boost
+          # Initial score based on similarity
+          result['final_score'] = result['similarity']
 
-          # Extra boost for corrections related to unit conversion if query is about conversion
-          if metadata.get('is_correction', False) and query_has_conversion:
-              result_text = result['text'].lower()
-              if any(term in result_text for term in conversion_terms):
-                  result['adjusted_score'] += 0.2  # Additional boost for relevant corrections
+          # Boost corrections significantly
+          if result.get('metadata', {}).get('is_correction', False):
+              result['boost'] += 0.4
+              result['final_score'] += 0.4
 
-          # Boost for measurement-related memories if query is about measurements
-          if query_has_measurement:
-              result_text = result['text'].lower()
-              if any(term in result_text for term in measurement_terms):
-                  result['adjusted_score'] += 0.15
+          # Apply specific domain boosts
+          if is_math_query and re.search(r'\d+\s*[\+\-\*\/]\s*\d+', result['text']):
+              result['boost'] += 0.3
 
-          # Check for keyword matches from correction keywords
-          if 'correction_keywords' in metadata:
-              keywords = set(metadata['correction_keywords'].split())
-              matching_keywords = keywords.intersection(query_terms)
-              if matching_keywords:
-                  # Additional boost based on number of matching keywords
-                  result['adjusted_score'] += 0.1 * len(matching_keywords)
+          if is_transliteration_query and re.search(r'script|alphabet|letter|transliterate', result['text'].lower()):
+              result['boost'] += 0.25
 
-          # Boost based on priority field if present
-          if 'priority' in metadata:
-              result['adjusted_score'] += metadata['priority'] * 0.02
+          if is_ordering_query and re.search(r'(first|last|next|previous|position|number|order)', result['text'].lower()):
+              result['boost'] += 0.2
 
-      # Sort by adjusted score
-      sorted_results = sorted(results, key=lambda x: x.get('adjusted_score', 0), reverse=True)
+          # Boost recently added memories
+          timestamp = result.get('metadata', {}).get('timestamp', '')
+          if timestamp:
+              try:
+                  memory_time = datetime.fromisoformat(timestamp)
+                  # Boost memories from last 10 minutes
+                  if (datetime.now() - memory_time).total_seconds() < 600:
+                      result['boost'] += 0.15
+                      result['final_score'] += 0.15
+              except:
+                  pass
 
-      # Take top results after boosting and sorting
+      # Sort by final score
+      sorted_results = sorted(results, key=lambda x: x.get('final_score', 0), reverse=True)
+
+      # Take top results after boosting
       top_results = sorted_results[:top_k]
 
-      # Split into corrections and regular memories
+      # Group results into clear categories
       corrections = []
-      conversion_info = []
-      regular_memories = []
+      factual_info = []
+      general_info = []
 
       for result in top_results:
-          result_text = result['text'].lower()
-          metadata = result.get('metadata', {})
-
-          if metadata.get('is_correction', False):
+          if result.get('metadata', {}).get('is_correction', False):
               corrections.append(result)
-          elif any(term in result_text for term in conversion_terms):
-              conversion_info.append(result)
+          elif any(term in result['text'].lower() for term in ['definition', 'fact', 'rule', 'alphabet', 'order']):
+              factual_info.append(result)
           else:
-              regular_memories.append(result)
+              general_info.append(result)
 
-      # Assemble the memories text with corrections first
-      memories_text = "Based on our previous conversations:\n\n"
+      # Compose the memory text with clear sections
+      memory_text = ""
 
       if corrections:
-          memories_text += "IMPORTANT CORRECTIONS:\n"
+          memory_text += "IMPORTANT CORRECTIONS (You MUST apply these):\n"
           for i, result in enumerate(corrections):
-              memories_text += f"- {result['text']}\n"
-          memories_text += "\n"
+              memory_text += f"- {result['text']}\n"
+          memory_text += "\n"
 
-      if conversion_info and (query_has_conversion or query_has_measurement):
-          memories_text += "UNIT CONVERSION INFORMATION:\n"
-          for i, result in enumerate(conversion_info):
-              memories_text += f"- {result['text']}\n"
-          memories_text += "\n"
+      if factual_info:
+          memory_text += "FACTUAL INFORMATION:\n"
+          for i, result in enumerate(factual_info):
+              memory_text += f"- {result['text']}\n"
+          memory_text += "\n"
 
-      if regular_memories:
-          memories_text += "Other relevant information:\n"
-          for i, result in enumerate(regular_memories):
-              memories_text += f"- {result['text']}\n"
+      if general_info and (not corrections or not factual_info):
+          memory_text += "OTHER RELEVANT INFORMATION:\n"
+          for i, result in enumerate(general_info):
+              memory_text += f"- {result['text']}\n"
 
-      return memories_text
+      return memory_text
 
     def save_conversation(self, user_id: str, conversation: List[Dict[str, Any]]) -> int:
         """

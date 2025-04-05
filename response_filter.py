@@ -17,12 +17,14 @@ class ResponseFilter:
         perplexity_threshold: float = 10.0,  # Lower this from 15.0
         fallback_messages: Optional[List[str]] = None,
         continuation_phrases: Optional[List[str]] = None,
-        user_context: Optional[Dict[str, Any]] = None
+        user_context: Optional[Dict[str, Any]] = None,
+        sharpening_factor: float = 1.2
     ):
         self.confidence_threshold = confidence_threshold
         self.entropy_threshold = entropy_threshold
         self.perplexity_threshold = perplexity_threshold
         self.user_context = user_context or {}
+        self.sharpening_factor = sharpening_factor
 
         # Default fallback messages when low confidence is detected
         self.fallback_messages = fallback_messages or [
@@ -48,9 +50,80 @@ class ResponseFilter:
             "proceed anyway"
         ]
 
+    def sharpen_confidence_scores(self, token_probs: List[float]) -> List[float]:
+        """
+        Sharpen confidence scores by amplifying the difference between high and low values.
+
+        Args:
+            token_probs: List of token probabilities
+
+        Returns:
+            List of sharpened probabilities
+        """
+        if not token_probs:
+            return []
+
+        # Calculate mean confidence
+        mean_prob = sum(token_probs) / len(token_probs)
+
+        # Apply sharpening (similar to contrast enhancement in images)
+        sharpened_probs = []
+        for prob in token_probs:
+            # Compute difference from mean
+            diff = prob - mean_prob
+            # Apply sharpening factor
+            sharpened = mean_prob + (diff * self.sharpening_factor)
+            # Clamp to valid range [0, 1]
+            sharpened = max(0.0, min(1.0, sharpened))
+            sharpened_probs.append(sharpened)
+
+        return sharpened_probs
+
+    def sharpen_metrics(self, metrics: Dict[str, float]) -> Dict[str, float]:
+        """
+        Apply sharpening to confidence metrics.
+
+        Args:
+            metrics: Dictionary of confidence metrics
+
+        Returns:
+            Dictionary with sharpened metrics
+        """
+        # Create a copy to avoid modifying the original
+        sharpened = metrics.copy()
+
+        # Sharpen confidence score
+        if 'confidence' in metrics:
+            # Apply non-linear sharpening to confidence
+            conf = metrics['confidence']
+            # Favor high confidence, penalize low confidence
+            if conf > 0.6:
+                # Boost high confidence
+                sharpened['confidence'] = min(1.0, conf + (conf - 0.6) * (self.sharpening_factor - 1.0))
+            else:
+                # Reduce low confidence
+                sharpened['confidence'] = conf * (0.7 + (conf * 0.3))
+
+        # For entropy and perplexity (where lower is better), apply inverse sharpening
+        if 'entropy' in metrics:
+            # Get normalized entropy (0-1 range where 0 is best)
+            norm_entropy = min(1.0, metrics['entropy'] / self.entropy_threshold)
+            # Apply sharpening
+            sharpened_norm = norm_entropy ** self.sharpening_factor
+            # Convert back to original scale
+            sharpened['entropy'] = sharpened_norm * self.entropy_threshold
+
+        if 'perplexity' in metrics:
+            # Similar approach for perplexity
+            norm_perp = min(1.0, metrics['perplexity'] / self.perplexity_threshold)
+            sharpened_norm = norm_perp ** self.sharpening_factor
+            sharpened['perplexity'] = sharpened_norm * self.perplexity_threshold
+
+        return sharpened
+
     def should_filter(self, metrics: Dict[str, float]) -> Tuple[bool, str]:
         """
-        Determine if a response should be filtered based on confidence metrics.
+        Determine if a response should be filtered based on sharpened confidence metrics.
 
         Args:
             metrics: Dictionary containing confidence, perplexity, and entropy values
@@ -66,6 +139,19 @@ class ResponseFilter:
 
         # if metrics["perplexity"] > self.perplexity_threshold:
         #     return True, "high_perplexity"
+
+        sharpened_metrics = self.sharpen_metrics(metrics)
+
+        # Use sharpened metrics for filtering decision
+        if (sharpened_metrics["confidence"] < self.confidence_threshold and
+            sharpened_metrics["entropy"] > self.entropy_threshold and
+            sharpened_metrics["perplexity"] > self.perplexity_threshold):
+            return True, "low_confidence"
+
+        return False, "acceptable"
+
+        # ........../
+
         if (metrics["confidence"] < self.confidence_threshold and metrics["entropy"] > self.entropy_threshold and metrics["perplexity"] > self.perplexity_threshold):
             return True, "low_confidence"
 

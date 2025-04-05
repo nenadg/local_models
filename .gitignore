@@ -176,3 +176,4 @@ cython_debug/
 memory/
 output/
 local_models_venv/
+flat_learn/

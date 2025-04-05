@@ -7,6 +7,15 @@ import sys
 import threading
 import signal
 
+
+import argparse
+from typing import Dict, Any
+
+# Import the enhanced components
+from enhanced_confidence_metrics import EnhancedConfidenceMetrics
+from response_filter import ResponseFilter
+from enhanced_memory_manager_with_sharpening import EnhancedMemoryManagerWithSharpening
+
 from datetime import datetime
 from threading import Thread
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
@@ -919,7 +928,7 @@ class TinyLlamaChat:
 
     def print_generation_metrics(self, metrics, generation_time, response_tokens, show_all_metrics=False):
         """
-        Print generation metrics with a single 'truthiness' bar or all metrics if toggled.
+        Print generation metrics with sharpening information if available.
 
         Args:
             metrics: Dictionary of metrics
@@ -933,8 +942,10 @@ class TinyLlamaChat:
         # Print header
         print(f"\n[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec]")
 
+        # Check if we have original metrics for comparison
+        has_sharpening = "original" in metrics and "enhancement" in metrics
+
         # Calculate a combined "truthiness" score
-        # Combine quality, confidence, normalized perplexity and entropy
         quality = metrics.get('quality', 0.0)
         confidence = metrics.get('confidence', 0.0)
 
@@ -948,6 +959,35 @@ class TinyLlamaChat:
         # Combine all metrics with equal weights
         truthiness = (quality * 0.25) + (confidence * 0.25) + (perplexity_score * 0.25) + (entropy_score * 0.25)
 
+        # Print truthiness bar with sharpening info
+        if has_sharpening:
+            # Show enhancement percentage
+            enhancement = metrics["enhancement"]
+            sign = "+" if enhancement >= 0 else ""
+            print(f"Truthiness: {truthiness:.2f} ({sign}{enhancement}% with sharpening)")
+        else:
+            print(f"Truthiness: {truthiness:.2f}")
+
+        # Format bar with given value
+        # def format_metric_bar(value, min_val=0.0, max_val=1.0, width=20, label="", reverse=False):
+        #     # Normalize value to 0-1 range
+        #     normalized = (value - min_val) / (max_val - min_val)
+        #     normalized = max(0.0, min(1.0, normalized))
+
+        #     # For reverse metrics (where lower is better), invert the value
+        #     if reverse:
+        #         normalized = 1.0 - normalized
+
+        #     # Calculate filled and empty portions
+        #     filled_length = int(width * normalized)
+        #     empty_length = width - filled_length
+
+        #     # Create the bar
+        #     bar = "█" * filled_length + "░" * empty_length
+
+        #     # Format the output
+        #     return f"[{bar}] {label}: {value:.2f}"
+
         # Print truthiness bar
         print(self.format_metric_bar(truthiness, 0.0, 1.0, 30, "Truthiness"))
 
@@ -958,6 +998,31 @@ class TinyLlamaChat:
             print(self.format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
             print(self.format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
             print(self.format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
+        # # If all metrics are toggled on, show individual metrics
+        # if show_all_metrics:
+        #     print("\nDetailed metrics:")
+        #     print(format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
+
+        #     # Show confidence with comparison if available
+        #     if has_sharpening:
+        #         orig_conf = metrics["original"]["confidence"]
+        #         print(format_metric_bar(confidence, 0.0, 1.0, 20,
+        #                                f"Confidence (was {orig_conf:.2f})"))
+        #     else:
+        #         print(format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
+
+        #     # Show other metrics with comparison
+        #     if has_sharpening:
+        #         orig_perp = metrics["original"]["perplexity"]
+        #         print(format_metric_bar(perplexity, 1.0, 10.0, 20,
+        #                                f"Perplexity (was {orig_perp:.2f})", reverse=True))
+
+        #         orig_entropy = metrics["original"]["entropy"]
+        #         print(format_metric_bar(entropy, 0.0, 3.0, 20,
+        #                                f"Entropy (was {orig_entropy:.2f})", reverse=True))
+        #     else:
+        #         print(format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
+        #         print(format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
 
     def add_conversation_to_memory(self, query, response):
         """Add the current exchange to memory if auto-memorize is enabled"""
@@ -968,6 +1033,71 @@ class TinyLlamaChat:
         )
         if memories_added > 0:
             print(f"[Memory] Added {memories_added} new memories")
+
+    def add_sharpening_arguments(parser):
+        """Add sharpening-related arguments to the parser"""
+        sharpening_group = parser.add_argument_group('Sharpening Options')
+        sharpening_group.add_argument("--enable-sharpening", action="store_true", default=True,
+                            help="Enable vector space and confidence sharpening")
+        sharpening_group.add_argument("--confidence-sharpening", type=float, default=1.5,
+                            help="Sharpening factor for confidence metrics (1.0-2.0)")
+        sharpening_group.add_argument("--vector-sharpening", type=float, default=0.3,
+                            help="Sharpening factor for vector embeddings (0.0-1.0)")
+        return parser
+
+    # Example of how to integrate in the main function
+    def initialize_components_with_sharpening(args):
+        """Initialize components with sharpening support"""
+        # Create enhanced confidence metrics
+        confidence_metrics = EnhancedConfidenceMetrics(
+            sharpening_factor=args.confidence_sharpening
+        )
+
+        # Create enhanced response filter
+        response_filter = ResponseFilter(
+            confidence_threshold=args.confidence_threshold,
+            sharpening_factor=args.confidence_sharpening
+        )
+
+        # Create enhanced memory manager
+        memory_manager = EnhancedMemoryManagerWithSharpening(
+            memory_dir=args.memory_dir,
+            device=args.device,
+            auto_memorize=not args.no_memory,
+            sharpening_enabled=args.enable_sharpening,
+            sharpening_factor=args.vector_sharpening
+        )
+
+        return confidence_metrics, response_filter, memory_manager
+
+    # Example of code to add the sharpening toggle command to the chat interface
+    def handle_sharpening_commands(user_input, memory_manager, confidence_metrics):
+        """Handle sharpening-related commands"""
+        if user_input.lower() == '!toggle-sharpening':
+            is_enabled = memory_manager.toggle_sharpening()
+            print(f"Vector space sharpening {'enabled' if is_enabled else 'disabled'}")
+            return True
+
+        elif user_input.lower().startswith('!set-confidence-sharpening:'):
+            try:
+                factor = float(user_input.split(':')[1].strip())
+                confidence_metrics.set_sharpening_factor(factor)
+                print(f"Confidence sharpening factor set to {factor}")
+            except:
+                print("Invalid value. Please specify a number between 1.0 and 2.0")
+            return True
+
+        elif user_input.lower().startswith('!set-vector-sharpening:'):
+            try:
+                factor = float(user_input.split(':')[1].strip())
+                memory_manager.set_sharpening_factor(factor)
+                print(f"Vector space sharpening factor set to {factor}")
+            except:
+                print("Invalid value. Please specify a number between 0.0 and 1.0")
+            return True
+
+        return False
+
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
     parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
@@ -1279,7 +1409,8 @@ def main():
                     response_tokens,
                     show_all_metrics
                 )
-            except:
+            except Exception as e:
+                print(f"stupid error {e}")
                 # Fallback to maximum tokens estimate
                 if args.max_tokens > 0:
                     tokens_per_second = args.max_tokens / generation_time
