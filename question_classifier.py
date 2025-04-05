@@ -48,6 +48,10 @@ class QuestionClassifier:
             'translation': [
                 r'(translate|say|how to say|how do you say).*?(in|to|from).*?(english|french|spanish|german|italian|russian|chinese|japanese|korean|dutch|portuguese|arabic|hindi|serbian|polish|swedish|greek)',
                 r'(.*?)(in|to).*?(english|french|spanish|german|italian|russian|chinese|japanese|korean|dutch|portuguese|arabic|hindi|serbian|polish|swedish|greek)'
+            ],
+            'transliteration': [
+                r'(transliterate|convert|write).*?(latin|cyrillic|script)',
+                r'(.*?)(to|in).*?(latin|cyrillic|script)'
             ]
         }
         

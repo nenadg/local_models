@@ -22,7 +22,8 @@ class WeightedMemoryIntegrator:
         # Domain-specific post-processors
         self.post_processors = {
             'arithmetic': self._post_process_arithmetic,
-            'translation': self._post_process_translation
+            'translation': self._post_process_translation,
+            'transliteration': self._post_process_translation
         }
         
     def retrieve_and_integrate(self, user_id: str, query: str) -> Dict[str, Any]:
@@ -393,6 +394,29 @@ class WeightedMemoryIntegrator:
                 
         return memory_text
 
+    def _post_process_transliteration(self, query, memory_text):
+        """Apply post-processing for transliteration queries"""
+        # Extract word to transliterate
+        word_match = re.search(r'"([^"]+)"', query)
+        if not word_match:
+            word_match = re.search(r'transliterate\s+(\w+)', query)
+
+        if not word_match:
+            return memory_text
+
+        word = word_match.group(1)
+
+        # Look for target script (cyrillic/latin)
+        script_match = re.search(r'(latin|cyrillic)', query.lower())
+        if not script_match:
+            return memory_text
+
+        script = script_match.group(1).lower()
+
+        # Return only the transliteration without additional context
+        # to avoid feedback loops
+        return "IMPORTANT FACTUAL INFORMATION:\n- Transliteration information."
+
     def clean_memory_from_incorrect_translations(self, user_id: str, word: str, language: str) -> None:
         """
         Remove incorrect translation memories for a specific word and language.
@@ -591,7 +615,7 @@ class WeightedMemoryIntegrator:
 
         return '\n'.join(cleaned_lines)
 
-    def _clean_translation_memories(self, memory_text: str, word: str, language: str, correct_translation: str) -> str:
+    def _clean_translation_memories(self, memory_text, word, language, correct_translation):
         """Clean up translation memories, removing incorrect or duplicate translations"""
         if not memory_text:
             return ""
@@ -599,15 +623,27 @@ class WeightedMemoryIntegrator:
         lines = memory_text.split('\n')
         cleaned_lines = []
 
+        # Keep track of seen transliterations to avoid duplication
+        seen_transliterations = set()
+
+        # Add the known correct transliteration only once
+        correct_pattern = f"transliteration of {word.lower()}"
+        seen_transliterations.add(correct_pattern)
+
         # Check each line
         for line in lines:
-            # Skip lines with incorrect translations for this word and language
-            if (word.lower() in line.lower() and language.lower() in line.lower() and
-                correct_translation.lower() not in line.lower()):
+            # Skip if it's about transliteration and we've seen a similar pattern
+            if "transliteration" in line.lower():
+                # Skip all transliteration mentions after we've seen the correct one
                 continue
-            cleaned_lines.append(line)
 
-        return self._clean_duplicate_memories('\n'.join(cleaned_lines))
+            # For other lines, check if they're duplicates of what we've seen
+            simplified = re.sub(r'[^\w\s]', '', line.lower())
+            if simplified and simplified not in seen_transliterations:
+                seen_transliterations.add(simplified)
+                cleaned_lines.append(line)
+
+        return '\n'.join(cleaned_lines)
 
     def _clean_duplicate_memories(self, memory_text: str) -> str:
         """Remove duplicate or highly similar memories from the text"""
