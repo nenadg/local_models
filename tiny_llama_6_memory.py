@@ -302,10 +302,11 @@ class TinyLlamaChat:
                          attention_mask: torch.Tensor,
                          num_draft_tokens: int = 5) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Implement speculative decoding:
+        Implement speculative decoding with loop detection:
         1. Generate tokens with the smaller draft model
         2. Verify with larger target model
         3. Keep tokens that match, regenerate from first mismatch
+        4. Detect and prevent repetitive loops
         """
         if self.draft_model is None:
             # Fall back to regular generation if no draft model
@@ -326,6 +327,8 @@ class TinyLlamaChat:
                     use_cache=True,
                     return_dict_in_generate=True,
                     output_scores=True,
+                    # Add repetition penalty to avoid loops
+                    repetition_penalty=1.2,
                 )
 
             # Extract draft tokens (excluding input prompt)
@@ -334,6 +337,18 @@ class TinyLlamaChat:
             # Check if we got any draft tokens
             if len(draft_ids) == 0:
                 return None, None, None
+
+            # NEW: Check for repetitive loops
+            prompt_tokens = input_ids[0][-5:].tolist() if input_ids[0].size(0) >= 5 else input_ids[0].tolist()
+            draft_tokens = draft_ids.tolist()
+
+            # Detect repetitive patterns (simple check for now)
+            if len(draft_tokens) >= 4:
+                # Check if last 2 tokens repeat
+                if draft_tokens[-2:] == draft_tokens[-4:-2]:
+                    print("[Warning] Repetitive pattern detected in draft tokens, randomizing...")
+                    # Inject some randomness by changing temperature for this generation
+                    return None, None, None
 
             # Step 2: Verify with target model - compute logits for each position
             full_sequence = torch.cat([input_ids[0], draft_ids]).unsqueeze(0)
