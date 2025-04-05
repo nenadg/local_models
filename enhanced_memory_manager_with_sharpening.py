@@ -112,11 +112,12 @@ class EnhancedMemoryManagerWithSharpening(EnhancedMemoryManager):
             for i, result in enumerate(corrections):
                 improvement = ""
                 if 'original_similarity' in result and apply_sharpening:
-                    original = result.get('original_similarity')
-                    sharpened = result['similarity']
-                    change = ((sharpened - original) / original) * 100
-                    if abs(change) > 1:
-                        improvement = f" (relevance {'increased' if change > 0 else 'decreased'} by {abs(change):.1f}%)"
+                    original = result.get('original_similarity', 0)
+                    sharpened = result.get('similarity', 0)
+                    if original > 0:  # Avoid division by zero
+                        change = ((sharpened - original) / original) * 100
+                        if abs(change) > 1:
+                            improvement = f" (relevance {'increased' if change > 0 else 'decreased'} by {abs(change):.1f}%)"
                 memory_text += f"- {result['text']}{improvement}\n"
             memory_text += "\n"
 
@@ -125,11 +126,12 @@ class EnhancedMemoryManagerWithSharpening(EnhancedMemoryManager):
             for i, result in enumerate(factual_info):
                 improvement = ""
                 if 'original_similarity' in result and apply_sharpening:
-                    original = result.get('original_similarity')
-                    sharpened = result['similarity']
-                    change = ((sharpened - original) / original) * 100
-                    if abs(change) > 1:
-                        improvement = f" (relevance {'increased' if change > 0 else 'decreased'} by {abs(change):.1f}%)"
+                    original = result.get('original_similarity', 0)
+                    sharpened = result.get('similarity', 0)
+                    if original > 0:  # Avoid division by zero
+                        change = ((sharpened - original) / original) * 100
+                        if abs(change) > 1:
+                            improvement = f" (relevance {'increased' if change > 0 else 'decreased'} by {abs(change):.1f}%)"
                 memory_text += f"- {result['text']}{improvement}\n"
             memory_text += "\n"
 
@@ -138,11 +140,12 @@ class EnhancedMemoryManagerWithSharpening(EnhancedMemoryManager):
             for i, result in enumerate(general_info):
                 improvement = ""
                 if 'original_similarity' in result and apply_sharpening:
-                    original = result.get('original_similarity')
-                    sharpened = result['similarity']
-                    change = ((sharpened - original) / original) * 100
-                    if abs(change) > 1:
-                        improvement = f" (relevance {'increased' if change > 0 else 'decreased'} by {abs(change):.1f}%)"
+                    original = result.get('original_similarity', 0)
+                    sharpened = result.get('similarity', 0)
+                    if original > 0:  # Avoid division by zero
+                        change = ((sharpened - original) / original) * 100
+                        if abs(change) > 1:
+                            improvement = f" (relevance {'increased' if change > 0 else 'decreased'} by {abs(change):.1f}%)"
                 memory_text += f"- {result['text']}{improvement}\n"
 
         return memory_text

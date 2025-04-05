@@ -647,6 +647,16 @@ class TinyLlamaChat:
                     if self.confidence_metrics.token_probabilities:
                         latest_confidence = self.confidence_metrics.token_probabilities[-1]
                         token_confidences.append(latest_confidence)
+                    elif self.confidence_metrics.original_token_probabilities:
+                        # Fallback to original probabilities if sharpened not available
+                        latest_idx = len(self.confidence_metrics.original_token_probabilities) - 1
+                        if latest_idx >= 0:
+                            latest_confidence = self.confidence_metrics.original_token_probabilities[latest_idx]
+                            token_confidences.append(latest_confidence)
+                        else:
+                            # Default if no confidence available
+                            latest_confidence = 0.8
+                            token_confidences.append(latest_confidence)
                     else:
                         # Default if no confidence available
                         latest_confidence = 0.8
@@ -659,7 +669,7 @@ class TinyLlamaChat:
                         tokens_received >= early_confidence_check_threshold):
 
                         # Get current metrics
-                        current_metrics = self.confidence_metrics.get_metrics()
+                        current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=self.memory_manager.sharpening_enabled)
 
                         # Should we show fallback instead of continuing?
                         if response_filter.should_stream_fallback(current_metrics, user_query):
@@ -668,9 +678,6 @@ class TinyLlamaChat:
 
                             # Set the stop event to interrupt generation
                             self.stop_event.set()
-
-                            # Display notification about filtering
-                            # print("\n                                           [Response filtered due to low confidence]")
 
                             # Get fallback message
                             fallback = response_filter.get_streamable_fallback(user_query)
@@ -705,14 +712,6 @@ class TinyLlamaChat:
 
                     # Only add displayable tokens to the buffer
                     if display_token and not fallback_message_streamed:
-                        # Colorize token if confidence visualization is enabled
-                        # if show_confidence:
-                        #     colored_token = heatmap.colorize_streaming_token(
-                        #         display_token, latest_confidence)
-                        #     token_buffer += colored_token
-                        # else:
-                        #     # Normal display without colorization
-                        #     token_buffer += display_token
                         if show_confidence:
                             colored_token = heatmap.colorize_streaming_token(
                                 display_token, latest_confidence)
@@ -720,8 +719,6 @@ class TinyLlamaChat:
                         else:
                             # Normal display without colorization
                             token_buffer += display_token
-
-                    token_confidences.append(latest_confidence)
 
                     # Check timing
                     current_time = time.time()
@@ -743,7 +740,7 @@ class TinyLlamaChat:
                                 complete_response = complete_response.split(stop_seq)[0]
 
                                 # ENSURE WE HAVE CONFIDENCE METRICS
-                                if not self.confidence_metrics.token_probabilities:
+                                if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
                                     for i in range(5):
                                         dummy_logits = torch.zeros(self.tokenizer.vocab_size, device=self.device)
                                         # Generate varied values from 0.5 to 0.9
@@ -766,7 +763,7 @@ class TinyLlamaChat:
                     print(token_buffer, end="", flush=True)
 
                 # ALWAYS ENSURE WE HAVE CONFIDENCE METRICS BEFORE RETURNING
-                if not self.confidence_metrics.token_probabilities:
+                if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
                     response_length = len(complete_response.split())
                     num_tokens = max(5, min(response_length, 10))
 
@@ -795,7 +792,7 @@ class TinyLlamaChat:
                 print(f"\nError during token streaming: {str(e)}")
                 if complete_response:
                     # Even with errors, make sure we have metrics
-                    if not self.confidence_metrics.token_probabilities:
+                    if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
                         dummy_logits = torch.zeros(self.tokenizer.vocab_size)
                         dummy_logits[0] = 5.0  # Medium confidence for error cases
                         self.confidence_metrics.add_token_score(dummy_logits, 0)
@@ -811,7 +808,7 @@ class TinyLlamaChat:
 
         finally:
             # Fallback for confidence metrics if somehow none were added
-            if not self.confidence_metrics.token_probabilities:
+            if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
                 dummy_logits = torch.zeros(self.tokenizer.vocab_size)
                 dummy_logits[0] = 7.0  # Default confidence
                 self.confidence_metrics.add_token_score(dummy_logits, 0)
@@ -822,7 +819,6 @@ class TinyLlamaChat:
             # Print the legend after the response is complete
             print()  # Add a newline
             heatmap.print_legend()
-
     def ensure_metrics(self, response_length=None):
         """
         Ensure confidence metrics exist with reasonable values.
@@ -936,9 +932,6 @@ class TinyLlamaChat:
         # Calculate tokens per second
         tokens_per_second = response_tokens / max(0.01, generation_time)
 
-        print(f"DEBUG - Metrics keys: {metrics.keys()}")
-        print(f"DEBUG - Sharpening enabled: {self.memory_manager.sharpening_enabled}")
-
         # Print header
         print(f"\n[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec]")
 
@@ -959,46 +952,7 @@ class TinyLlamaChat:
         # Combine all metrics with equal weights
         truthiness = (quality * 0.25) + (confidence * 0.25) + (perplexity_score * 0.25) + (entropy_score * 0.25)
 
-        # Print truthiness bar with sharpening info
-        if has_sharpening:
-            # Show enhancement percentage
-            enhancement = metrics["enhancement"]
-            sign = "+" if enhancement >= 0 else ""
-            print(f"Truthiness: {truthiness:.2f} ({sign}{enhancement}% with sharpening)")
-        else:
-            print(f"Truthiness: {truthiness:.2f}")
-
-        # Format bar with given value
-        # def format_metric_bar(value, min_val=0.0, max_val=1.0, width=20, label="", reverse=False):
-        #     # Normalize value to 0-1 range
-        #     normalized = (value - min_val) / (max_val - min_val)
-        #     normalized = max(0.0, min(1.0, normalized))
-
-        #     # For reverse metrics (where lower is better), invert the value
-        #     if reverse:
-        #         normalized = 1.0 - normalized
-
-        #     # Calculate filled and empty portions
-        #     filled_length = int(width * normalized)
-        #     empty_length = width - filled_length
-
-        #     # Create the bar
-        #     bar = "█" * filled_length + "░" * empty_length
-
-        #     # Format the output
-        #     return f"[{bar}] {label}: {value:.2f}"
-
-        # Print truthiness bar
-        print(self.format_metric_bar(truthiness, 0.0, 1.0, 30, "Truthiness"))
-
         # If all metrics are toggled on, show individual metrics
-        # if show_all_metrics:
-        #     print("\nDetailed metrics:")
-        #     print(self.format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
-        #     print(self.format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
-        #     print(self.format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
-        #     print(self.format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
-
         if show_all_metrics:
             print("\nDetailed metrics:")
             print(self.format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
@@ -1022,7 +976,10 @@ class TinyLlamaChat:
                                        f"Entropy (was {orig_entropy:.2f})", reverse=True))
             else:
                 print(self.format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
-                print(fself.ormat_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
+                print(self.format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
+
+        # Print truthiness bar
+        print(self.format_metric_bar(truthiness, 0.0, 1.0, 30, "Truthiness"))
 
     def add_conversation_to_memory(self, query, response):
         """Add the current exchange to memory if auto-memorize is enabled"""

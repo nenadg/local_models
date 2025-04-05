@@ -110,17 +110,17 @@ class SharpenedVectorStore:
                 # Since we don't have direct access to the vectors, we'll use a different approach
                 # Instead of sharpening the result vectors, we'll just sharpen the similarity scores
                 for result in results:
-                    # Use existing similarity score
+                    # Store the original similarity for comparison
+                    result['original_similarity'] = result['similarity']
                     similarity = result['similarity']
 
                     # Apply a simplified sharpening to the similarity score
                     if similarity > 0.6:  # High similarity scores get boosted
-                        sharpened_similarity = similarity + ((similarity - 0.6) * sharpening_factor)
+                        sharpened_similarity = similarity + ((similarity - 0.6) * sharpening_factor * 2.0)
                     else:  # Low similarity scores get reduced
                         sharpened_similarity = similarity * (1.0 - (0.3 * sharpening_factor))
 
-                    # Store original and updated similarities
-                    result['original_similarity'] = similarity
+                    # Store updated similarity
                     result['similarity'] = min(1.0, max(0.0, sharpened_similarity))
 
                 # Resort based on new similarity scores
@@ -131,7 +131,9 @@ class SharpenedVectorStore:
             except Exception as e:
                 # If we encounter any issues, just return the original results
                 print(f"Sharpening skipped: {str(e)}")
+                # Still add original_similarity for consistency
+                for result in results[:top_k]:
+                    result['original_similarity'] = result['similarity']
                 return results[:top_k]
 
         return enhanced_search
-
