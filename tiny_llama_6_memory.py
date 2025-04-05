@@ -11,29 +11,23 @@ import signal
 import argparse
 from typing import Dict, Any
 
-# Import the enhanced components
-from enhanced_confidence_metrics import EnhancedConfidenceMetrics
-from response_filter import ResponseFilter
-from enhanced_memory_manager_with_sharpening import EnhancedMemoryManagerWithSharpening
 
 from datetime import datetime
 from threading import Thread
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
 import numpy as np
 from typing import List, Dict, Tuple, Optional
+from transformers import LogitsProcessor, LogitsProcessorList
 from history import setup_readline_history
 
 from keyboard_interrupt import KeyboardInterruptHandler
 from mcp_handler import MCPHandler
-from confidence_metrics import ConfidenceMetrics
+from enhanced_confidence_metrics import EnhancedConfidenceMetrics, TokenProbabilityCaptureProcessor
 from response_filter import ResponseFilter
-from logit_capture_processor import TokenProbabilityCaptureProcessor
-from transformers import LogitsProcessor, LogitsProcessorList
+from enhanced_memory_manager_with_sharpening import EnhancedMemoryManagerWithSharpening
+from enhanced_memory_store import EnhancedMemoryManager
 from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
 
-# from simple_vector_store import MemoryManager
-from enhanced_memory_store import EnhancedMemoryManager
-from enhanced_memory_manager_with_sharpening import EnhancedMemoryManagerWithSharpening
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -54,7 +48,7 @@ class TinyLlamaChat:
         self.interrupt_handler = KeyboardInterruptHandler()
         self.stop_event = threading.Event()
         self.mcp_handler = MCPHandler(output_dir=output_dir, allow_shell_commands=True)
-        self.confidence_metrics = ConfidenceMetrics()
+        self.confidence_metrics = EnhancedConfidenceMetrics(sharpening_factor=sharpening_factor)
 
         # Initialize memory manager
         self.memory_manager = EnhancedMemoryManagerWithSharpening(
@@ -942,6 +936,9 @@ class TinyLlamaChat:
         # Calculate tokens per second
         tokens_per_second = response_tokens / max(0.01, generation_time)
 
+        print(f"DEBUG - Metrics keys: {metrics.keys()}")
+        print(f"DEBUG - Sharpening enabled: {self.memory_manager.sharpening_enabled}")
+
         # Print header
         print(f"\n[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec]")
 
@@ -1004,28 +1001,28 @@ class TinyLlamaChat:
 
         if show_all_metrics:
             print("\nDetailed metrics:")
-            print(format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
+            print(self.format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
 
             # Show confidence with comparison if available
             if has_sharpening:
                 orig_conf = metrics["original"]["confidence"]
-                print(format_metric_bar(confidence, 0.0, 1.0, 20,
+                print(self.format_metric_bar(confidence, 0.0, 1.0, 20,
                                        f"Confidence (was {orig_conf:.2f})"))
             else:
-                print(format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
+                print(self.format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
 
             # Show other metrics with comparison
             if has_sharpening:
                 orig_perp = metrics["original"]["perplexity"]
-                print(format_metric_bar(perplexity, 1.0, 10.0, 20,
+                print(self.format_metric_bar(perplexity, 1.0, 10.0, 20,
                                        f"Perplexity (was {orig_perp:.2f})", reverse=True))
 
                 orig_entropy = metrics["original"]["entropy"]
-                print(format_metric_bar(entropy, 0.0, 3.0, 20,
+                print(self.format_metric_bar(entropy, 0.0, 3.0, 20,
                                        f"Entropy (was {orig_entropy:.2f})", reverse=True))
             else:
-                print(format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
-                print(format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
+                print(self.format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
+                print(fself.ormat_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
 
     def add_conversation_to_memory(self, query, response):
         """Add the current exchange to memory if auto-memorize is enabled"""
@@ -1048,7 +1045,6 @@ class TinyLlamaChat:
                             help="Sharpening factor for vector embeddings (0.0-1.0)")
         return parser
 
-    # Example of how to integrate in the main function
     def initialize_components_with_sharpening(args):
         """Initialize components with sharpening support"""
         # Create enhanced confidence metrics
@@ -1073,39 +1069,25 @@ class TinyLlamaChat:
 
         return confidence_metrics, response_filter, memory_manager
 
-    # Example of code to add the sharpening toggle command to the chat interface
-    def handle_sharpening_commands(user_input, memory_manager, confidence_metrics):
-        """Handle sharpening-related commands"""
-        if user_input.lower() == '!toggle-sharpening':
-            is_enabled = memory_manager.toggle_sharpening()
-            print(f"Vector space sharpening {'enabled' if is_enabled else 'disabled'}")
-            return True
-
-        elif user_input.lower().startswith('!set-confidence-sharpening:'):
-            try:
-                factor = float(user_input.split(':')[1].strip())
-                confidence_metrics.set_sharpening_factor(factor)
-                print(f"Confidence sharpening factor set to {factor}")
-            except:
-                print("Invalid value. Please specify a number between 1.0 and 2.0")
-            return True
-
-        elif user_input.lower().startswith('!set-vector-sharpening:'):
-            try:
-                factor = float(user_input.split(':')[1].strip())
-                memory_manager.set_sharpening_factor(factor)
-                print(f"Vector space sharpening factor set to {factor}")
-            except:
-                print("Invalid value. Please specify a number between 0.0 and 1.0")
-            return True
-
-        return False
 
     def toggle_sharpening(self):
         """Toggle vector space sharpening on/off"""
         return self.memory_manager.toggle_sharpening()
 
+    def set_sharpening_factor(self, factor: float) -> None:
+        """Set the sharpening factor for memory retrieval and confidence metrics"""
+        # Update confidence metrics sharpening
+        if hasattr(self.confidence_metrics, 'set_sharpening_factor'):
+            self.confidence_metrics.set_sharpening_factor(factor)
 
+            # Force recalculation with sharpening applied
+            if hasattr(self.confidence_metrics, 'token_probabilities') and self.confidence_metrics.token_probabilities:
+                _ = self.confidence_metrics.get_metrics(apply_sharpening=True)
+
+        # Update memory manager sharpening
+        self.memory_manager.set_sharpening_factor(factor)
+
+        print(f"Sharpening factor set to {factor}")
 
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
@@ -1194,15 +1176,15 @@ def main():
     print("  !correct: [correction] - Correct the model's understanding")
     print("  !save - Save the current conversation")
     print("  !system: [message] - Change the system message")
+    print("  !mcp-help - Show MCP commands for directing output to files")
+    print("  !confidence: [0.0-1.0] - Set confidence threshold")
+    print("  !sharpening-factor: [0.0-1.0] - Set the sharpening factor for vector embeddings")
     print("  !toggle-stream - Toggle streaming output on/off")
     print("  !toggle-turbo - Toggle turbo mode on/off")
-    print("  !mcp-help - Show MCP commands for directing output to files")
     print("  !toggle-filter - Toggle uncertainty filtering on/off")
-    print("  !confidence: [0.0-1.0] - Set confidence threshold")
     print("  !toggle-heatmap - Toggle confidence heatmap visualization on/off")
     print("  !toggle-all-metrics - Toggle between showing all metrics or just truthiness")
     print("  !toggle-sharpening - Toggle vector space sharpening on/off")
-    print("  !sharpening-factor: [0.0-1.0] - Set the sharpening factor for vector embeddings")
     print("  !memorize - Force save the entire conversation to memory")
     print("  !toggle-memory - Toggle automatic memorization on/off")
     print("  !memory-stats - Display info about memories")
@@ -1295,7 +1277,6 @@ def main():
             show_confidence = not show_confidence
             print(f"Confidence heatmap {'enabled' if show_confidence else 'disabled'}")
             continue
-
         elif user_input.lower() == '!toggle-all-metrics':
             show_all_metrics = not show_all_metrics
             print(f"Detailed metrics display {'enabled' if show_all_metrics else 'disabled'}")
@@ -1304,17 +1285,15 @@ def main():
             is_enabled = chat.toggle_sharpening()
             print(f"Vector space sharpening {'enabled' if is_enabled else 'disabled'}")
             continue
-
         elif user_input.lower().startswith('!sharpening-factor:'):
             try:
                 factor = float(user_input.split(':')[1].strip())
                 if 0.0 <= factor <= 1.0:
                     chat.set_sharpening_factor(factor)
-                    print(f"Sharpening factor set to {factor}")
                 else:
                     print("Sharpening factor must be between 0.0 and 1.0")
-            except:
-                print("Invalid value. Please specify a number between 0.0 and 1.0")
+            except Exception as e:
+                print(f"Invalid value: {str(e)}. Please specify a number between 0.0 and 1.0")
             continue
 
         elif user_input.lower() == '!memorize':
@@ -1372,7 +1351,7 @@ def main():
                 chat.ensure_metrics(len(response.split()))
 
             # Get confidence metrics
-            confidence_data = chat.confidence_metrics.get_metrics()
+            confidence_data = chat.confidence_metrics.get_metrics(apply_sharpening=chat.memory_manager.sharpening_enabled)
 
             # Apply filtering only if enabled
             if filter_enabled:

@@ -18,7 +18,7 @@ class ResponseFilter:
         fallback_messages: Optional[List[str]] = None,
         continuation_phrases: Optional[List[str]] = None,
         user_context: Optional[Dict[str, Any]] = None,
-        sharpening_factor: float = 1.2
+        sharpening_factor: float = 0.3
     ):
         self.confidence_threshold = confidence_threshold
         self.entropy_threshold = entropy_threshold
@@ -147,10 +147,6 @@ class ResponseFilter:
             sharpened_metrics["entropy"] > self.entropy_threshold and
             sharpened_metrics["perplexity"] > self.perplexity_threshold):
             return True, "low_confidence"
-
-        return False, "acceptable"
-
-        # ........../
 
         if (metrics["confidence"] < self.confidence_threshold and metrics["entropy"] > self.entropy_threshold and metrics["perplexity"] > self.perplexity_threshold):
             return True, "low_confidence"
