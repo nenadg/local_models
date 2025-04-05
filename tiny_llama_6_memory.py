@@ -1186,24 +1186,41 @@ class TinyLlamaChat:
 
     def _clean_general_response(self, response):
         """General cleanup for all responses"""
-        # Remove repeated sections
+        # Remove repeated paragraphs (not just lines)
         lines = response.split('\n')
-        unique_lines = []
-        seen = set()
+        paragraphs = []
+        current_paragraph = []
 
+        # Group lines into paragraphs
         for line in lines:
-            # Skip empty lines
-            if not line.strip():
-                unique_lines.append(line)
-                continue
+            if line.strip():
+                current_paragraph.append(line)
+            else:
+                if current_paragraph:
+                    paragraphs.append('\n'.join(current_paragraph))
+                    current_paragraph = []
+                paragraphs.append('')  # Keep empty lines
 
+        if current_paragraph:
+            paragraphs.append('\n'.join(current_paragraph))
+
+        # Remove duplicate paragraphs
+        unique_paragraphs = []
+        seen_paragraphs = set()
+
+        for paragraph in paragraphs:
             # Create a simplified key for comparison
-            simplified = re.sub(r'[^\w\s]', '', line.lower())
-            if simplified and simplified not in seen:
-                seen.add(simplified)
-                unique_lines.append(line)
+            if paragraph:
+                simplified = re.sub(r'[^\w\s]', '', paragraph.lower())
+                if simplified and simplified not in seen_paragraphs:
+                    seen_paragraphs.add(simplified)
+                    unique_paragraphs.append(paragraph)
+                elif not simplified:
+                    unique_paragraphs.append(paragraph)  # Keep formatting paragraphs
+            else:
+                unique_paragraphs.append(paragraph)  # Keep empty lines
 
-        cleaned = '\n'.join(unique_lines)
+        cleaned = '\n'.join(unique_paragraphs)
 
         # Remove any debugging information that might have leaked
         cleaned = re.sub(r'(?:relevance|similarity)\s+(?:increased|decreased)\s+by\s+[\d\.]+%.*?$', '', cleaned, flags=re.MULTILINE)
