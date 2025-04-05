@@ -463,7 +463,7 @@ class EnhancedHeatmap(TerminalHeatmap):
         for color in self.fg_colors:
             gradient += color + "█" + self.RESET
 
-        print(f"{gradient} Low confidence → High confidence")
+        print(f"{gradient} High confidence → Low confidence")
 
         # Show thresholds for reference
         thresholds = np.linspace(0, 1, len(self.fg_colors) + 1)[1:][::-1]

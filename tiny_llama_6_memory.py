@@ -821,6 +821,11 @@ class TinyLlamaChat:
             return "Error in streaming setup. Please try again."
 
         finally:
+            if show_confidence and not self.stop_event.is_set() and not fallback_message_streamed:
+                # Print the legend after the response is complete
+                print()  # Add a newline
+                heatmap.print_legend()
+
             # Fallback for confidence metrics if somehow none were added
             if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
                 dummy_logits = torch.zeros(self.tokenizer.vocab_size)
@@ -828,11 +833,6 @@ class TinyLlamaChat:
                 self.confidence_metrics.add_token_score(dummy_logits, 0)
 
             signal.signal(signal.SIGINT, signal.default_int_handler)
-
-        if show_confidence and not self.stop_event.is_set() and not fallback_message_streamed:
-            # Print the legend after the response is complete
-            print()  # Add a newline
-            heatmap.print_legend()
 
     def ensure_metrics(self, response_length=None):
         """
@@ -1299,7 +1299,7 @@ def main():
     if chat.device != "cpu":
         print("Warming up model for maximum throughput...")
         _ = chat.generate_response(
-            [{"role": "user", "content": "Hi"}],
+            [{"role": "user", "content": "Say some nice greeting."}],
             max_new_tokens=16,
             temperature=0.7,
             stream=False
