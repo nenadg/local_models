@@ -569,8 +569,21 @@ class TinyLlamaChat:
 
             # Process any immediate user commands
             if user_commands:
-                results = self.mcp_handler.execute_commands(user_commands)
-                successful = [file for file, status in results.items() if status]
+                # Process any shell command outputs and add to memory
+                for cmd, details in user_commands.items():
+                    if details.get("action") == "shell_command":
+                        # Add the command output to memory
+                        self.add_command_to_memory(
+                            command=cmd,
+                            output=details.get("output", ""),
+                            error=details.get("error", ""),
+                            output_file=details.get("output_file")
+                        )
+
+                # Process file save commands
+                file_commands = {file: cmd for file, cmd in user_commands.items()
+                                if cmd.get("action") == "save_response"}
+                successful = [file for file, status in file_commands.items()]
                 if successful:
                     files_info = ", ".join(successful)
                     print(f"[User content saved to: {files_info}]")
@@ -1241,6 +1254,281 @@ class TinyLlamaChat:
         cleaned = re.sub(r'(?:relevance|similarity)\s+(?:increased|decreased)\s+by\s+[\d\.]+%.*?$', '', cleaned, flags=re.MULTILINE)
 
         return cleaned
+
+    def add_command_to_memory(self, command: str, output: str, error: str = None, output_file: str = None):
+        """
+        Add shell command output to memory for future reference
+
+        Args:
+            command: The shell command that was executed
+            output: Command output text
+            error: Command error text (if any)
+            output_file: Path to file where full output was saved (for large outputs)
+        """
+        # Skip empty outputs
+        if not output and not error:
+            return 0
+
+        # Create a descriptive memory entry
+        memory_text = f"Shell command '{command}' was executed and returned: "
+
+        # Add output preview
+        if output:
+            # For large outputs, include a limited preview
+            if len(output) > 500:
+                preview = output[:500].strip() + "..."
+                memory_text += f"\nOutput preview: {preview}"
+                if output_file:
+                    memory_text += f"\nFull output saved to: {output_file}"
+            else:
+                memory_text += f"\nOutput: {output}"
+
+        # Add error if present
+        if error:
+            memory_text += f"\nError: {error}"
+
+        # Create a context description
+        command_type = "file listing" if "ls" in command else \
+                      "search" if "grep" or "find" in command else \
+                      "system info" if "uname" or "hostname" or "whoami" in command else \
+                      "shell command"
+
+        # Add to memory
+        memories_added = self.memory_manager.add_memory(
+            self.current_user_id,
+            f"Information from {command_type}: {command}",
+            memory_text
+        )
+
+        if memories_added > 0:
+            print(f"[Memory] Added command output to memory: '{command}'")
+
+        return memories_added
+
+    def parse_command_output(self, command: str, output: str) -> List[str]:
+        """
+        Parse command output to extract key information that's valuable for memory.
+
+        Args:
+            command: The shell command that was executed
+            output: Command output text
+
+        Returns:
+            List of extracted key information strings
+        """
+        key_info = []
+
+        # Skip empty outputs
+        if not output:
+            return key_info
+
+        # Extract command type and apply specific parsing
+        if command.startswith("ls") or "find" in command:
+            # For directory listings, extract file information
+            lines = output.strip().split("\n")
+            if len(lines) > 20:
+                # For large directory listings, summarize
+                file_count = len([l for l in lines if not l.startswith("total") and l.strip()])
+                dir_match = re.search(r'ls\s+(.+?)($|\s+)', command)
+                dir_path = dir_match.group(1) if dir_match else "the directory"
+
+                # Extract file extensions to determine content type
+                extensions = {}
+                for line in lines:
+                    if "." in line:
+                        ext = line.split(".")[-1].split()[0].lower()
+                        if len(ext) < 10:  # Avoid garbage values
+                            extensions[ext] = extensions.get(ext, 0) + 1
+
+                # Create summary
+                if extensions:
+                    top_exts = sorted(extensions.items(), key=lambda x: x[1], reverse=True)[:5]
+                    ext_summary = ", ".join([f"{ext} ({count})" for ext, count in top_exts])
+                    key_info.append(f"Directory {dir_path} contains {file_count} files including: {ext_summary}")
+                else:
+                    key_info.append(f"Directory {dir_path} contains {file_count} files")
+
+                # Extract a few example filenames
+                examples = [l.split()[-1] for l in lines if not l.startswith("total") and " " in l][:5]
+                if examples:
+                    key_info.append(f"Example files: {', '.join(examples)}")
+            else:
+                # For smaller listings, include more details
+                files = [line.split()[-1] for line in lines if not line.startswith("total") and line.strip()]
+                if files:
+                    key_info.append(f"Files found: {', '.join(files)}")
+
+        elif "grep" in command:
+            # For search results, extract key findings
+            lines = output.strip().split("\n")
+            if len(lines) > 15:
+                # Summarize large results
+                query = re.search(r'grep\s+[\'"]*([^\'"]+)[\'"]*', command)
+                search_term = query.group(1) if query else "the term"
+                key_info.append(f"Found {len(lines)} matches for '{search_term}'")
+
+                # Include a few example matches
+                for i, line in enumerate(lines[:5]):
+                    # Clean up the line for better readability
+                    clean_line = re.sub(r'\s+', ' ', line).strip()
+                    key_info.append(f"Match {i+1}: {clean_line}")
+            else:
+                # Include all matches for smaller results
+                for line in lines:
+                    if line.strip():
+                        key_info.append(line.strip())
+
+        elif any(cmd in command for cmd in ["cat", "head", "tail", "less"]):
+            # For file content commands, extract key content
+            lines = output.strip().split("\n")
+
+            # Try to determine if it's a structured file
+            if output.startswith("{") or output.startswith("["):
+                # Possibly JSON
+                key_info.append("File appears to contain JSON data")
+
+                # Extract a few key fields if possible
+                try:
+                    import json
+                    data = json.loads(output)
+                    if isinstance(data, dict):
+                        fields = list(data.keys())[:10]
+                        key_info.append(f"JSON fields: {', '.join(fields)}")
+                    elif isinstance(data, list) and data and isinstance(data[0], dict):
+                        fields = list(data[0].keys())[:10]
+                        key_info.append(f"JSON array contains objects with fields: {', '.join(fields)}")
+                        key_info.append(f"Array contains {len(data)} items")
+                except:
+                    # Not valid JSON or other error
+                    pass
+
+            elif any(line.startswith("#") for line in lines[:10]):
+                # Possibly a script or config file
+                file_type = "Python script" if command.endswith(".py") else \
+                           "Shell script" if command.endswith(".sh") else \
+                           "Configuration file"
+                key_info.append(f"File appears to be a {file_type}")
+
+                # Extract a few comment lines which often contain useful info
+                comments = [line for line in lines[:20] if line.startswith("#")][:5]
+                for comment in comments:
+                    key_info.append(comment)
+
+            else:
+                # Generic text file
+                if len(lines) > 15:
+                    key_info.append(f"File contains {len(lines)} lines of text")
+                    # Include some sample content
+                    for line in lines[:5]:
+                        if line.strip():
+                            key_info.append(line.strip())
+                else:
+                    # For small files, include most content
+                    for line in lines:
+                        if line.strip():
+                            key_info.append(line.strip())
+
+        elif any(cmd in command for cmd in ["ps", "top", "htop"]):
+            # Process information
+            key_info.append("System process information:")
+            lines = output.strip().split("\n")
+            # Extract just process names and basic info
+            processes = []
+            for line in lines[1:15]:  # Skip header, limit to 15 processes
+                parts = line.split()
+                if len(parts) >= 4:
+                    # Basic process info: PID, CPU%, MEM%, COMMAND
+                    process_info = f"{parts[-1]} (PID:{parts[0]})"
+                    processes.append(process_info)
+
+            if processes:
+                key_info.append(f"Active processes: {', '.join(processes)}")
+
+        # If we couldn't extract specific information, add some generic info
+        if not key_info and output:
+            lines = output.strip().split("\n")
+            if len(lines) > 10:
+                key_info.append(f"Command output contains {len(lines)} lines")
+                # Add first few non-empty lines
+                for line in lines[:5]:
+                    if line.strip():
+                        key_info.append(line.strip())
+            else:
+                # For small outputs, include everything
+                for line in lines:
+                    if line.strip():
+                        key_info.append(line.strip())
+
+        return key_info
+
+    def add_command_to_memory(self, command: str, output: str, error: str = None, output_file: str = None):
+        """
+        Add shell command output to memory for future reference
+
+        Args:
+            command: The shell command that was executed
+            output: Command output text
+            error: Command error text (if any)
+            output_file: Path to file where full output was saved (for large outputs)
+        """
+        # Skip empty outputs
+        if not output and not error:
+            return 0
+
+        # Parse the command output to extract key information
+        key_info = self.parse_command_output(command, output)
+
+        # Create a descriptive memory entry
+        memory_text = f"Shell command '{command}' was executed."
+
+        # Add output file reference if available
+        if output_file:
+            memory_text += f" Full output saved to: {output_file}"
+
+        # Add error if present
+        if error:
+            memory_text += f"\nError: {error}"
+
+        # Determine command category for better context
+        command_type = "file listing" if any(cmd in command for cmd in ["ls", "find", "dir"]) else \
+                      "search" if any(cmd in command for cmd in ["grep", "findstr"]) else \
+                      "file content" if any(cmd in command for cmd in ["cat", "head", "tail", "less", "more"]) else \
+                      "system info" if any(cmd in command for cmd in ["uname", "hostname", "whoami", "ps", "top"]) else \
+                      "shell command"
+
+        # Add memories for each extracted piece of information
+        memories_added = 0
+
+        # If we have useful extracted information
+        if key_info:
+            for info in key_info:
+                # Add each piece as a separate memory for better retrieval
+                added = self.memory_manager.add_memory(
+                    self.current_user_id,
+                    f"Information from {command_type}: {command}",
+                    info
+                )
+                memories_added += added
+        else:
+            # Fallback to adding a summary if no structured information was extracted
+            # Create a more concise summary for memory
+            if len(output) > 300:
+                summary = output[:300].strip() + "..."
+            else:
+                summary = output
+
+            # Add as a single memory
+            added = self.memory_manager.add_memory(
+                self.current_user_id,
+                f"Information from {command_type}: {command}",
+                f"Command output: {summary}"
+            )
+            memories_added += added
+
+        if memories_added > 0:
+            print(f"[Memory] Added {memories_added} memories from command: '{command}'")
+
+        return memories_added
 
 
 def main():
