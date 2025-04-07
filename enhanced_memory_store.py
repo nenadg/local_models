@@ -542,49 +542,51 @@ class EnhancedMemoryManager:
         # # Limit the number of extracted facts (prioritize ones with entities)
         # return key_info[:5]
 
-    def add_memory(self, user_id: str, query: str, response: str) -> int:
-      """Add a new memory with better correction detection"""
-      if not self.auto_memorize:
-          return 0
+    def add_memory(self, user_id: str, query: str, response: str,
+               memory_type: str = "general", attributes: Dict = None) -> int:
+      """
+      Add a new memory with enhanced metadata tagging.
 
-      # Check if maintenance is due
-      self._check_maintenance(user_id)
+      Args:
+          user_id: The user ID
+          query: The query string
+          response: The response text
+          memory_type: Type of memory (general, factual, procedural, etc.)
+          attributes: Optional dictionary of specific attributes for entity-based memories
 
-      # Get user's vector store
-      store = self._get_user_store(user_id)
+      Returns:
+          Number of memories added
+      """
+      attributes = attributes or {}
 
-      # ENHANCED CORRECTION DETECTION
+      # Keep the original extraction logic
+      key_info = self.extract_key_information(query, response)
+
+      # Track whether this is a correction (existing logic)
       is_correction = False
       correction_indicators = ["incorrect", "wrong", "not true", "false", "mistake",
-                              "that's not", "but that's", "but that is", "actually",
-                              "in fact", "not correct"]
+                             "that's not", "but that's", "but that is", "actually",
+                             "in fact", "not correct"]
 
-      # Check if the query contains correction indicators
       query_lower = query.lower()
       if any(indicator in query_lower for indicator in correction_indicators):
           is_correction = True
-          print(f"[Memory] Detected correction in: '{query}'")
-
-      # Extract key information
-      key_info = self.extract_key_information(query, response)
+          # If this is a correction, update memory_type accordingly
+          memory_type = "correction"
 
       # Store each key piece of information
       memories_added = 0
       for info in key_info:
           embedding = self.generate_embedding(info)
 
-          # Add metadata about whether this is a correction
-          memory_type = "correction" if is_correction else "auto_extract"
-
-          # For corrections, add additional keywords to improve retrieval
-          if is_correction:
-              # Extract key terms from the correction
+          # Create enhanced metadata
+          if memory_type == "correction" or is_correction:
+              # Extract key terms from the correction (existing logic)
               terms = set(query_lower.split())
-              # Filter out common words
               stop_words = {'a', 'an', 'the', 'but', 'and', 'or', 'is', 'are', 'was', 'were', 'to', 'for', 'in', 'on', 'at', 'by'}
               keywords = ' '.join([term for term in terms if term not in stop_words and len(term) > 2])
 
-              # Store with added metadata
+              # Enhanced metadata for corrections
               metadata = {
                   'source_query': query,
                   'source_response': response[:100] + "..." if len(response) > 100 else response,
@@ -592,22 +594,27 @@ class EnhancedMemoryManager:
                   'type': memory_type,
                   'is_correction': True,
                   'correction_keywords': keywords,
-                  'priority': 10  # Higher priority for corrections
+                  'priority': 10,  # Higher priority for corrections
+                  'attributes': attributes  # Add the new attributes field
               }
           else:
+              # Enhanced metadata for normal memories
               metadata = {
                   'source_query': query,
                   'source_response': response[:100] + "..." if len(response) > 100 else response,
                   'timestamp': datetime.now().isoformat(),
                   'type': memory_type,
-                  'priority': 1  # Normal priority
+                  'priority': 1,  # Normal priority
+                  'attributes': attributes  # Add the new attributes field
               }
 
-          added = store.add(
+          # Add to the store (existing logic)
+          added = self._get_user_store(user_id).add(
               text=info,
               embedding=embedding,
               metadata=metadata
           )
+
           if added:
               memories_added += 1
 

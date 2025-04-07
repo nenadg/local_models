@@ -40,6 +40,9 @@ DEFAULT_SYSTEM_MESSAGE = {
 3. You may speculate if the user explicitly asks you to "please continue anyway" or "please speculate."
 4. When speculating, clearly indicate your uncertainty with phrases like "I'm not confident, but..."
 5. Be helpful, informative, and conversational in your responses.
+And remember - Imagine your words are like little treasure boxes. Instead of giving everyone a whole bunch of boxes at once,
+you choose just a few really cool ones to share. This way, people know you're thoughtful and your words are special.
+It’s like being a superhero: you use your superpower of speaking wisely and listen to others, too!
 """
 }
 
@@ -1328,165 +1331,278 @@ class TinyLlamaChat:
 
         return memories_added
 
-    def parse_command_output(self, command: str, output: str) -> List[str]:
+    def parse_command_output(self, command: str, output: str) -> List[Dict]:
         """
-        Parse command output to extract key information that's valuable for memory.
+        Parse command output with content-type detection and specialized parsing.
 
         Args:
             command: The shell command that was executed
             output: Command output text
 
         Returns:
-            List of extracted key information strings
+            List of parsed items with content, type, and attributes
         """
-        key_info = []
-
-        # Skip empty outputs
-        if not output:
-            return key_info
-
-        # Extract command type and apply specific parsing
-        if command.startswith("ls") or "find" in command:
-            # For directory listings, extract file information
-            lines = output.strip().split("\n")
-            if len(lines) > 20:
-                # For large directory listings, summarize
-                file_count = len([l for l in lines if not l.startswith("total") and l.strip()])
-                dir_match = re.search(r'ls\s+(.+?)($|\s+)', command)
-                dir_path = dir_match.group(1) if dir_match else "the directory"
-
-                # Extract file extensions to determine content type
-                extensions = {}
-                for line in lines:
-                    if "." in line:
-                        ext = line.split(".")[-1].split()[0].lower()
-                        if len(ext) < 10:  # Avoid garbage values
-                            extensions[ext] = extensions.get(ext, 0) + 1
-
-                # Create summary
-                if extensions:
-                    top_exts = sorted(extensions.items(), key=lambda x: x[1], reverse=True)[:5]
-                    ext_summary = ", ".join([f"{ext} ({count})" for ext, count in top_exts])
-                    key_info.append(f"Directory {dir_path} contains {file_count} files including: {ext_summary}")
-                else:
-                    key_info.append(f"Directory {dir_path} contains {file_count} files")
-
-                # Extract a few example filenames
-                examples = [l.split()[-1] for l in lines if not l.startswith("total") and " " in l][:5]
-                if examples:
-                    key_info.append(f"Example files: {', '.join(examples)}")
-            else:
-                # For smaller listings, include more details
-                files = [line.split()[-1] for line in lines if not line.startswith("total") and line.strip()]
-                if files:
-                    key_info.append(f"Files found: {', '.join(files)}")
-
+        # Detect content type based on command and output patterns
+        if self._is_mapping_data(command, output):
+            return self._parse_mapping_content(command, output)
+        elif self._is_mathematical_content(command, output):
+            return self._parse_mathematical_content(command, output)
+        elif self._is_entity_description(command, output):
+            return self._parse_entity_content(command, output)
+        elif command.startswith("ls") or "find" in command:
+            return self._parse_file_listing(command, output)
         elif "grep" in command:
-            # For search results, extract key findings
-            lines = output.strip().split("\n")
-            if len(lines) > 15:
-                # Summarize large results
-                query = re.search(r'grep\s+[\'"]*([^\'"]+)[\'"]*', command)
-                search_term = query.group(1) if query else "the term"
-                key_info.append(f"Found {len(lines)} matches for '{search_term}'")
+            return self._parse_search_results(command, output)
+        elif any(cmd in command for cmd in ["cat", "head", "tail"]):
+            return self._parse_file_content(command, output)
+        else:
+            return self._parse_general_content(command, output)
 
-                # Include a few example matches
-                for i, line in enumerate(lines[:5]):
-                    # Clean up the line for better readability
-                    clean_line = re.sub(r'\s+', ' ', line).strip()
-                    key_info.append(f"Match {i+1}: {clean_line}")
-            else:
-                # Include all matches for smaller results
-                for line in lines:
-                    if line.strip():
-                        key_info.append(line.strip())
+    def _is_mapping_data(self, command: str, output: str) -> bool:
+        """Detect if content contains mapping data (like transliteration tables)"""
+        # Look for patterns indicating mapping data
+        mapping_indicators = [
+            r'\w+\s*→\s*\w+',  # word → word
+            r'\w+\s*->\s*\w+',  # word -> word
+            r'mapping|map|translation|conversion',  # Keywords
+            r'table|chart|correspondence'  # Structure indicators
+        ]
 
-        elif any(cmd in command for cmd in ["cat", "head", "tail", "less"]):
-            # For file content commands, extract key content
-            lines = output.strip().split("\n")
+        # Check if file is likely a mapping table
+        if any(re.search(pattern, output, re.IGNORECASE) for pattern in mapping_indicators):
+            return True
 
-            # Try to determine if it's a structured file
-            if output.startswith("{") or output.startswith("["):
-                # Possibly JSON
-                key_info.append("File appears to contain JSON data")
+        # Check if filename indicates mapping
+        if "map" in command or "translation" in command:
+            return True
 
-                # Extract a few key fields if possible
-                try:
-                    import json
-                    data = json.loads(output)
-                    if isinstance(data, dict):
-                        fields = list(data.keys())[:10]
-                        key_info.append(f"JSON fields: {', '.join(fields)}")
-                    elif isinstance(data, list) and data and isinstance(data[0], dict):
-                        fields = list(data[0].keys())[:10]
-                        key_info.append(f"JSON array contains objects with fields: {', '.join(fields)}")
-                        key_info.append(f"Array contains {len(data)} items")
-                except:
-                    # Not valid JSON or other error
-                    pass
+        return False
 
-            elif any(line.startswith("#") for line in lines[:10]):
-                # Possibly a script or config file
-                file_type = "Python script" if command.endswith(".py") else \
-                           "Shell script" if command.endswith(".sh") else \
-                           "Configuration file"
-                key_info.append(f"File appears to be a {file_type}")
+    def _is_mathematical_content(self, command: str, output: str) -> bool:
+        """Detect if content contains mathematical information"""
+        # Look for patterns indicating mathematical content
+        math_indicators = [
+            r'=\s*\d+',  # Equations with numbers
+            r'[+\-*/^]',  # Mathematical operators
+            r'log|sin|cos|tan|sqrt',  # Mathematical functions
+            r'theorem|formula|equation',  # Mathematical terms
+            r'∫|∑|∏|√|π|∞|≠|≤|≥'  # Mathematical symbols
+        ]
 
-                # Extract a few comment lines which often contain useful info
-                comments = [line for line in lines[:20] if line.startswith("#")][:5]
-                for comment in comments:
-                    key_info.append(comment)
+        # Check file content for math indicators
+        if any(re.search(pattern, output) for pattern in math_indicators):
+            return True
 
-            else:
-                # Generic text file
-                if len(lines) > 15:
-                    key_info.append(f"File contains {len(lines)} lines of text")
-                    # Include some sample content
-                    for line in lines[:5]:
-                        if line.strip():
-                            key_info.append(line.strip())
-                else:
-                    # For small files, include most content
-                    for line in lines:
-                        if line.strip():
-                            key_info.append(line.strip())
+        # Check filename for math indicators
+        math_files = ["math", "calc", "formula", "equation", "log", "algorithm"]
+        if any(term in command.lower() for term in math_files):
+            return True
 
-        elif any(cmd in command for cmd in ["ps", "top", "htop"]):
-            # Process information
-            key_info.append("System process information:")
-            lines = output.strip().split("\n")
-            # Extract just process names and basic info
-            processes = []
-            for line in lines[1:15]:  # Skip header, limit to 15 processes
-                parts = line.split()
-                if len(parts) >= 4:
-                    # Basic process info: PID, CPU%, MEM%, COMMAND
-                    process_info = f"{parts[-1]} (PID:{parts[0]})"
-                    processes.append(process_info)
+        return False
 
-            if processes:
-                key_info.append(f"Active processes: {', '.join(processes)}")
+    def _is_entity_description(self, command: str, output: str) -> bool:
+        """Detect if content contains entity descriptions"""
+        # Look for patterns indicating entity descriptions
+        entity_indicators = [
+            r'^[A-Z][a-z]+(?:\s+[a-z]+){0,3}(?:\s+[A-Z][a-z]+)*\s+is\s+a',  # Entity is a...
+            r'\([A-Z]{2,}\)',  # Acronyms in parentheses
+            r'species|genus|family|class|order|type',  # Taxonomic terms
+            r'was\s+born|founded|established|discovered|created',  # Historical statements
+            r'located\s+in|found\s+in|native\s+to',  # Location statements
+            r'\d+\s*(?:cm|m|km|ft|year|kg)'  # Measurements/quantitative properties
+        ]
 
-        # If we couldn't extract specific information, add some generic info
-        if not key_info and output:
-            lines = output.strip().split("\n")
-            if len(lines) > 10:
-                key_info.append(f"Command output contains {len(lines)} lines")
-                # Add first few non-empty lines
-                for line in lines[:5]:
-                    if line.strip():
-                        key_info.append(line.strip())
-            else:
-                # For small outputs, include everything
-                for line in lines:
-                    if line.strip():
-                        key_info.append(line.strip())
+        # Check for entity description patterns
+        if any(re.search(pattern, output) for pattern in entity_indicators):
+            return True
 
-        return key_info
+        return False
+
+    def _parse_mapping_content(self, command: str, output: str) -> List[Dict]:
+        """
+        Parse mapping content (transliteration tables, conversion charts, etc.).
+
+        Args:
+            command: The shell command
+            output: Command output text
+
+        Returns:
+            List of parsed mapping entries
+        """
+        parsed_items = []
+
+        # Look for mapping table sections and headings
+        sections = re.split(r'^#\s+(.+)$', output, flags=re.MULTILINE)
+
+        # If no clear sections, treat as a single section
+        if len(sections) <= 1:
+            sections = ["Mappings", output]
+
+        # Process each section
+        for i in range(1, len(sections), 2):
+            if i + 1 >= len(sections):
+                continue
+
+            section_name = sections[i].strip()
+            section_content = sections[i+1].strip()
+
+            # Extract mapping pairs with regex
+            mapping_pattern = r'(\w+(?:\/\w+)?)\s*(?:→|->)\s*([^\s(]+)(?:\s*\(([^)]+)\))?'
+            mappings = re.findall(mapping_pattern, section_content)
+
+            if mappings:
+                # Process mappings in this section
+                mapping_entries = []
+                for source, target, note in mappings:
+                    mapping_entries.append({
+                        "source": source.strip(),
+                        "target": target.strip(),
+                        "note": note.strip() if note else ""
+                    })
+
+                # Create a structured memory item
+                mapping_item = {
+                    "content": f"Mapping table: {section_name}\n" +
+                               "\n".join([f"{m['source']} → {m['target']}{' (' + m['note'] + ')' if m['note'] else ''}"
+                                         for m in mapping_entries]),
+                    "type": "mapping",
+                    "attributes": {
+                        "section": section_name,
+                        "entries": mapping_entries,
+                        "mapping_count": len(mapping_entries)
+                    }
+                }
+                parsed_items.append(mapping_item)
+
+        # Look for examples
+        example_section = re.search(r'(?:Example|Examples):\s*(.+?)(?=$|#)', output, re.DOTALL | re.IGNORECASE)
+        if example_section:
+            example_text = example_section.group(1).strip()
+
+            # Extract example pairs
+            example_pattern = r'"([^"]+)"\s*(?:→|->)\s*"([^"]+)"'
+            examples = re.findall(example_pattern, example_text)
+
+            if examples:
+                example_item = {
+                    "content": "Mapping examples:\n" +
+                               "\n".join([f'"{source}" → "{target}"' for source, target in examples]),
+                    "type": "mapping_example",
+                    "attributes": {
+                        "examples": [{"source": s, "target": t} for s, t in examples]
+                    }
+                }
+                parsed_items.append(example_item)
+
+        return parsed_items
+
+    def _parse_mathematical_content(self, command: str, output: str) -> List[Dict]:
+        """Parse mathematical content (formulas, theorems, etc.)"""
+        parsed_items = []
+
+        # Extract definitions
+        definition_pattern = r'Definition:\s*(.+?)(?=\n\n|\n[A-Z]|$)'
+        definitions = re.findall(definition_pattern, output, re.DOTALL)
+
+        for definition in definitions:
+            definition_text = definition.strip()
+            parsed_items.append({
+                "content": f"Mathematical definition:\n{definition_text}",
+                "type": "mathematical_definition",
+                "attributes": {
+                    "definition_text": definition_text
+                }
+            })
+
+        # Extract formulas and properties
+        formula_patterns = [
+            r'([^.]+?)\s*=\s*([^.\n]+)',  # Simple equations
+            r'([A-Za-z_]+(?:\([^)]+\))?)\s*:\s*([^.\n]+)'  # Named formulas
+        ]
+
+        for pattern in formula_patterns:
+            formulas = re.findall(pattern, output)
+            for left, right in formulas:
+                parsed_items.append({
+                    "content": f"Formula: {left.strip()} = {right.strip()}",
+                    "type": "mathematical_formula",
+                    "attributes": {
+                        "left_side": left.strip(),
+                        "right_side": right.strip()
+                    }
+                })
+
+        # Extract properties
+        property_pattern = r'(?:Property|Properties):\s*(.+?)(?=\n\n|\n[A-Z]|$)'
+        properties_match = re.search(property_pattern, output, re.DOTALL)
+
+        if properties_match:
+            properties_text = properties_match.group(1).strip()
+            property_items = re.split(r'\n\s*[a-z]\)\s*', properties_text)
+
+            for prop in property_items:
+                if prop.strip():
+                    parsed_items.append({
+                        "content": f"Mathematical property:\n{prop.strip()}",
+                        "type": "mathematical_property",
+                        "attributes": {
+                            "property_text": prop.strip()
+                        }
+                    })
+
+        return parsed_items
+
+    def _parse_entity_content(self, command: str, output: str) -> List[Dict]:
+        """Extract entities and their attributes"""
+        parsed_items = []
+
+        # Split into paragraphs for entity extraction
+        paragraphs = re.split(r'\n\n+', output)
+
+        for para in paragraphs:
+            # Look for entity descriptions
+            entity_match = re.search(r'^([A-Z][a-z]+(?: [a-z]+)*)', para)
+            if entity_match:
+                entity_name = entity_match.group(1)
+
+                # Extract attributes with specific patterns
+                attributes = {}
+
+                # Age information
+                age_match = re.search(r'(\d+) years old', para)
+                if age_match:
+                    attributes['age'] = int(age_match.group(1))
+
+                # Height information
+                height_match = re.search(r'(\d+(?:\.\d+)?) m(?:etres)? \((\d+(?:\.\d+)?) f(?:ee)?t\)', para)
+                if height_match:
+                    attributes['height_m'] = float(height_match.group(1))
+                    attributes['height_ft'] = float(height_match.group(2))
+
+                # Location information
+                location_match = re.search(r'in ([A-Z][a-z]+(?: [A-Z][a-z]+)*)', para)
+                if location_match:
+                    attributes['location'] = location_match.group(1)
+
+                # Date information
+                date_match = re.search(r'(?:in|on) (\d{4})', para)
+                if date_match:
+                    attributes['year'] = int(date_match.group(1))
+
+                # Create entity memory with explicit attributes
+                parsed_items.append({
+                    'content': f"Entity: {entity_name}\n" +
+                               "\n".join([f"{attr}: {value}" for attr, value in attributes.items()]),
+                    'type': 'entity',
+                    'attributes': attributes,
+                    'entity_name': entity_name
+                })
+
+        return parsed_items
 
     def add_command_to_memory(self, command: str, output: str, error: str = None, output_file: str = None):
         """
-        Add shell command output to memory for future reference
+        Add shell command output to memory for future reference with enhanced parsing.
 
         Args:
             command: The shell command that was executed
@@ -1498,53 +1614,53 @@ class TinyLlamaChat:
         if not output and not error:
             return 0
 
-        # Parse the command output to extract key information
-        key_info = self.parse_command_output(command, output)
+        # Parse the command output based on command type and content patterns
+        parsed_items = self.parse_command_output(command, output)
 
-        # Create a descriptive memory entry
-        memory_text = f"Shell command '{command}' was executed."
-
-        # Add output file reference if available
-        if output_file:
-            memory_text += f" Full output saved to: {output_file}"
-
-        # Add error if present
-        if error:
-            memory_text += f"\nError: {error}"
-
-        # Determine command category for better context
-        command_type = "file listing" if any(cmd in command for cmd in ["ls", "find", "dir"]) else \
-                      "search" if any(cmd in command for cmd in ["grep", "findstr"]) else \
-                      "file content" if any(cmd in command for cmd in ["cat", "head", "tail", "less", "more"]) else \
-                      "system info" if any(cmd in command for cmd in ["uname", "hostname", "whoami", "ps", "top"]) else \
-                      "shell command"
-
-        # Add memories for each extracted piece of information
+        # Add each parsed item to memory with appropriate type and metadata
         memories_added = 0
 
-        # If we have useful extracted information
-        if key_info:
-            for info in key_info:
-                # Add each piece as a separate memory for better retrieval
+        if parsed_items:
+            for item in parsed_items:
+                # Extract memory content and metadata from parsed item
+                content = item.get('content', '')
+                memory_type = item.get('type', 'general')
+                attributes = item.get('attributes', {})
+
+                # Add as a structured memory
                 added = self.memory_manager.add_memory(
                     self.current_user_id,
-                    f"Information from {command_type}: {command}",
-                    info
+                    f"Information from {memory_type}: {command}",
+                    content,
+                    memory_type=memory_type,
+                    attributes=attributes
                 )
                 memories_added += added
         else:
-            # Fallback to adding a summary if no structured information was extracted
-            # Create a more concise summary for memory
-            if len(output) > 300:
-                summary = output[:300].strip() + "..."
-            else:
-                summary = output
+            # Fallback: add as a general memory if parsing failed
+            memory_text = f"Shell command '{command}' was executed."
 
-            # Add as a single memory
+            # Add output file reference if available
+            if output_file:
+                memory_text += f" Full output saved to: {output_file}"
+
+            # Add output preview
+            if output:
+                if len(output) > 300:
+                    summary = output[:300].strip() + "..."
+                    memory_text += f"\nOutput: {summary}"
+                else:
+                    memory_text += f"\nOutput: {output}"
+
+            # Add error if present
+            if error:
+                memory_text += f"\nError: {error}"
+
+            # Add as a general memory
             added = self.memory_manager.add_memory(
                 self.current_user_id,
-                f"Information from {command_type}: {command}",
-                f"Command output: {summary}"
+                f"Information from command: {command}",
+                memory_text
             )
             memories_added += added
 
