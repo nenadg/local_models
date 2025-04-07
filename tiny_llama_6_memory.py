@@ -231,18 +231,41 @@ class TinyLlamaChat:
 
             memories = result['memory_text']
             settings = result['settings']
-
-            # Log domain detection for debugging
             domain = settings['domain']
-            confidence = settings['domain_confidence']
-            if domain != 'unknown':
-                print(f"[Domain Detection] Query type: {domain} (confidence: {confidence:.2f})")
-                print(f"[Memory Settings] Weight: {settings['memory_weight']}, Sharpening: {settings['sharpening_factor']}")
+
+            # Add procedural knowledge section for certain domains
+            if domain in ['translation', 'procedural']:
+                # Retrieve specialized procedural knowledge
+                procedures = self.retrieve_procedural_knowledge(current_query)
+                if procedures:
+                    # Create structured procedure section
+                    procedure_section = self.create_procedural_prompt_section(procedures)
+                    if procedure_section:
+                        # Add explicit instruction for how to apply the knowledge
+                        instruction = "\nIMPORTANT: When performing tasks like translation or following procedures, " \
+                                    "use the PROCEDURAL KNOWLEDGE section below as a direct reference. " \
+                                    "For translations, apply each mapping rule precisely.\n"
+
+                        # Append to memories with high priority
+                        memories = instruction + procedure_section + "\n\n" + memories
 
             if memories:
-                # Add more explicit, direct instructions
                 enhanced_system_content += "\n\nIMPORTANT: You MUST apply the following information in all your responses:"
                 enhanced_system_content += f"\n{memories}"
+
+            # memories = result['memory_text']
+            # settings = result['settings']
+            # domain = settings['domain'] # Log domain detection for debugging
+            # confidence = settings['domain_confidence']
+
+            # if domain != 'unknown':
+            #     print(f"[Domain Detection] Query type: {domain} (confidence: {confidence:.2f})")
+            #     print(f"[Memory Settings] Weight: {settings['memory_weight']}, Sharpening: {settings['sharpening_factor']}")
+
+            # if memories:
+            #     # Add more explicit, direct instructions
+            #     enhanced_system_content += "\n\nIMPORTANT: You MUST apply the following information in all your responses:"
+            #     enhanced_system_content += f"\n{memories}"
 
         # Create messages with enhanced system prompt
         enhanced_messages = [
@@ -1530,6 +1553,216 @@ class TinyLlamaChat:
 
         return memories_added
 
+
+    def parse_procedural_content(self, content: str, command: str = "") -> List[Dict]:
+        """
+        Parse content specifically for procedural knowledge (steps, mappings, rules).
+
+        Args:
+            content: Text content containing procedural knowledge
+            command: Original command that generated the content (for context)
+
+        Returns:
+            List of structured procedural knowledge entries
+        """
+        procedures = []
+
+        # Look for mapping tables (like English to Katakana)
+        mapping_pattern = r'(\w+)\s*(?:→|->)\s*([^\s(]+)(?:\s*\(([^)]+)\))?'
+        mappings = re.findall(mapping_pattern, content)
+
+        if mappings:
+            # Group related mappings together
+            mapping_dict = {}
+            for source, target, note in mappings:
+                source = source.strip().lower()
+                category = self._extract_mapping_category(source, content)
+
+                if category not in mapping_dict:
+                    mapping_dict[category] = []
+
+                mapping_dict[category].append({
+                    "input": source,
+                    "output": target.strip(),
+                    "note": note.strip() if note else ""
+                })
+
+            # Create structured procedural entries
+            for category, items in mapping_dict.items():
+                procedures.append({
+                    "type": "mapping_table",
+                    "category": category,
+                    "entries": items,
+                    "source_command": command,
+                    "example_pairs": self._extract_example_pairs(content)
+                })
+
+        # Look for numbered/bulleted step-by-step instructions
+        steps_pattern = r'(?:^|\n)(?:\d+\.|\*|\-)\s+(.+?)(?=(?:\n(?:\d+\.|\*|\-)\s+)|$)'
+        steps = re.findall(steps_pattern, content)
+
+        if steps:
+            procedures.append({
+                "type": "step_sequence",
+                "steps": steps,
+                "source_command": command
+            })
+
+        return procedures
+
+    def retrieve_procedural_knowledge(self, query: str, procedure_type: str = None) -> List[Dict]:
+        """
+        Retrieve procedural knowledge relevant to a query, optimized for application.
+
+        Args:
+            query: The user query
+            procedure_type: Optional filter for specific procedure types
+
+        Returns:
+            List of relevant procedural knowledge entries
+        """
+        # First use vector search to find potentially relevant memories
+        query_embedding = self.memory_manager.generate_embedding(query)
+        results = self.memory_manager._get_user_store(self.current_user_id).search(
+            query_embedding, top_k=15, min_similarity=0.2
+        )
+
+        # Extract procedure-related content
+        procedures = []
+        for result in results:
+            # Check if this memory contains procedural content markers
+            has_markers = any(marker in result['text'].lower() for marker in
+                            ["step", "→", "->", "mapping", "instruction", "how to"])
+
+            if has_markers:
+                # Parse the procedural content
+                parsed = self.parse_procedural_content(result['text'],
+                                                    result.get('metadata', {}).get('source_query', ''))
+
+                # Add to our collection with the similarity score
+                for proc in parsed:
+                    proc['relevance'] = result['similarity']
+                    procedures.append(proc)
+
+        # Filter by type if specified
+        if procedure_type:
+            procedures = [p for p in procedures if p.get('type') == procedure_type]
+
+        # Sort by relevance and return
+        return sorted(procedures, key=lambda x: x.get('relevance', 0), reverse=True)
+
+    def create_procedural_prompt_section(self, procedures: List[Dict]) -> str:
+        """
+        Create a structured prompt section from procedural knowledge.
+
+        Args:
+            procedures: List of procedural knowledge entries
+
+        Returns:
+            Formatted prompt section for procedural knowledge
+        """
+        if not procedures:
+            return ""
+
+        sections = []
+
+        # Handle mapping tables
+        mapping_tables = [p for p in procedures if p.get('type') == 'mapping_table']
+        if mapping_tables:
+            sections.append("PROCEDURAL KNOWLEDGE - MAPPING TABLES:")
+
+            for i, table in enumerate(mapping_tables[:3]):  # Limit to top 3 for context window
+                entries = table.get('entries', [])
+                category = table.get('category', 'General').title()
+
+                sections.append(f"\n{i+1}. {category} Mappings:")
+
+                # Format entries in a clean, structured way
+                formatted_entries = []
+                for entry in entries[:15]:  # Limit entries for context
+                    input_val = entry.get('input', '')
+                    output_val = entry.get('output', '')
+                    note = f" ({entry.get('note')})" if entry.get('note') else ""
+
+                    formatted_entries.append(f"  • {input_val} → {output_val}{note}")
+
+                sections.append("\n".join(formatted_entries))
+
+                # Add examples if available
+                examples = table.get('example_pairs', [])
+                if examples:
+                    sections.append("\n  Examples:")
+                    for ex_input, ex_output in examples[:3]:
+                        sections.append(f"  • \"{ex_input}\" → \"{ex_output}\"")
+
+        # Handle step sequences
+        step_sequences = [p for p in procedures if p.get('type') == 'step_sequence']
+        if step_sequences:
+            sections.append("\nPROCEDURAL KNOWLEDGE - STEP SEQUENCES:")
+
+            for i, sequence in enumerate(step_sequences[:2]):
+                steps = sequence.get('steps', [])
+                sections.append(f"\n{i+1}. Step Sequence:")
+
+                for j, step in enumerate(steps):
+                    sections.append(f"  {j+1}. {step}")
+
+        return "\n".join(sections)
+
+    def _extract_mapping_category(self, source_item: str, full_content: str) -> str:
+        """Extract category for a mapping entry based on content patterns"""
+        lowercase_content = full_content.lower()
+
+        # Check section headers near this item
+        lines = full_content.split('\n')
+        for i, line in enumerate(lines):
+            if source_item in line.lower():
+                # Look at up to 10 lines before this one for a header
+                for j in range(max(0, i-10), i):
+                    if re.match(r'^#\s+(.+)', lines[j]):
+                        header = re.match(r'^#\s+(.+)', lines[j]).group(1)
+                        # Clean up the header
+                        header = re.sub(r'consonants|vowels|characters|mapping', '', header, flags=re.I)
+                        return header.strip()
+
+        # Check common categories
+        if re.match(r'^[aeiou]', source_item):
+            return "vowels"
+        elif len(source_item) == 1:
+            return "single characters"
+        elif "consonant" in lowercase_content and source_item[0] in lowercase_content:
+            for line in lowercase_content.split('\n'):
+                if f"{source_item[0]} consonants" in line:
+                    return f"{source_item[0].upper()} consonants"
+
+        # Default to character type
+        if len(source_item) == 1:
+            return "single characters"
+        elif len(source_item) == 2 and source_item[1] in "aeiou":
+            return f"{source_item[0].upper()} consonants"
+        else:
+            return "combinations"
+
+    def _extract_example_pairs(self, content: str) -> List[Tuple[str, str]]:
+        """Extract example input/output pairs from content"""
+        examples = []
+
+        # Look for example section
+        example_section_match = re.search(r'(?:example|examples|word examples)[:\s]+(.*?)(?=(?:^#)|$)',
+                                        content, re.I | re.DOTALL | re.MULTILINE)
+
+        if example_section_match:
+            example_text = example_section_match.group(1)
+            # Extract pairs in format: "source → target"
+            pairs = re.findall(r'"([^"]+)"\s*(?:→|->)\s*"([^"]+)"', example_text)
+            if pairs:
+                examples.extend(pairs)
+            else:
+                # Try alternate format: source → target
+                alt_pairs = re.findall(r'(\w+)\s*(?:→|->)\s*([^\s(]+)', example_text)
+                examples.extend(alt_pairs)
+
+        return examples
 
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
