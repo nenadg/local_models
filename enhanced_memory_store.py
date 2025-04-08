@@ -217,37 +217,6 @@ class IndexedVectorStore:
                   print("Cannot rebuild index - no embedding function available")
                   return False
 
-              # Generate new embeddings for all kept documents
-              # NOTE: This assumes we have access to an embedding function
-              # If this is not available, this approach won't work
-
-              # # Create a temporary replacement in-memory index
-              # if hasattr(self, 'generate_embedding'):
-              #     # If the class has a generate_embedding method, use it
-              #     new_embeddings = np.zeros((len(new_docs), self.embedding_dim), dtype=np.float32)
-              #     for i, doc in enumerate(new_docs):
-              #         # This assumes generate_embedding is available
-              #         embedding = self.generate_embedding(doc)
-              #         new_embeddings[i] = embedding / np.linalg.norm(embedding)  # Normalize
-
-              #     # Create new index
-              #     new_index = faiss.IndexFlatIP(self.embedding_dim)
-              #     if len(new_embeddings) > 0:
-              #         new_index.add(new_embeddings)
-
-              #     # Update instance variables
-              #     self.index = new_index
-              #     self.documents = new_docs
-              #     self.metadata = new_metadata
-              #     self.doc_hashes = new_hashes
-
-              #     # Save changes
-              #     self.save()
-              #     return True
-              # else:
-              #     print("Cannot rebuild index - no embedding function available")
-              #     return False
-
           return False
 
       except Exception as e:

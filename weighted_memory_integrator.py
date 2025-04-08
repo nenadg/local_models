@@ -1,6 +1,7 @@
 import re
 import numpy as np
 from typing import List, Dict, Any, Optional
+from pattern_matching_utils import extract_arithmetic_expression, extract_example_pairs, extract_mapping_category, clean_duplicate_memories
 
 class WeightedMemoryIntegrator:
     """
@@ -186,34 +187,8 @@ class WeightedMemoryIntegrator:
         return self._clean_duplicate_memories(memory_text)
 
     def _extract_arithmetic_expression(self, query: str) -> Optional[str]:
-        """
-        Extract an arithmetic expression from a query.
-        
-        Args:
-            query: The query string
-            
-        Returns:
-            Extracted expression or None
-        """
-        # Look for patterns like "what is 5 + 3" or "calculate 10 - 7"
-        # or just "5 + 3"
-        patterns = [
-            r'(\d+\s*[\+\-\*\/]\s*\d+)',
-            r'(?:what is|calculate|compute|evaluate|result of).*?(\d+\s*[\+\-\*\/]\s*\d+)'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, query, re.IGNORECASE)
-            if match:
-                # Get the expression and clean it up
-                expr = match.group(1).strip()
-                # Replace any unicode math symbols with Python operators
-                expr = expr.replace('×', '*').replace('÷', '/')
-                # Remove any spaces
-                expr = expr.replace(' ', '')
-                return expr
-                
-        return None
+        """Extract an arithmetic expression from a query."""
+        return extract_arithmetic_expression(query)
         
     def _post_process_arithmetic(self, query: str, memory_text: str) -> str:
         """
@@ -646,45 +621,5 @@ class WeightedMemoryIntegrator:
         return '\n'.join(cleaned_lines)
 
     def _clean_duplicate_memories(self, memory_text: str) -> str:
-        """Remove duplicate or highly similar memories from the text"""
-        if not memory_text:
-            return ""
-
-        # Split into sections
-        sections = re.split(r'(IMPORTANT CORRECTIONS|FACTUAL INFORMATION|OTHER RELEVANT INFORMATION):', memory_text)
-
-        if len(sections) <= 1:
-            return memory_text
-
-        cleaned_sections = []
-        for i in range(0, len(sections), 2):
-            if i+1 < len(sections):
-                header = sections[i]
-                content = sections[i+1]
-
-                # Split content into bullet points
-                bullets = content.split('\n- ')
-
-                # Remove duplicates while preserving order
-                seen = set()
-                unique_bullets = []
-
-                for bullet in bullets:
-                    # Create a simplified key for comparison (lowercase, punctuation removed)
-                    simplified = re.sub(r'[^\w\s]', '', bullet.lower())
-                    simplified = ' '.join(simplified.split())  # Normalize whitespace
-
-                    if simplified and simplified not in seen:
-                        seen.add(simplified)
-                        unique_bullets.append(bullet)
-
-                # Rebuild content
-                cleaned_content = '\n- '.join(unique_bullets)
-                if i == 0:  # First section doesn't need the header
-                    cleaned_sections.append(header + ":" + cleaned_content)
-                else:
-                    cleaned_sections.append(header + ":" + cleaned_content)
-            else:
-                cleaned_sections.append(sections[i])
-
-        return ''.join(cleaned_sections)
+        """Remove duplicate memories from text."""
+        return clean_duplicate_memories(memory_text)

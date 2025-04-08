@@ -147,9 +147,9 @@ class ResponseFilter:
             sharpened_metrics["entropy"] > self.entropy_threshold and
             sharpened_metrics["perplexity"] > self.perplexity_threshold):
             return True, "low_confidence"
-
-        if (metrics["confidence"] < self.confidence_threshold and metrics["entropy"] > self.entropy_threshold and metrics["perplexity"] > self.perplexity_threshold):
-            return True, "low_confidence"
+        else:
+            if (metrics["confidence"] < self.confidence_threshold and metrics["entropy"] > self.entropy_threshold and metrics["perplexity"] > self.perplexity_threshold):
+                return True, "low_confidence"
 
         return False, "acceptable"
 

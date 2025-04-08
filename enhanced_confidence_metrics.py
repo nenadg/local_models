@@ -90,8 +90,9 @@ class EnhancedConfidenceMetrics:
         self.token_probabilities.append(sharpened_prob)
         self.token_entropies.append(sharpened_entropy)
 
-        #print(f"DEBUG - Added token: prob={token_prob:.3f}, entropy={entropy:.3f}")
-        #print(f"DEBUG - Original tokens recorded: {len(self.original_token_probabilities)}")
+        print(f"DEBUG - Added token: prob={token_prob:.3f}, entropy={entropy:.3f}")
+        print(f"DEBUG - Original tokens recorded: {len(self.original_token_probabilities)}")
+        print(f"DEBUG - Recalculated metrics: {metrics.keys()}")
 
     def _sharpen_token_metrics(self, probability: float, entropy: float) -> tuple:
         """
@@ -301,11 +302,12 @@ class EnhancedConfidenceMetrics:
             "max": float(np.max(self.token_probabilities)),
             "std_dev": float(np.std(self.token_probabilities))
         }
+
     def set_sharpening_factor(self, factor: float) -> None:
         """
         Set the sharpening factor and recalculate metrics.
         Args:
-            factor: New sharpening factor (typically 0.3-2.0)
+            factor: New sharpening factor (typically 1.0-2.0)
         """
         self.sharpening_factor = factor
 
@@ -313,44 +315,24 @@ class EnhancedConfidenceMetrics:
         self.token_probabilities = []
         self.token_entropies = []
 
-        # Recalculate all sharpened values from original values
-        if self.original_token_probabilities:
-            for i in range(len(self.original_token_probabilities)):
-                prob = self.original_token_probabilities[i]
-                entropy = self.original_token_entropies[i]
-                sharp_prob, sharp_entropy = self._sharpen_token_metrics(prob, entropy)
-                self.token_probabilities.append(sharp_prob)
-                self.token_entropies.append(sharp_entropy)
-                
-    # def set_sharpening_factor(self, factor: float) -> None:
-    #     # """
-    #     # Set the sharpening factor and recalculate metrics.
-    #     # Args:
-    #     #     factor: New sharpening factor (typically 1.0-2.0)
-    #     # """
-    #     # self.sharpening_factor = factor
-        
-    #     # # Reset sharpened values
-    #     # self.token_probabilities = []
-    #     # self.token_entropies = []
-        
-    #     # # Recalculate all sharpened values
-    #     # for i in range(len(self.original_token_probabilities)):
-    #     #     prob = self.original_token_probabilities[i]
-    #     #     entropy = self.original_token_entropies[i]
-    #     #     sharp_prob, sharp_entropy = self._sharpen_token_metrics(prob, entropy)
-    #     #     self.token_probabilities.append(sharp_prob)
-    #     #     self.token_entropies.append(sharp_entropy)
-    #     """Set the sharpening factor for memory retrieval and confidence metrics"""
-    #     # Update confidence metrics sharpening
-    #     if hasattr(self.confidence_metrics, 'set_sharpening_factor'):
-    #         old_factor = self.confidence_metrics.sharpening_factor
-    #         self.confidence_metrics.set_sharpening_factor(factor)
-    #         print(f"DEBUG - Updated confidence sharpening factor: {old_factor} -> {factor}")
+        # Recalculate all sharpened values
+        for i in range(len(self.original_token_probabilities)):
+            prob = self.original_token_probabilities[i]
+            entropy = self.original_token_entropies[i]
+            sharp_prob, sharp_entropy = self._sharpen_token_metrics(prob, entropy)
+            self.token_probabilities.append(sharp_prob)
+            self.token_entropies.append(sharp_entropy)
 
-    #         # Force recalculation with sharpening applied
-    #         if hasattr(self.confidence_metrics, 'original_token_probabilities'):
-    #             print(f"DEBUG - Original tokens: {len(self.confidence_metrics.original_token_probabilities)}")
-    #             if self.confidence_metrics.original_token_probabilities:
-    #                 metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
-    #                 print(f"DEBUG - Recalculated metrics: {metrics.keys()}")
+        """Set the sharpening factor for memory retrieval and confidence metrics"""
+        # Update confidence metrics sharpening
+        if hasattr(self.confidence_metrics, 'set_sharpening_factor'):
+            old_factor = self.confidence_metrics.sharpening_factor
+            self.confidence_metrics.set_sharpening_factor(factor)
+            print(f"DEBUG - Updated confidence sharpening factor: {old_factor} -> {factor}")
+
+            # Force recalculation with sharpening applied
+            if hasattr(self.confidence_metrics, 'original_token_probabilities'):
+                print(f"DEBUG - Original tokens: {len(self.confidence_metrics.original_token_probabilities)}")
+                if self.confidence_metrics.original_token_probabilities:
+                    metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
+                    print(f"DEBUG - Recalculated metrics: {metrics.keys()}")

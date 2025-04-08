@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Tuple
 from enhanced_memory_store import EnhancedMemoryManager, IndexedVectorStore
 
 from sharpened_vector_space import SharpenedVectorStore
+from memory_optimized_vector_store import MemoryOptimizedVectorStore
 
 class EnhancedMemoryManagerWithSharpening(EnhancedMemoryManager):
     """
@@ -16,7 +17,8 @@ class EnhancedMemoryManagerWithSharpening(EnhancedMemoryManager):
         device: str = None,
         auto_memorize: bool = True,
         sharpening_enabled: bool = True,
-        sharpening_factor: float = 0.3
+        sharpening_factor: float = 0.3,
+        vector_store_class = None
     ):
         # Initialize parent class
         super().__init__(
@@ -29,15 +31,18 @@ class EnhancedMemoryManagerWithSharpening(EnhancedMemoryManager):
         # Initialize sharpening parameters
         self.sharpening_enabled = sharpening_enabled
         self.sharpening_factor = sharpening_factor
+        self.vector_store_class = vector_store_class or IndexedVectorStore
 
         # Create the sharpening utility
         self.sharpening_util = SharpenedVectorStore()
 
+
     def _get_user_store(self, user_id: str) -> IndexedVectorStore:
         """Get or create a vector store for a user with sharpening support"""
         if user_id not in self.user_stores:
-            # Get the base store from parent class
-            store = super()._get_user_store(user_id)
+            # Create store using the specified class
+            store_path = os.path.join(self.memory_dir, f"{user_id}_store")
+            store = self.vector_store_class(store_path, embedding_function=self.generate_embedding)
 
             # Store the original search method for future reference
             if not hasattr(store, 'original_search'):
@@ -55,6 +60,29 @@ class EnhancedMemoryManagerWithSharpening(EnhancedMemoryManager):
             self.user_stores[user_id] = store
 
         return self.user_stores[user_id]
+
+    # def _get_user_store(self, user_id: str) -> IndexedVectorStore:
+    #     """Get or create a vector store for a user with sharpening support"""
+    #     if user_id not in self.user_stores:
+    #         # Get the base store from parent class
+    #         store = super()._get_user_store(user_id)
+
+    #         # Store the original search method for future reference
+    #         if not hasattr(store, 'original_search'):
+    #             store.original_search = store.search
+
+    #         # Enhance the store's search method with sharpening
+    #         store.search = self.sharpening_util.update_search_with_sharpening(
+    #             store.original_search,
+    #             sharpening_factor=self.sharpening_factor
+    #         )
+
+    #         # Store sharpening capability reference
+    #         store.sharpen_embeddings = self.sharpening_util.sharpen_embeddings
+
+    #         self.user_stores[user_id] = store
+
+    #     return self.user_stores[user_id]
 
     def retrieve_relevant_memories(self, user_id: str, query: str, top_k: int = 8, apply_sharpening: bool = None) -> str:
         """

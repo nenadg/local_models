@@ -12,8 +12,6 @@ import re
 import argparse
 from typing import List, Dict, Optional, Tuple
 
-
-
 from datetime import datetime
 from threading import Thread
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
@@ -21,17 +19,28 @@ import numpy as np
 from typing import List, Dict, Tuple, Optional
 from transformers import LogitsProcessor, LogitsProcessorList
 from history import setup_readline_history
+from enhanced_memory_store import EnhancedMemoryManager
+from resource_manager import ResourceManager
+from memory_optimized_vector_store import MemoryOptimizedVectorStore
 
 from keyboard_interrupt import KeyboardInterruptHandler
 from mcp_handler import MCPHandler
 from enhanced_confidence_metrics import EnhancedConfidenceMetrics, TokenProbabilityCaptureProcessor
 from response_filter import ResponseFilter
 from enhanced_memory_manager_with_sharpening import EnhancedMemoryManagerWithSharpening
-from enhanced_memory_store import EnhancedMemoryManager
+
 from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
 from question_classifier import QuestionClassifier
 from weighted_memory_integrator import WeightedMemoryIntegrator
 
+from pattern_matching_utils import (
+    is_command_related_query, extract_command_context, extract_command_type,
+    is_tabular_command, is_tabular_data, extract_columns_from_header,
+    extract_column_references, extract_row_references, extract_arithmetic_expression,
+    commands_match, extract_example_pairs, extract_mapping_category
+)
+
+from batch_utils import tensor_batch_processing
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -57,13 +66,17 @@ class TinyLlamaChat:
         self.mcp_handler = MCPHandler(output_dir=output_dir, allow_shell_commands=True)
         self.confidence_metrics = EnhancedConfidenceMetrics(sharpening_factor=sharpening_factor)
 
+        # Initialize resource manager
+        self.resource_manager = ResourceManager(device=device)
+
         # Initialize memory manager
         self.memory_manager = EnhancedMemoryManagerWithSharpening(
             memory_dir=memory_dir,
             device=device,
             auto_memorize=auto_memorize,
             sharpening_enabled=enable_sharpening,
-            sharpening_factor=sharpening_factor
+            sharpening_factor=sharpening_factor,
+            vector_store_class=MemoryOptimizedVectorStore
         )
 
         # Initialize the question classifier
@@ -125,6 +138,7 @@ class TinyLlamaChat:
         # Load model
         print("Loading model...")
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **loading_options)
+        self.model = self.resource_manager.register_model(self.model)
 
         # Create draft model from target model by reducing layers
         self.draft_model = self.create_draft_model()
@@ -230,10 +244,10 @@ class TinyLlamaChat:
         # Use the weighted memory integrator for domain-aware memory retrieval
         if current_query:
             # Detect if this is a command-related query
-            is_command_query = self._is_command_related_query(current_query)
+
             command_context = self._extract_command_context(current_query)
 
-            if is_command_query and command_context:
+            if command_context:
                 # Use specialized command memory retrieval
                 memories = self.retrieve_command_memories(
                     current_query,
@@ -382,15 +396,31 @@ class TinyLlamaChat:
             full_sequence = torch.cat([input_ids[0], draft_ids]).unsqueeze(0)
             full_attention = torch.ones_like(full_sequence)
 
-            # Get logits from target model for the full sequence
-            with torch.no_grad():
-                target_outputs = self.model(
-                    input_ids=full_sequence,
-                    attention_mask=full_attention,
-                    return_dict=True
-                )
+            # Process in batches for large inputs
+            if full_sequence.size(1) > 1024:  # For long sequences
+                def get_logits(batch):
+                    with torch.no_grad():
+                        outputs = self.model(
+                            input_ids=batch,
+                            attention_mask=torch.ones_like(batch),
+                            return_dict=True
+                        )
+                    return outputs.logits
 
-            target_logits = target_outputs.logits
+                target_logits = tensor_batch_processing(
+                    get_logits,
+                    full_sequence,
+                    batch_size=4
+                )
+            else:
+                #  Get logits from target model for the full sequence
+                with torch.no_grad():
+                    target_outputs = self.model(
+                        input_ids=full_sequence,
+                        attention_mask=full_attention,
+                        return_dict=True
+                    )
+                target_logits = target_outputs.logits
 
             # Only examine logits for draft tokens (exclude input)
             target_logits = target_logits[0, input_ids.shape[1]-1:-1, :]
@@ -566,8 +596,8 @@ class TinyLlamaChat:
             traceback.print_exc()
             try:
                 streamer.end()
-            except:
-                pass
+            except Exception as specific_e:
+                print(f"Error ending streamer: {specific_e}")
 
     def generate_response(self, messages, max_new_tokens=128, temperature=0.7, stream=True, turbo_mode=True, show_confidence=False, response_filter=None):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
@@ -888,6 +918,7 @@ class TinyLlamaChat:
                 dummy_logits[0] = 7.0  # Default confidence
                 self.confidence_metrics.add_token_score(dummy_logits, 0)
 
+            self.resource_manager.clear_cache()
             signal.signal(signal.SIGINT, signal.default_int_handler)
 
     def ensure_metrics(self, response_length=None):
@@ -1338,82 +1369,8 @@ class TinyLlamaChat:
         return command_type, is_tabular
 
     def _is_tabular_data(self, output: str) -> bool:
-        """
-        Detect if the output is likely in a tabular format.
-
-        Args:
-            output: Command output text
-
-        Returns:
-            Boolean indicating if output is tabular
-        """
-        if not output:
-            return False
-
-        lines = output.strip().split('\n')
-        if len(lines) < 2:
-            return False
-
-        # Check for common tabular format indicators
-
-        # 1. Check if lines have consistent column-like structure
-        # Extract positions of whitespace gaps in the first two lines
-        if len(lines) >= 2:
-            # Get whitespace positions in first line (potential header)
-            first_line_spaces = [i for i, char in enumerate(lines[0]) if char.isspace()]
-            # Get clusters of whitespace positions (columns are separated by multiple spaces)
-            column_separators = []
-            current_cluster = []
-            for pos in first_line_spaces:
-                if not current_cluster or pos == current_cluster[-1] + 1:
-                    current_cluster.append(pos)
-                else:
-                    if len(current_cluster) >= 2:  # Only consider gaps of 2+ spaces
-                        column_separators.append((current_cluster[0], current_cluster[-1]))
-                    current_cluster = [pos]
-
-            # Check if second line also has gaps at similar positions
-            if column_separators:
-                if len(lines) >= 2:
-                    second_line_spaces = [i for i, char in enumerate(lines[1]) if char.isspace()]
-                    second_line_clusters = []
-                    current_cluster = []
-                    for pos in second_line_spaces:
-                        if not current_cluster or pos == current_cluster[-1] + 1:
-                            current_cluster.append(pos)
-                        else:
-                            if len(current_cluster) >= 2:
-                                second_line_clusters.append((current_cluster[0], current_cluster[-1]))
-                            current_cluster = [pos]
-
-                    # If gap patterns are similar, likely tabular
-                    if len(column_separators) > 0 and len(second_line_clusters) > 0:
-                        matches = 0
-                        for sep1 in column_separators:
-                            for sep2 in second_line_clusters:
-                                if abs(sep1[0] - sep2[0]) <= 3 and abs(sep1[1] - sep2[1]) <= 3:
-                                    matches += 1
-                                    break
-
-                        if matches >= min(len(column_separators), len(second_line_clusters)) * 0.5:
-                            return True
-
-        # 2. Check for common table border characters
-        has_borders = any(all(c in line for c in ['+', '-', '+']) for line in lines)
-        if has_borders:
-            return True
-
-        # 3. Check for consistent pipe separators
-        pipe_separated = all('|' in line for line in lines[:min(5, len(lines))])
-        if pipe_separated:
-            return True
-
-        # 4. Known tabular commands
-        tabular_commands = ["df", "du", "ls -l", "ps", "top", "free", "netstat", "ip addr", "mount"]
-        if any(cmd in output.lower() for cmd in tabular_commands):
-            return True
-
-        return False
+        """Detect if the output is likely in a tabular format."""
+        return is_tabular_data(output)
 
     def _index_tabular_data(self, command: str, output: str, command_type: str) -> int:
         """
@@ -1531,22 +1488,8 @@ class TinyLlamaChat:
         return total_memories
 
     def _extract_columns_from_header(self, header_row: str) -> list:
-        """
-        Extract column names from a header row using whitespace patterns.
-
-        Args:
-            header_row: Header row string
-
-        Returns:
-            List of column names
-        """
-        # Simple version: split by whitespace and filter out empty strings
-        columns = [col for col in header_row.split() if col.strip()]
-
-        # For more complex headers, we could implement more sophisticated parsing
-        # This would handle merged column headers, etc.
-
-        return columns
+        """Extract column names from a header row."""
+        return extract_columns_from_header(header_row)
 
     def _extract_row_data(self, row: str, columns: list, header_row: str) -> dict:
         """
@@ -2091,74 +2034,74 @@ class TinyLlamaChat:
 
         return parsed_items
 
-    def add_command_to_memory(self, command: str, output: str, error: str = None, output_file: str = None):
-        """
-        Add shell command output to memory for future reference with enhanced parsing.
+    # def add_command_to_memory(self, command: str, output: str, error: str = None, output_file: str = None):
+    #     """
+    #     Add shell command output to memory for future reference with enhanced parsing.
 
-        Args:
-            command: The shell command that was executed
-            output: Command output text
-            error: Command error text (if any)
-            output_file: Path to file where full output was saved (for large outputs)
-        """
-        # Skip empty outputs
-        if not output and not error:
-            return 0
+    #     Args:
+    #         command: The shell command that was executed
+    #         output: Command output text
+    #         error: Command error text (if any)
+    #         output_file: Path to file where full output was saved (for large outputs)
+    #     """
+    #     # Skip empty outputs
+    #     if not output and not error:
+    #         return 0
 
-        # Parse the command output based on command type and content patterns
-        parsed_items = self.parse_command_output(command, output)
+    #     # Parse the command output based on command type and content patterns
+    #     parsed_items = self.parse_command_output(command, output)
 
-        # Add each parsed item to memory with appropriate type and metadata
-        memories_added = 0
+    #     # Add each parsed item to memory with appropriate type and metadata
+    #     memories_added = 0
 
-        if parsed_items:
-            for item in parsed_items:
-                # Extract memory content and metadata from parsed item
-                content = item.get('content', '')
-                memory_type = item.get('type', 'general')
-                attributes = item.get('attributes', {})
+    #     if parsed_items:
+    #         for item in parsed_items:
+    #             # Extract memory content and metadata from parsed item
+    #             content = item.get('content', '')
+    #             memory_type = item.get('type', 'general')
+    #             attributes = item.get('attributes', {})
 
-                # Add as a structured memory
-                added = self.memory_manager.add_memory(
-                    self.current_user_id,
-                    f"Information from {memory_type}: {command}",
-                    content,
-                    memory_type=memory_type,
-                    attributes=attributes
-                )
-                memories_added += added
-        else:
-            # Fallback: add as a general memory if parsing failed
-            memory_text = f"Shell command '{command}' was executed."
+    #             # Add as a structured memory
+    #             added = self.memory_manager.add_memory(
+    #                 self.current_user_id,
+    #                 f"Information from {memory_type}: {command}",
+    #                 content,
+    #                 memory_type=memory_type,
+    #                 attributes=attributes
+    #             )
+    #             memories_added += added
+    #     else:
+    #         # Fallback: add as a general memory if parsing failed
+    #         memory_text = f"Shell command '{command}' was executed."
 
-            # Add output file reference if available
-            if output_file:
-                memory_text += f" Full output saved to: {output_file}"
+    #         # Add output file reference if available
+    #         if output_file:
+    #             memory_text += f" Full output saved to: {output_file}"
 
-            # Add output preview
-            if output:
-                if len(output) > 300:
-                    summary = output[:300].strip() + "..."
-                    memory_text += f"\nOutput: {summary}"
-                else:
-                    memory_text += f"\nOutput: {output}"
+    #         # Add output preview
+    #         if output:
+    #             if len(output) > 300:
+    #                 summary = output[:300].strip() + "..."
+    #                 memory_text += f"\nOutput: {summary}"
+    #             else:
+    #                 memory_text += f"\nOutput: {output}"
 
-            # Add error if present
-            if error:
-                memory_text += f"\nError: {error}"
+    #         # Add error if present
+    #         if error:
+    #             memory_text += f"\nError: {error}"
 
-            # Add as a general memory
-            added = self.memory_manager.add_memory(
-                self.current_user_id,
-                f"Information from command: {command}",
-                memory_text
-            )
-            memories_added += added
+    #         # Add as a general memory
+    #         added = self.memory_manager.add_memory(
+    #             self.current_user_id,
+    #             f"Information from command: {command}",
+    #             memory_text
+    #         )
+    #         memories_added += added
 
-        if memories_added > 0:
-            print(f"[Memory] Added {memories_added} memories from command: '{command}'")
+    #     if memories_added > 0:
+    #         print(f"[Memory] Added {memories_added} memories from command: '{command}'")
 
-        return memories_added
+    #     return memories_added
 
 
     def parse_procedural_content(self, content: str, command: str = "") -> List[Dict]:
@@ -2429,54 +2372,12 @@ class TinyLlamaChat:
         return self._format_command_memories(top_results, query, command_context)
 
     def _extract_command_type_from_context(self, command_context: str) -> str:
-        """
-        Extract command type from context string.
-
-        Args:
-            command_context: Context about the command
-
-        Returns:
-            Command type string
-        """
-        # Extract the actual command if possible
-        command_match = re.search(r'`([^`]+)`', command_context)
-        if command_match:
-            command = command_match.group(1).strip()
-        else:
-            command = command_context.strip()
-
-        # Detect command type
-        if any(cmd in command for cmd in ["ls", "dir"]):
-            return "file_listing"
-        elif any(cmd in command for cmd in ["grep", "find", "locate"]):
-            return "search"
-        elif any(cmd in command for cmd in ["df", "du", "free", "top", "ps"]):
-            return "system_metrics"
-        elif any(cmd in command for cmd in ["cat", "less", "more", "head", "tail"]):
-            return "file_content"
-        elif any(cmd in command for cmd in ["uname", "hostname", "whoami", "id"]):
-            return "system_info"
-        else:
-            return "general_command"
+        """Extract command type from context string."""
+        return extract_command_type(command_context)
 
     def _is_tabular_command(self, command_context: str) -> bool:
-        """
-        Check if a command typically produces tabular output.
-
-        Args:
-            command_context: Command context string
-
-        Returns:
-            Boolean indicating if command likely produces tabular output
-        """
-        tabular_commands = [
-            "df", "du", "ls -l", "ps", "top", "free",
-            "netstat", "ip addr", "mount", "docker ps",
-            "systemctl list", "apt list", "pip list"
-        ]
-
-        # Check if any tabular command is in the context
-        return any(cmd in command_context for cmd in tabular_commands)
+        """Check if a command typically produces tabular output."""
+        return is_tabular_command(command_context)
 
     def _retrieve_tabular_data(self, query: str, command_context: str, top_k: int) -> List[Dict]:
         """
@@ -2564,101 +2465,16 @@ class TinyLlamaChat:
         return results
 
     def _extract_column_references(self, query: str) -> List[str]:
-        """
-        Extract column name references from a query.
-
-        Args:
-            query: User query
-
-        Returns:
-            List of column names referenced
-        """
-        # Common column names in tabular data commands
-        common_columns = [
-            "filesystem", "size", "used", "avail", "use%", "mounted", "mount",
-            "pid", "user", "cpu", "mem", "command", "name", "device",
-            "type", "total", "free", "shared", "buff/cache", "available"
-        ]
-
-        # Extract column references (case insensitive)
-        query_lower = query.lower()
-        referenced_columns = []
-
-        for col in common_columns:
-            # Look for column name mentions
-            if col.lower() in query_lower:
-                # Check if it's actually a column reference
-                # (surrounded by spaces or punctuation, not part of another word)
-                pattern = r'(?:^|\W)(' + re.escape(col) + r')(?:$|\W)'
-                if re.search(pattern, query_lower, re.IGNORECASE):
-                    referenced_columns.append(col)
-
-        return referenced_columns
+        """Extract column name references from a query."""
+        return extract_column_references(query)
 
     def _extract_row_references(self, query: str) -> List[int]:
-        """
-        Extract row number references from a query.
-
-        Args:
-            query: User query
-
-        Returns:
-            List of row indices referenced
-        """
-        # Look for patterns like "first row", "row 3", "third line", etc.
-        row_indices = []
-
-        # Numeric references
-        num_matches = re.findall(r'(?:row|line)\s+(\d+)', query.lower())
-        for match in num_matches:
-            try:
-                # Convert to 0-based index
-                idx = int(match) - 1
-                if idx >= 0:
-                    row_indices.append(idx)
-            except ValueError:
-                pass
-
-        # Textual references
-        text_map = {
-            'first': 0, 'second': 1, 'third': 2, 'fourth': 3, 'fifth': 4,
-            'last': -1, 'final': -1
-        }
-
-        for text, idx in text_map.items():
-            if f"{text} row" in query.lower() or f"{text} line" in query.lower():
-                row_indices.append(idx)
-
-        return row_indices
+        """Extract row number references from a query."""
+        return extract_row_references(query)
 
     def _commands_match(self, context: str, command: str) -> bool:
-        """
-        Check if a command context matches a command string.
-
-        Args:
-            context: Command context
-            command: Command string
-
-        Returns:
-            Boolean indicating if they match
-        """
-        # Extract main command (first word)
-        context_cmd = context.split()[0] if context else ""
-        command_cmd = command.split()[0] if command else ""
-
-        # Direct match
-        if context == command:
-            return True
-
-        # Main command match
-        if context_cmd and context_cmd == command_cmd:
-            return True
-
-        # Check if one contains the other
-        if context in command or command in context:
-            return True
-
-        return False
+        """Check if command context matches a command string."""
+        return commands_match(context, command)
 
     def _score_command_memories(self, results: List[Dict], query: str,
                               command_context: Optional[str] = None,
@@ -2918,63 +2734,32 @@ class TinyLlamaChat:
 
         return False
 
-    def _is_command_related_query(self, query: str) -> bool:
-        """
-        Detect if a query is related to command execution or output.
-
-        Args:
-            query: User query
-
-        Returns:
-            Boolean indicating if query is command-related
-        """
-        # Look for explicit command markers
-        if re.search(r'[!`]{\s*[^}]+\s*}', query):
-            return True
-
-        # Look for command references
-        command_references = [
-            r'\b(command|cmd|terminal|shell|bash|console)\b',
-            r'\b(output|result) of\b',
-            r'\b(ran|executed|typed|entered)\b',
-            r'\b(df|ls|ps|top|grep|find|cat)\b'
-        ]
-
-        for pattern in command_references:
-            if re.search(pattern, query, re.IGNORECASE):
-                return True
-
-        return False
 
     def _extract_command_context(self, query: str) -> Optional[str]:
-        """
-        Extract command context from a query.
+        """Extract command context from a query."""
+        return extract_command_context(query)
 
-        Args:
-            query: User query
+    def cleanup(self):
+        """Release all resources properly."""
+        print("Cleaning up resources...")
 
-        Returns:
-            Command context string or None
-        """
-        # Check for explicit command references
-        cmd_match = re.search(r'[!`]{\s*([^}]+)\s*}', query)
-        if cmd_match:
-            return cmd_match.group(1).strip()
+        # Unload models
+        if hasattr(self, 'draft_model') and self.draft_model is not None:
+            self.resource_manager.unload_model(self.draft_model)
+            self.draft_model = None
 
-        # Look for command mentions
-        cmd_mention = re.search(r'(?:command|cmd|ran|executed|typed|entered)\s+[`"]([^`"]+)[`"]', query)
-        if cmd_mention:
-            return cmd_mention.group(1).strip()
+        if hasattr(self, 'model') and self.model is not None:
+            self.resource_manager.unload_model(self.model)
+            self.model = None
 
-        # Extract command name references
-        for cmd in ['df', 'ls', 'ps', 'top', 'grep', 'find', 'cat', 'du']:
-            # Look for cmd or cmd -flags pattern
-            cmd_pattern = rf'\b({cmd}(?:\s+-\w+)?)\b'
-            cmd_ref = re.search(cmd_pattern, query)
-            if cmd_ref:
-                return cmd_ref.group(1).strip()
+        # Clean up memory manager resources
+        if hasattr(self, 'memory_manager'):
+            self.memory_manager.consolidate_memories(self.current_user_id)
 
-        return None
+        # Final cleanup
+        self.resource_manager.cleanup()
+
+        print("Resources cleaned up successfully")
 
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
@@ -3028,303 +2813,315 @@ def main():
         sharpening_factor=args.sharpening_factor
     )
 
-    response_filter = ResponseFilter(
-        confidence_threshold=args.confidence_threshold,
-        user_context=user_context
-    )
-
-    current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-    history_file = setup_readline_history(chat.memory_dir)
-    print(f"{current_time} Command history stored in: {history_file}")
-
-    # Set system message
-    chat.system_message = {
-        "role": "system",
-        "content": args.system_prompt
-    }
-
-    # Warm up the model with a short prompt
-    if chat.device != "cpu":
-        print("Warming up model for maximum throughput...")
-        _ = chat.generate_response(
-            [{"role": "user", "content": "Say some nice greeting."}],
-            max_new_tokens=16,
-            temperature=0.7,
-            stream=False
+    try:
+        response_filter = ResponseFilter(
+            confidence_threshold=args.confidence_threshold,
+            user_context=user_context
         )
 
-    # Start conversation loop
-    print("\n" + "="*50)
-    print("TinyLlama Chat with Speculative Decoding and MCP")
-    print("="*50)
-    print("Type 'exit' to end the conversation")
-    print("Special commands:")
-    print("  !teach: [fact] - Add knowledge to the model")
-    print("  !correct: [correction] - Correct the model's understanding")
-    print("  !save - Save the current conversation")
-    print("  !system: [message] - Change the system message")
-    print("  !mcp-help - Show MCP commands for directing output to files")
-    print("  !confidence: [0.0-1.0] - Set confidence threshold")
-    print("  !sharpening-factor: [0.0-1.0] - Set the sharpening factor for vector embeddings")
-    print("  !toggle-stream - Toggle streaming output on/off")
-    print("  !toggle-turbo - Toggle turbo mode on/off")
-    print("  !toggle-filter - Toggle uncertainty filtering on/off")
-    print("  !toggle-heatmap - Toggle confidence heatmap visualization on/off")
-    print("  !toggle-all-metrics - Toggle between showing all metrics or just truthiness")
-    print("  !toggle-sharpening - Toggle vector space sharpening on/off")
-    print("  !memorize - Force save the entire conversation to memory")
-    print("  !toggle-memory - Toggle automatic memorization on/off")
-    print("  !memory-stats - Display info about memories")
-    print("\n")
-    print("\nIf the model expresses uncertainty, you can ask it to speculate")
-    print("by saying 'please continue anyway' or 'please speculate'")
-
-    print("="*50 + "\n")
-
-    # Set initial mode settings
-    streaming_enabled = not args.no_stream
-    turbo_mode = args.turbo
-    show_confidence = args.heatmap
-
-    conversation = [chat.system_message]
-
-    while True:
-        # Get timestamp for user input
         current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-        user_input = input(f"\n{current_time} You: ")
+        history_file = setup_readline_history(chat.memory_dir)
+        print(f"{current_time} Command history stored in: {history_file}")
 
-        # Handle special commands
-        if user_input.lower() == 'exit':
-            feedback_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-            feedback = input(f"\n{feedback_time} Was this response helpful? (y/n, or provide feedback): ")
-            if feedback.lower() != 'y' and feedback.lower() != 'yes' and feedback.strip():
-                # If the user provided specific feedback, add it to knowledge
-                if len(feedback) > 2:
-                    correction = f"Regarding '{user_input}', remember: {feedback}"
-                    chat.add_to_knowledge(correction, fact_type="correction")
-                    print("Feedback saved as correction. I'll try to do better next time.")
-                else:
-                    print("Sorry the response wasn't helpful.")
+        # Set system message
+        chat.system_message = {
+            "role": "system",
+            "content": args.system_prompt
+        }
 
-            print("Consolidating memories before exit...")
-            chat.memory_manager.consolidate_memories(chat.current_user_id)
-
-            # Show final stats
-            stats = chat.memory_manager.get_stats(chat.current_user_id)
-            print(f"Total memories saved this session: {stats['total_memories']}")
-            break
-            break
-
-        elif user_input.lower().startswith('!teach:'):
-            new_fact = user_input[7:].strip()
-            chat.add_to_knowledge(new_fact, fact_type="fact")
-            print(f"Added to knowledge base: {new_fact}")
-            continue
-
-        elif user_input.lower().startswith('!correct:'):
-            correction = user_input[9:].strip()
-            chat.add_to_knowledge(correction, fact_type="correction")
-            print(f"Added correction: {correction}")
-            continue
-
-        elif user_input.lower() == '!save':
-            chat.save_conversation(conversation)
-            print("Conversation saved!")
-            continue
-
-        elif user_input.lower().startswith('!system:'):
-            new_system = user_input[8:].strip()
-            chat.system_message = {
-                "role": "system",
-                "content": new_system
-            }
-            conversation[0] = chat.system_message
-            print(f"System message updated: {new_system}")
-            continue
-
-        elif user_input.lower() == '!toggle-stream':
-            streaming_enabled = not streaming_enabled
-            print(f"Streaming output {'enabled' if streaming_enabled else 'disabled'}")
-            continue
-
-        elif user_input.lower() == '!toggle-turbo':
-            turbo_mode = not turbo_mode
-            print(f"Turbo mode {'enabled' if turbo_mode else 'disabled'}")
-            continue
-
-        elif user_input.lower() == '!mcp-help':
-            help_text = chat.mcp_handler.get_help_text()
-            print(help_text)
-            continue
-        elif user_input.lower() == '!toggle-filter':
-            filter_enabled = not filter_enabled
-            print(f"Response filtering {'enabled' if filter_enabled else 'disabled'}")
-            continue
-        elif user_input.lower() == '!toggle-heatmap':
-            show_confidence = not show_confidence
-            print(f"Confidence heatmap {'enabled' if show_confidence else 'disabled'}")
-            continue
-        elif user_input.lower() == '!toggle-all-metrics':
-            show_all_metrics = not show_all_metrics
-            print(f"Detailed metrics display {'enabled' if show_all_metrics else 'disabled'}")
-            continue
-        elif user_input.lower() == '!toggle-sharpening':
-            is_enabled = chat.toggle_sharpening()
-            print(f"Vector space sharpening {'enabled' if is_enabled else 'disabled'}")
-            continue
-        elif user_input.lower().startswith('!sharpening-factor:'):
-            try:
-                factor = float(user_input.split(':')[1].strip())
-                if 0.0 <= factor <= 1.0:
-                    chat.set_sharpening_factor(factor)
-                else:
-                    print("Sharpening factor must be between 0.0 and 1.0")
-            except Exception as e:
-                print(f"Invalid value: {str(e)}. Please specify a number between 0.0 and 1.0")
-            continue
-
-        elif user_input.lower() == '!memorize':
-            memories_added = chat.memory_manager.save_conversation(chat.current_user_id, conversation)
-            print(f"Conversation saved to long-term memory! Added {memories_added} memories.")
-            continue
-
-        elif user_input.lower() == '!toggle-memory':
-            is_enabled = chat.memory_manager.toggle_auto_memorize()
-            print(f"Automatic memorization {'enabled' if is_enabled else 'disabled'}")
-            continue
-
-        elif user_input.lower() == '!memory-stats':
-            stats = chat.memory_manager.get_stats(chat.current_user_id)
-            print("\nMemory System Statistics:")
-            print(f"Total memories: {stats['total_memories']}")
-            print(f"Auto-memorize: {'Enabled' if stats['auto_memorize'] else 'Disabled'}")
-            print(f"Last consolidation: {stats['last_consolidation']}")
-            continue
-
-        # Add user message to conversation
-        user_message = {"role": "user", "content": user_input}
-        conversation.append(user_message)
-
-        # Generate response
-        try:
-            # Measure generation time
-            start_time = time.time()
-
-            # Add timestamp for model output
-            response_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-
-            # If no system command matched, generate response using the model
-            print(f"\n{response_time} Assistant: ", end='', flush=True)
-
-            # Generate response
-            response = chat.generate_response(
-                conversation,
-                temperature=args.temperature,
-                max_new_tokens=args.max_tokens,
-                stream=streaming_enabled,
-                turbo_mode=turbo_mode,
-                show_confidence=show_confidence,
-                response_filter=response_filter if filter_enabled else None  # Pass the filter only if enabled
+        # Warm up the model with a short prompt
+        if chat.device != "cpu":
+            print("Warming up model for maximum throughput...")
+            _ = chat.generate_response(
+                [{"role": "user", "content": "Say some nice greeting."}],
+                max_new_tokens=16,
+                temperature=0.7,
+                stream=False
             )
 
-            # Add a newline after streaming output is complete
-            print()
+        # Start conversation loop
+        print("\n" + "="*50)
+        print("TinyLlama Chat with Speculative Decoding and MCP")
+        print("="*50)
+        print("Type 'exit' to end the conversation")
+        print("Special commands:")
+        print("  !teach: [fact] - Add knowledge to the model")
+        print("  !correct: [correction] - Correct the model's understanding")
+        print("  !save - Save the current conversation")
+        print("  !system: [message] - Change the system message")
+        print("  !mcp-help - Show MCP commands for directing output to files")
+        print("  !confidence: [0.0-1.0] - Set confidence threshold")
+        print("  !sharpening-factor: [0.0-1.0] - Set the sharpening factor for vector embeddings")
+        print("  !toggle-stream - Toggle streaming output on/off")
+        print("  !toggle-turbo - Toggle turbo mode on/off")
+        print("  !toggle-filter - Toggle uncertainty filtering on/off")
+        print("  !toggle-heatmap - Toggle confidence heatmap visualization on/off")
+        print("  !toggle-all-metrics - Toggle between showing all metrics or just truthiness")
+        print("  !toggle-sharpening - Toggle vector space sharpening on/off")
+        print("  !memorize - Force save the entire conversation to memory")
+        print("  !toggle-memory - Toggle automatic memorization on/off")
+        print("  !memory-stats - Display info about memories")
+        print("\n")
+        print("\nIf the model expresses uncertainty, you can ask it to speculate")
+        print("by saying 'please continue anyway' or 'please speculate'")
 
-            # Report generation time and calculate tokens per second
-            end_time = time.time()
-            generation_time = max(0.01, end_time - start_time)
-            
-            if response:
-                chat.ensure_metrics(len(response.split()))
+        print("="*50 + "\n")
 
-            # Get confidence metrics
-            confidence_data = chat.confidence_metrics.get_metrics(apply_sharpening=chat.memory_manager.sharpening_enabled)
+        # Set initial mode settings
+        streaming_enabled = not args.no_stream
+        turbo_mode = args.turbo
+        show_confidence = args.heatmap
 
-            # Apply filtering only if enabled
-            if filter_enabled:
-                filtered_response = response_filter.filter_response(
-                    response,
-                    confidence_data,
-                    query=user_input,
-                    preserve_mcp=True,
-                    allow_override=True
-                )
+        conversation = [chat.system_message]
 
-                # Check if response was filtered and print notification
-                if filtered_response != response:
-                    response = filtered_response
+        while True:
+            # Get timestamp for user input
+            current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+            user_input = input(f"\n{current_time} You: ")
 
-                    # PRINT THE FILTERED RESPONSE HERE with legend
-                    if show_confidence:
-                        # Show confidence legend and add separator for clarity
-                        heatmap = TerminalHeatmap(tokenizer=None, use_background=False, color_scheme="sepia-red")
-                        heatmap.print_legend()
-                        print("\nFiltered response:")
+            # Handle special commands
+            if user_input.lower() == 'exit':
+                feedback_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+                feedback = input(f"\n{feedback_time} Was this response helpful? (y/n, or provide feedback): ")
+                if feedback.lower() != 'y' and feedback.lower() != 'yes' and feedback.strip():
+                    # If the user provided specific feedback, add it to knowledge
+                    if len(feedback) > 2:
+                        correction = f"Regarding '{user_input}', remember: {feedback}"
+                        chat.add_to_knowledge(correction, fact_type="correction")
+                        print("Feedback saved as correction. I'll try to do better next time.")
+                    else:
+                        print("Sorry the response wasn't helpful.")
 
-                else:
-                    # If not filtered, print the original response
-                    # (This is already happening in the stream)
-                    pass
+                print("Consolidating memories before exit...")
+                chat.memory_manager.consolidate_memories(chat.current_user_id)
 
-                # Update user context
-                response_filter.update_user_context(user_input, response, confidence_data)
-            else:
-                filtered_response = response  # Use original response if filtering disabled
+                # Show final stats
+                stats = chat.memory_manager.get_stats(chat.current_user_id)
+                print(f"Total memories saved this session: {stats['total_memories']}")
+                break
 
-            # First, check if this is a follow-up to a previously uncertain response
-            current_query = user_input.lower()
+            elif user_input.lower().startswith('!teach:'):
+                new_fact = user_input[7:].strip()
+                chat.add_to_knowledge(new_fact, fact_type="fact")
+                print(f"Added to knowledge base: {new_fact}")
+                continue
 
-            assistant_message = {"role": "assistant", "content": filtered_response}
-            conversation.append(assistant_message)
+            elif user_input.lower().startswith('!correct:'):
+                correction = user_input[9:].strip()
+                chat.add_to_knowledge(correction, fact_type="correction")
+                print(f"Added correction: {correction}")
+                continue
 
-            chat.add_conversation_to_memory(user_input, filtered_response)
+            elif user_input.lower() == '!save':
+                chat.save_conversation(conversation)
+                print("Conversation saved!")
+                continue
 
-            # Estimate tokens generated
+            elif user_input.lower().startswith('!system:'):
+                new_system = user_input[8:].strip()
+                chat.system_message = {
+                    "role": "system",
+                    "content": new_system
+                }
+                conversation[0] = chat.system_message
+                print(f"System message updated: {new_system}")
+                continue
+
+            elif user_input.lower() == '!toggle-stream':
+                streaming_enabled = not streaming_enabled
+                print(f"Streaming output {'enabled' if streaming_enabled else 'disabled'}")
+                continue
+
+            elif user_input.lower() == '!toggle-turbo':
+                turbo_mode = not turbo_mode
+                print(f"Turbo mode {'enabled' if turbo_mode else 'disabled'}")
+                continue
+
+            elif user_input.lower() == '!mcp-help':
+                help_text = chat.mcp_handler.get_help_text()
+                print(help_text)
+                continue
+            elif user_input.lower() == '!toggle-filter':
+                filter_enabled = not filter_enabled
+                print(f"Response filtering {'enabled' if filter_enabled else 'disabled'}")
+                continue
+            elif user_input.lower() == '!toggle-heatmap':
+                show_confidence = not show_confidence
+                print(f"Confidence heatmap {'enabled' if show_confidence else 'disabled'}")
+                continue
+            elif user_input.lower() == '!toggle-all-metrics':
+                show_all_metrics = not show_all_metrics
+                print(f"Detailed metrics display {'enabled' if show_all_metrics else 'disabled'}")
+                continue
+            elif user_input.lower() == '!toggle-sharpening':
+                is_enabled = chat.toggle_sharpening()
+                print(f"Vector space sharpening {'enabled' if is_enabled else 'disabled'}")
+                continue
+            elif user_input.lower().startswith('!sharpening-factor:'):
+                try:
+                    factor = float(user_input.split(':')[1].strip())
+                    if 0.0 <= factor <= 1.0:
+                        chat.set_sharpening_factor(factor)
+                    else:
+                        print("Sharpening factor must be between 0.0 and 1.0")
+                except Exception as e:
+                    print(f"Invalid value: {str(e)}. Please specify a number between 0.0 and 1.0")
+                continue
+
+            elif user_input.lower() == '!memorize':
+                memories_added = chat.memory_manager.save_conversation(chat.current_user_id, conversation)
+                print(f"Conversation saved to long-term memory! Added {memories_added} memories.")
+                continue
+
+            elif user_input.lower() == '!toggle-memory':
+                is_enabled = chat.memory_manager.toggle_auto_memorize()
+                print(f"Automatic memorization {'enabled' if is_enabled else 'disabled'}")
+                continue
+
+            elif user_input.lower() == '!memory-stats':
+                stats = chat.memory_manager.get_stats(chat.current_user_id)
+                print("\nMemory System Statistics:")
+                print(f"Total memories: {stats['total_memories']}")
+                print(f"Auto-memorize: {'Enabled' if stats['auto_memorize'] else 'Disabled'}")
+                print(f"Last consolidation: {stats['last_consolidation']}")
+                continue
+
+            # Add user message to conversation
+            user_message = {"role": "user", "content": user_input}
+            conversation.append(user_message)
+
+            # Generate response
             try:
-                response_tokens = len(chat.tokenizer.encode(response))
-                # tokens_per_second = response_tokens / generation_time
-                tokens_per_second = response_tokens / max(0.01, generation_time)
-                quality = chat.quality_score(
-                    confidence_data.get('confidence', 0),
-                    confidence_data.get('perplexity', 0),
-                    confidence_data.get('entropy', 0)
+                # Measure generation time
+                start_time = time.time()
+
+                # Add timestamp for model output
+                response_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+
+                # If no system command matched, generate response using the model
+                print(f"\n{response_time} Assistant: ", end='', flush=True)
+
+                # Generate response
+                response = chat.generate_response(
+                    conversation,
+                    temperature=args.temperature,
+                    max_new_tokens=args.max_tokens,
+                    stream=streaming_enabled,
+                    turbo_mode=turbo_mode,
+                    show_confidence=show_confidence,
+                    response_filter=response_filter if filter_enabled else None  # Pass the filter only if enabled
                 )
 
-                chat.print_generation_metrics(
-                    # {
-                    #     'quality': quality,
-                    #     'confidence': confidence_data.get('confidence', 0),
-                    #     'perplexity': confidence_data.get('perplexity', 0),
-                    #     'entropy': confidence_data.get('entropy', 0)
-                    # },
-                    confidence_data,
-                    generation_time,
-                    response_tokens,
-                    show_all_metrics
-                )
+                # Add a newline after streaming output is complete
+                print()
+
+                # Report generation time and calculate tokens per second
+                end_time = time.time()
+                generation_time = max(0.01, end_time - start_time)
+
+                if response:
+                    chat.ensure_metrics(len(response.split()))
+
+                # Get confidence metrics
+                confidence_data = chat.confidence_metrics.get_metrics(apply_sharpening=chat.memory_manager.sharpening_enabled)
+
+                # Apply filtering only if enabled
+                if filter_enabled:
+                    filtered_response = response_filter.filter_response(
+                        response,
+                        confidence_data,
+                        query=user_input,
+                        preserve_mcp=True,
+                        allow_override=True
+                    )
+
+                    # Check if response was filtered and print notification
+                    if filtered_response != response:
+                        response = filtered_response
+
+                        # PRINT THE FILTERED RESPONSE HERE with legend
+                        if show_confidence:
+                            # Show confidence legend and add separator for clarity
+                            heatmap = TerminalHeatmap(tokenizer=None, use_background=False, color_scheme="sepia-red")
+                            heatmap.print_legend()
+                            print("\nFiltered response:")
+
+                    else:
+                        # If not filtered, print the original response
+                        # (This is already happening in the stream)
+                        pass
+
+                    # Update user context
+                    response_filter.update_user_context(user_input, response, confidence_data)
+                else:
+                    filtered_response = response  # Use original response if filtering disabled
+
+                # First, check if this is a follow-up to a previously uncertain response
+                current_query = user_input.lower()
+
+                assistant_message = {"role": "assistant", "content": filtered_response}
+                conversation.append(assistant_message)
+
+                chat.add_conversation_to_memory(user_input, filtered_response)
+
+                # Estimate tokens generated
+                try:
+                    response_tokens = len(chat.tokenizer.encode(response))
+                    # tokens_per_second = response_tokens / generation_time
+                    tokens_per_second = response_tokens / max(0.01, generation_time)
+                    quality = chat.quality_score(
+                        confidence_data.get('confidence', 0),
+                        confidence_data.get('perplexity', 0),
+                        confidence_data.get('entropy', 0)
+                    )
+
+                    chat.print_generation_metrics(
+                        # {
+                        #     'quality': quality,
+                        #     'confidence': confidence_data.get('confidence', 0),
+                        #     'perplexity': confidence_data.get('perplexity', 0),
+                        #     'entropy': confidence_data.get('entropy', 0)
+                        # },
+                        confidence_data,
+                        generation_time,
+                        response_tokens,
+                        show_all_metrics
+                    )
+                except Exception as e:
+                    print(f"stupid error {e}")
+                    # Fallback to maximum tokens estimate
+                    if args.max_tokens > 0:
+                        tokens_per_second = args.max_tokens / generation_time
+                        print(f"[Generated in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f}]")
+
+                # Get feedback with timestamp
+                # feedback_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+                # feedback = input(f"\n{feedback_time} Was this response helpful? (y/n, or provide feedback): ")
+
+                # if feedback.lower() != 'y' and feedback.lower() != 'yes' and feedback.strip():
+                #     # If the user provided specific feedback, add it to knowledge
+                #     if len(feedback) > 2:
+                #         correction = f"Regarding '{user_input}', remember: {feedback}"
+                #         chat.add_to_knowledge(correction, fact_type="correction")
+                #         print("Feedback saved as correction. I'll try to do better next time.")
+                #     else:
+                #         print("Sorry the response wasn't helpful.")
+
             except Exception as e:
-                print(f"stupid error {e}")
-                # Fallback to maximum tokens estimate
-                if args.max_tokens > 0:
-                    tokens_per_second = args.max_tokens / generation_time
-                    print(f"[Generated in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f}]")
+                print(f"Error generating response: {e}")
+                print("Please try again with a different question.")
 
-            # Get feedback with timestamp
-            # feedback_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-            # feedback = input(f"\n{feedback_time} Was this response helpful? (y/n, or provide feedback): ")
-            
-            # if feedback.lower() != 'y' and feedback.lower() != 'yes' and feedback.strip():
-            #     # If the user provided specific feedback, add it to knowledge
-            #     if len(feedback) > 2:
-            #         correction = f"Regarding '{user_input}', remember: {feedback}"
-            #         chat.add_to_knowledge(correction, fact_type="correction")
-            #         print("Feedback saved as correction. I'll try to do better next time.")
-            #     else:
-            #         print("Sorry the response wasn't helpful.")
-        
-        except Exception as e:
-            print(f"Error generating response: {e}")
-            print("Please try again with a different question.")
+            # finally:
+            #     chat.cleanup()
+
+    except KeyboardInterrupt:
+        print("\nExiting due to keyboard interrupt...")
+    except Exception as e:
+        print(f"\nUnexpected error: {e}")
+    finally:
+        # This should only happen when exiting the program
+        print("Cleaning up resources before exit...")
+        chat.cleanup()
 
 if __name__ == "__main__":
 
