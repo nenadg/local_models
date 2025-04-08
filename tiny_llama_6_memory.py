@@ -8,6 +8,8 @@ import threading
 import signal
 import math
 import re
+import termios
+import tty
 
 import argparse
 from typing import List, Dict, Optional, Tuple
@@ -2761,46 +2763,79 @@ class TinyLlamaChat:
 
         print("Resources cleaned up successfully")
 
+
+
     def get_multiline_input(self, prompt):
         """
-        Get multiline input from user until an empty line is entered.
-        Supports direct copy/paste of multiline content.
+        Get multiline input with full editing capabilities using prompt_toolkit.
+
+        Args:
+            prompt: Initial prompt to display
+
+        Returns:
+            String containing the entire multiline input
         """
-        print(prompt)
-        print("(Enter your text, paste multiline content, or submit with an empty line)")
+        try:
+            from prompt_toolkit import prompt
+            from prompt_toolkit.history import FileHistory
+            import os
+        except ImportError:
+            print("prompt_toolkit is not installed. Install it with 'pip install prompt_toolkit'")
+            print("Falling back to simple input method.")
 
-        lines = []
-        line_num = 1
+            # Fallback to previous implementation if prompt_toolkit is not available
+            print(prompt)
+            print("(Enter your text, paste multiline content. Press Ctrl+D or submit an empty line to finish)")
 
-        while True:
             try:
-                # Show line numbers for better usability
-                line_prompt = f"{line_num}: " if line_num > 1 else "> "
-                line = input(line_prompt)
-
-                # Check for empty line to terminate input
-                if not line.strip():
-                    break
-
-                # Add the line to our collection
-                lines.append(line)
-                line_num += 1
-
+                lines = []
+                while True:
+                    try:
+                        line = input()
+                        lines.append(line)
+                    except EOFError:
+                        break
             except KeyboardInterrupt:
-                # Allow Ctrl+C to cancel the current input
                 print("\nInput cancelled.")
                 return ""
-            except EOFError:
-                # Handle EOF (Ctrl+D in Unix)
-                print("\nInput terminated.")
-                break
 
-        # If we have content, confirm it was received
-        if lines:
-            print(f"Received {len(lines)} lines of input.")
+            return "\n".join(lines)
 
-        return "\n".join(lines)
+        # Ensure memory directory exists
+        os.makedirs(self.memory_dir, exist_ok=True)
 
+        # Create a history file for persistent input history
+        history_file = os.path.join(self.memory_dir, '.multiline_history')
+
+        print(prompt)
+        print("(Multiline input mode. Use Ctrl+D or Alt+Enter to submit, Ctrl+C to cancel)")
+
+        try:
+            # Use prompt_toolkit for advanced multiline input
+            user_input = prompt(
+                '',  # No initial prompt inside the input area
+                multiline=True,  # Enable multiline input
+                prompt_continuation=lambda width, line_number, wrap_count: '.' * width,  # Continuation prompt
+                history=FileHistory(history_file),  # Persistent history
+                complete_while_typing=True,  # Enable autocompletion
+                enable_open_in_editor=True,  # Allow opening in external editor with F4
+            )
+
+            # Trim trailing whitespace if needed
+            user_input = user_input.rstrip()
+
+            # Confirm and return input
+            if user_input:
+                print(f"Received {len(user_input.splitlines())} lines of input.")
+
+            return user_input
+
+        except KeyboardInterrupt:
+            print("\nInput cancelled.")
+            return ""
+        except Exception as e:
+            print(f"\nError during input: {e}")
+            return ""
 
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
@@ -2923,7 +2958,7 @@ def main():
             # Handle special commands
             if user_input.lower() == 'exit':
                 feedback_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-                feedback = input(f"\n{feedback_time} Was this response helpful? (y/n, or provide feedback): ")
+                feedback = 'y' # input(f"\n{feedback_time} Was this response helpful? (y/n, or provide feedback): ")
                 if feedback.lower() != 'y' and feedback.lower() != 'yes' and feedback.strip():
                     # If the user provided specific feedback, add it to knowledge
                     if len(feedback) > 2:
