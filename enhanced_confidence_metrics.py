@@ -92,7 +92,6 @@ class EnhancedConfidenceMetrics:
 
         print(f"DEBUG - Added token: prob={token_prob:.3f}, entropy={entropy:.3f}")
         print(f"DEBUG - Original tokens recorded: {len(self.original_token_probabilities)}")
-        print(f"DEBUG - Recalculated metrics: {metrics.keys()}")
 
     def _sharpen_token_metrics(self, probability: float, entropy: float) -> tuple:
         """
