@@ -2761,6 +2761,47 @@ class TinyLlamaChat:
 
         print("Resources cleaned up successfully")
 
+    def get_multiline_input(self, prompt):
+        """
+        Get multiline input from user until an empty line is entered.
+        Supports direct copy/paste of multiline content.
+        """
+        print(prompt)
+        print("(Enter your text, paste multiline content, or submit with an empty line)")
+
+        lines = []
+        line_num = 1
+
+        while True:
+            try:
+                # Show line numbers for better usability
+                line_prompt = f"{line_num}: " if line_num > 1 else "> "
+                line = input(line_prompt)
+
+                # Check for empty line to terminate input
+                if not line.strip():
+                    break
+
+                # Add the line to our collection
+                lines.append(line)
+                line_num += 1
+
+            except KeyboardInterrupt:
+                # Allow Ctrl+C to cancel the current input
+                print("\nInput cancelled.")
+                return ""
+            except EOFError:
+                # Handle EOF (Ctrl+D in Unix)
+                print("\nInput terminated.")
+                break
+
+        # If we have content, confirm it was received
+        if lines:
+            print(f"Received {len(lines)} lines of input.")
+
+        return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
     parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
@@ -2877,7 +2918,7 @@ def main():
         while True:
             # Get timestamp for user input
             current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-            user_input = input(f"\n{current_time} You: ")
+            user_input = chat.get_multiline_input(f"\n{current_time} You: ")
 
             # Handle special commands
             if user_input.lower() == 'exit':
