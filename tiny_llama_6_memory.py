@@ -6,10 +6,12 @@ import time
 import sys
 import threading
 import signal
+import math
 import re
 
 import argparse
-from typing import Dict, Any
+from typing import List, Dict, Optional, Tuple
+
 
 
 from datetime import datetime
@@ -227,48 +229,48 @@ class TinyLlamaChat:
 
         # Use the weighted memory integrator for domain-aware memory retrieval
         if current_query:
-            result = self.memory_integrator.retrieve_and_integrate(
-                self.current_user_id,
-                current_query
-            )
+            # Detect if this is a command-related query
+            is_command_query = self._is_command_related_query(current_query)
+            command_context = self._extract_command_context(current_query)
 
-            memories = result['memory_text']
-            settings = result['settings']
-            domain = settings['domain']
+            if is_command_query and command_context:
+                # Use specialized command memory retrieval
+                memories = self.retrieve_command_memories(
+                    current_query,
+                    command_context=command_context,
+                    top_k=8,
+                    recency_weight=0.3,
+                    include_tabular=True
+                )
+            else:
+                # Use standard memory retrieval for non-command queries
+                result = self.memory_integrator.retrieve_and_integrate(
+                    self.current_user_id,
+                    current_query
+                )
+                memories = result['memory_text']
+                settings = result['settings']
+                domain = settings['domain']
 
-            # Add procedural knowledge section for certain domains
-            if domain in ['translation', 'procedural']:
-                # Retrieve specialized procedural knowledge
-                procedures = self.retrieve_procedural_knowledge(current_query)
-                if procedures:
-                    # Create structured procedure section
-                    procedure_section = self.create_procedural_prompt_section(procedures)
-                    if procedure_section:
-                        # Add explicit instruction for how to apply the knowledge
-                        instruction = "\nIMPORTANT: When performing tasks like translation or following procedures, " \
-                                    "use the PROCEDURAL KNOWLEDGE section below as a direct reference. " \
-                                    "For translations, apply each mapping rule precisely.\n"
+                # Add procedural knowledge section for certain domains
+                if domain in ['translation', 'procedural']:
+                    # Retrieve specialized procedural knowledge
+                    procedures = self.retrieve_procedural_knowledge(current_query)
+                    if procedures:
+                        # Create structured procedure section
+                        procedure_section = self.create_procedural_prompt_section(procedures)
+                        if procedure_section:
+                            # Add explicit instruction for how to apply the knowledge
+                            instruction = "\nIMPORTANT: When performing tasks like translation or following procedures, " \
+                                        "use the PROCEDURAL KNOWLEDGE section below as a direct reference. " \
+                                        "For translations, apply each mapping rule precisely.\n"
 
-                        # Append to memories with high priority
-                        memories = instruction + procedure_section + "\n\n" + memories
+                            # Append to memories with high priority
+                            memories = instruction + procedure_section + "\n\n" + memories
 
             if memories:
                 enhanced_system_content += "\n\nIMPORTANT: You MUST apply the following information in all your responses:"
                 enhanced_system_content += f"\n{memories}"
-
-            # memories = result['memory_text']
-            # settings = result['settings']
-            # domain = settings['domain'] # Log domain detection for debugging
-            # confidence = settings['domain_confidence']
-
-            # if domain != 'unknown':
-            #     print(f"[Domain Detection] Query type: {domain} (confidence: {confidence:.2f})")
-            #     print(f"[Memory Settings] Weight: {settings['memory_weight']}, Sharpening: {settings['sharpening_factor']}")
-
-            # if memories:
-            #     # Add more explicit, direct instructions
-            #     enhanced_system_content += "\n\nIMPORTANT: You MUST apply the following information in all your responses:"
-            #     enhanced_system_content += f"\n{memories}"
 
         # Create messages with enhanced system prompt
         enhanced_messages = [
@@ -1283,7 +1285,7 @@ class TinyLlamaChat:
 
     def add_command_to_memory(self, command: str, output: str, error: str = None, output_file: str = None):
         """
-        Add shell command output to memory for future reference
+        Add shell command output to memory with enhanced indexing for tabular data and structured outputs.
 
         Args:
             command: The shell command that was executed
@@ -1295,17 +1297,366 @@ class TinyLlamaChat:
         if not output and not error:
             return 0
 
-        # Create a descriptive memory entry
+        # Detect command type and output format for specialized processing
+        command_type, is_tabular = self._detect_command_type(command, output)
+
+        # For tabular data, use specialized indexing
+        if is_tabular:
+            return self._index_tabular_data(command, output, command_type)
+
+        # For other command types, use improved chunking and metadata
+        return self._index_general_command_output(command, output, error, output_file, command_type)
+
+    def _detect_command_type(self, command: str, output: str) -> tuple:
+        """
+        Detect the type of command and whether its output is tabular.
+
+        Args:
+            command: The shell command
+            output: Command output text
+
+        Returns:
+            Tuple of (command_type, is_tabular)
+        """
+        # Identify command type more precisely
+        if any(cmd in command for cmd in ["ls", "dir"]):
+            command_type = "file_listing"
+        elif any(cmd in command for cmd in ["grep", "find", "locate"]):
+            command_type = "search"
+        elif any(cmd in command for cmd in ["df", "du", "free", "top", "ps"]):
+            command_type = "system_metrics"
+        elif any(cmd in command for cmd in ["cat", "less", "more", "head", "tail"]):
+            command_type = "file_content"
+        elif any(cmd in command for cmd in ["uname", "hostname", "whoami", "id"]):
+            command_type = "system_info"
+        else:
+            command_type = "general_command"
+
+        # Detect if output is likely tabular
+        is_tabular = self._is_tabular_data(output)
+
+        return command_type, is_tabular
+
+    def _is_tabular_data(self, output: str) -> bool:
+        """
+        Detect if the output is likely in a tabular format.
+
+        Args:
+            output: Command output text
+
+        Returns:
+            Boolean indicating if output is tabular
+        """
+        if not output:
+            return False
+
+        lines = output.strip().split('\n')
+        if len(lines) < 2:
+            return False
+
+        # Check for common tabular format indicators
+
+        # 1. Check if lines have consistent column-like structure
+        # Extract positions of whitespace gaps in the first two lines
+        if len(lines) >= 2:
+            # Get whitespace positions in first line (potential header)
+            first_line_spaces = [i for i, char in enumerate(lines[0]) if char.isspace()]
+            # Get clusters of whitespace positions (columns are separated by multiple spaces)
+            column_separators = []
+            current_cluster = []
+            for pos in first_line_spaces:
+                if not current_cluster or pos == current_cluster[-1] + 1:
+                    current_cluster.append(pos)
+                else:
+                    if len(current_cluster) >= 2:  # Only consider gaps of 2+ spaces
+                        column_separators.append((current_cluster[0], current_cluster[-1]))
+                    current_cluster = [pos]
+
+            # Check if second line also has gaps at similar positions
+            if column_separators:
+                if len(lines) >= 2:
+                    second_line_spaces = [i for i, char in enumerate(lines[1]) if char.isspace()]
+                    second_line_clusters = []
+                    current_cluster = []
+                    for pos in second_line_spaces:
+                        if not current_cluster or pos == current_cluster[-1] + 1:
+                            current_cluster.append(pos)
+                        else:
+                            if len(current_cluster) >= 2:
+                                second_line_clusters.append((current_cluster[0], current_cluster[-1]))
+                            current_cluster = [pos]
+
+                    # If gap patterns are similar, likely tabular
+                    if len(column_separators) > 0 and len(second_line_clusters) > 0:
+                        matches = 0
+                        for sep1 in column_separators:
+                            for sep2 in second_line_clusters:
+                                if abs(sep1[0] - sep2[0]) <= 3 and abs(sep1[1] - sep2[1]) <= 3:
+                                    matches += 1
+                                    break
+
+                        if matches >= min(len(column_separators), len(second_line_clusters)) * 0.5:
+                            return True
+
+        # 2. Check for common table border characters
+        has_borders = any(all(c in line for c in ['+', '-', '+']) for line in lines)
+        if has_borders:
+            return True
+
+        # 3. Check for consistent pipe separators
+        pipe_separated = all('|' in line for line in lines[:min(5, len(lines))])
+        if pipe_separated:
+            return True
+
+        # 4. Known tabular commands
+        tabular_commands = ["df", "du", "ls -l", "ps", "top", "free", "netstat", "ip addr", "mount"]
+        if any(cmd in output.lower() for cmd in tabular_commands):
+            return True
+
+        return False
+
+    def _index_tabular_data(self, command: str, output: str, command_type: str) -> int:
+        """
+        Create specialized memory entries for tabular command output.
+
+        Args:
+            command: The shell command
+            output: Command output text
+            command_type: Type of command
+
+        Returns:
+            Number of memories added
+        """
+        total_memories = 0
+        lines = output.strip().split('\n')
+
+        if len(lines) < 2:
+            return 0
+
+        # Extract header and data rows
+        header_row = lines[0]
+        data_rows = lines[1:]
+
+        # Try to identify columns based on whitespace patterns
+        columns = self._extract_columns_from_header(header_row)
+
+        # Create a structured memory for the entire table
+        table_memory_text = f"Table from command '{command}':\n{output}"
+        table_metadata = {
+            "command": command,
+            "command_type": command_type,
+            "is_tabular": True,
+            "column_count": len(columns),
+            "row_count": len(data_rows),
+            "timestamp": datetime.now().isoformat()
+        }
+
+        # Add overall table memory
+        memories_added = self.memory_manager.add_memory(
+            self.current_user_id,
+            f"Tabular data from command: {command}",
+            table_memory_text,
+            memory_type="tabular_data",
+            attributes=table_metadata
+        )
+        total_memories += memories_added
+
+        # For each row, create a more specific memory with structured data
+        for i, row in enumerate(data_rows):
+            # Try to extract structured data from the row
+            row_data = self._extract_row_data(row, columns, header_row)
+
+            # Skip if we couldn't parse the row
+            if not row_data:
+                continue
+
+            # Create row-specific memory
+            row_memory = f"Row {i+1} from '{command}' output:\n"
+            for col, val in row_data.items():
+                row_memory += f"{col}: {val}\n"
+
+            row_metadata = {
+                "command": command,
+                "command_type": command_type,
+                "is_tabular": True,
+                "row_index": i,
+                "timestamp": datetime.now().isoformat(),
+                "values": row_data
+            }
+
+            # Add row memory with detailed metadata
+            memories_added = self.memory_manager.add_memory(
+                self.current_user_id,
+                f"Row details from command: {command}",
+                row_memory,
+                memory_type="tabular_row",
+                attributes=row_metadata
+            )
+            total_memories += memories_added
+
+        # For system metrics commands, add specialized memories for key metrics
+        if command_type == "system_metrics" and "df" in command:
+            # Create specific memories for filesystem usage metrics
+            for i, row in enumerate(data_rows):
+                row_data = self._extract_row_data(row, columns, header_row)
+                if not row_data:
+                    continue
+
+                # Focus on filesystem usage
+                if "Filesystem" in columns and "Use%" in columns:
+                    filesystem = row_data.get("Filesystem", "unknown")
+                    usage = row_data.get("Use%", "").strip("%")
+                    size = row_data.get("Size", "")
+
+                    metric_memory = f"Filesystem '{filesystem}' is using {usage}% of its {size} capacity."
+
+                    self.memory_manager.add_memory(
+                        self.current_user_id,
+                        f"Storage metric from command: {command}",
+                        metric_memory,
+                        memory_type="system_metric",
+                        attributes={
+                            "metric_type": "filesystem_usage",
+                            "filesystem": filesystem,
+                            "usage_percent": usage,
+                            "total_size": size,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                    )
+                    total_memories += 1
+
+        if total_memories > 0:
+            print(f"[Memory] Added {total_memories} tabular data memories from command: '{command}'")
+
+        return total_memories
+
+    def _extract_columns_from_header(self, header_row: str) -> list:
+        """
+        Extract column names from a header row using whitespace patterns.
+
+        Args:
+            header_row: Header row string
+
+        Returns:
+            List of column names
+        """
+        # Simple version: split by whitespace and filter out empty strings
+        columns = [col for col in header_row.split() if col.strip()]
+
+        # For more complex headers, we could implement more sophisticated parsing
+        # This would handle merged column headers, etc.
+
+        return columns
+
+    def _extract_row_data(self, row: str, columns: list, header_row: str) -> dict:
+        """
+        Extract structured data from a row based on column positions in the header.
+
+        Args:
+            row: Row string
+            columns: List of column names
+            header_row: Original header row for position reference
+
+        Returns:
+            Dictionary mapping column names to values
+        """
+        result = {}
+
+        # Try to split by whitespace alignment first
+        # This works for well-formatted tables with aligned columns
+        row_parts = row.split()
+
+        # If we have exactly the same number of parts as columns, direct mapping
+        if len(row_parts) == len(columns):
+            for i, col in enumerate(columns):
+                result[col] = row_parts[i]
+            return result
+
+        # For more complex alignment, try position-based extraction
+        try:
+            # Find column boundaries based on header
+            col_positions = []
+            current_pos = 0
+            for col in columns:
+                col_pos = header_row.find(col, current_pos)
+                if col_pos == -1:
+                    break
+                col_positions.append(col_pos)
+                current_pos = col_pos + len(col)
+
+            # Add end position
+            col_positions.append(len(header_row) + 1)
+
+            # Extract column values using positions
+            for i in range(len(col_positions) - 1):
+                start = col_positions[i]
+                end = col_positions[i+1]
+
+                # Make sure row is long enough
+                if start < len(row):
+                    value = row[start:min(end, len(row))].strip()
+                    result[columns[i]] = value
+        except Exception:
+            # Fall back to simple splitting if position-based fails
+            if not result and len(row_parts) > 0:
+                # Just assign values to columns until we run out of either
+                for i in range(min(len(columns), len(row_parts))):
+                    result[columns[i]] = row_parts[i]
+
+                # If we have more row parts than columns, append remaining to the last column
+                if len(row_parts) > len(columns) and len(columns) > 0:
+                    last_col = columns[-1]
+                    result[last_col] = " ".join([result.get(last_col, "")] + row_parts[len(columns):])
+
+        return result
+
+    def _index_general_command_output(self, command: str, output: str, error: str, output_file: str, command_type: str) -> int:
+        """
+        Index general (non-tabular) command output with improved chunking.
+
+        Args:
+            command: The shell command
+            output: Command output text
+            error: Command error text
+            output_file: Path to output file
+            command_type: Type of command
+
+        Returns:
+            Number of memories added
+        """
+        total_memories = 0
+
+        # Create a descriptive memory entry for the complete output
         memory_text = f"Shell command '{command}' was executed and returned: "
 
-        # Add output preview
+        # Handle large outputs with better chunking
         if output:
-            # For large outputs, include a limited preview
             if len(output) > 500:
                 preview = output[:500].strip() + "..."
                 memory_text += f"\nOutput preview: {preview}"
                 if output_file:
                     memory_text += f"\nFull output saved to: {output_file}"
+
+                # Create chunks for better retrieval
+                chunks = self._chunk_command_output(output, command_type)
+
+                # Add each chunk as a separate memory
+                for i, chunk in enumerate(chunks):
+                    chunk_memory = f"Part {i+1} of output from command '{command}':\n{chunk}"
+
+                    memories_added = self.memory_manager.add_memory(
+                        self.current_user_id,
+                        f"Command output chunk {i+1} from: {command}",
+                        chunk_memory,
+                        memory_type=f"{command_type}_chunk",
+                        attributes={
+                            "command": command,
+                            "chunk_index": i,
+                            "total_chunks": len(chunks),
+                            "timestamp": datetime.now().isoformat()
+                        }
+                    )
+                    total_memories += memories_added
             else:
                 memory_text += f"\nOutput: {output}"
 
@@ -1313,24 +1664,164 @@ class TinyLlamaChat:
         if error:
             memory_text += f"\nError: {error}"
 
-        # Create a context description
-        command_type = "file listing" if "ls" in command else \
-                      "search" if "grep" or "find" in command else \
-                      "system info" if "uname" or "hostname" or "whoami" in command else \
-                      "shell command"
+            # Add error as separate memory for better retrieval
+            error_memory = f"Error from command '{command}':\n{error}"
 
-        # Add to memory
+            memories_added = self.memory_manager.add_memory(
+                self.current_user_id,
+                f"Command error from: {command}",
+                error_memory,
+                memory_type="command_error",
+                attributes={
+                    "command": command,
+                    "command_type": command_type,
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+            total_memories += memories_added
+
+        # Add the complete memory
         memories_added = self.memory_manager.add_memory(
             self.current_user_id,
             f"Information from {command_type}: {command}",
-            memory_text
+            memory_text,
+            memory_type=command_type,
+            attributes={
+                "command": command,
+                "has_error": error is not None,
+                "output_file": output_file,
+                "output_length": len(output) if output else 0,
+                "timestamp": datetime.now().isoformat()
+            }
         )
+        total_memories += memories_added
 
-        if memories_added > 0:
-            print(f"[Memory] Added command output to memory: '{command}'")
+        if total_memories > 0:
+            print(f"[Memory] Added {total_memories} memories from command: '{command}'")
 
-        return memories_added
+        return total_memories
 
+    def _chunk_command_output(self, output: str, command_type: str) -> list:
+        """
+        Chunk large command outputs intelligently based on content structure.
+
+        Args:
+            output: Command output text
+            command_type: Type of command
+
+        Returns:
+            List of output chunks
+        """
+        # For large outputs, we want semantically meaningful chunks
+        lines = output.split('\n')
+
+        # Different chunking strategies based on command type
+        if command_type == "file_listing":
+            # Group by directories or file types
+            return self._chunk_by_sections(lines, chunk_size=20)
+        elif command_type == "search":
+            # Group by match patterns
+            return self._chunk_by_sections(lines, chunk_size=15, empty_line_delimiter=True)
+        elif command_type == "file_content":
+            # Group by paragraphs or sections
+            return self._chunk_by_paragraphs(lines)
+        else:
+            # Default chunking by fixed size with overlap
+            return self._chunk_by_size(lines, chunk_size=25, overlap=5)
+
+    def _chunk_by_sections(self, lines: list, chunk_size: int = 20, empty_line_delimiter: bool = False) -> list:
+        """
+        Chunk lines by logical sections.
+
+        Args:
+            lines: List of text lines
+            chunk_size: Maximum lines per chunk
+            empty_line_delimiter: Whether empty lines indicate section boundaries
+
+        Returns:
+            List of chunked text sections
+        """
+        chunks = []
+        current_chunk = []
+
+        for line in lines:
+            # Check for section delimiter
+            if empty_line_delimiter and not line.strip():
+                if current_chunk:
+                    chunks.append('\n'.join(current_chunk))
+                    current_chunk = []
+                continue
+
+            current_chunk.append(line)
+
+            # Check size limit
+            if len(current_chunk) >= chunk_size:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = []
+
+        # Add final chunk
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+
+        return chunks
+
+    def _chunk_by_paragraphs(self, lines: list, max_chunk_size: int = 30) -> list:
+        """
+        Chunk lines by paragraphs (empty line separated).
+
+        Args:
+            lines: List of text lines
+            max_chunk_size: Maximum lines per chunk
+
+        Returns:
+            List of chunked paragraphs
+        """
+        chunks = []
+        current_chunk = []
+
+        for line in lines:
+            # If empty line and we have content, it's a paragraph boundary
+            if not line.strip() and current_chunk:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = []
+                continue
+
+            current_chunk.append(line)
+
+            # Check size limit
+            if len(current_chunk) >= max_chunk_size:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = []
+
+        # Add final chunk
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+
+        return chunks
+
+    def _chunk_by_size(self, lines: list, chunk_size: int = 25, overlap: int = 5) -> list:
+        """
+        Chunk lines by fixed size with overlap.
+
+        Args:
+            lines: List of text lines
+            chunk_size: Number of lines per chunk
+            overlap: Number of overlapping lines between chunks
+
+        Returns:
+            List of text chunks
+        """
+        chunks = []
+
+        if not lines:
+            return chunks
+
+        for i in range(0, len(lines), chunk_size - overlap):
+            chunk = lines[i:i + chunk_size]
+            if chunk:
+                chunks.append('\n'.join(chunk))
+
+        return chunks
     def parse_command_output(self, command: str, output: str) -> List[Dict]:
         """
         Parse command output with content-type detection and specialized parsing.
@@ -1879,6 +2370,611 @@ class TinyLlamaChat:
                 examples.extend(alt_pairs)
 
         return examples
+
+
+    def retrieve_command_memories(self, query: str, command_context: Optional[str] = None,
+                             top_k: int = 5, recency_weight: float = 0.3,
+                             include_tabular: bool = True) -> str:
+        """
+        Enhanced retrieval specifically optimized for command outputs with better
+        relevance scoring and support for tabular data.
+
+        Args:
+            query: The user query
+            command_context: Optional context about the command being discussed
+            top_k: Maximum number of memories to retrieve
+            recency_weight: Weight given to recency (0-1)
+            include_tabular: Whether to include specialized tabular data retrieval
+
+        Returns:
+            Formatted string of relevant command memories
+        """
+        # Get user's vector store
+        store = self.memory_manager._get_user_store(self.current_user_id)
+
+        # Generate embedding for query
+        query_embedding = self.memory_manager.generate_embedding(query)
+
+        # First pass: Get candidate memories with standard search
+        # Get more results than needed for re-ranking
+        candidate_results = store.search(
+            query_embedding,
+            top_k=top_k*3,
+            min_similarity=0.2
+        )
+
+        # Process based on command context if provided
+        if command_context:
+            # Extract command type from context
+            command_type = self._extract_command_type_from_context(command_context)
+
+            # Get tabular data if requested
+            if include_tabular and self._is_tabular_command(command_context):
+                tabular_results = self._retrieve_tabular_data(query, command_context, top_k)
+                # Combine with standard results
+                candidate_results.extend(tabular_results)
+
+        # Re-rank results with enhanced scoring
+        scored_results = self._score_command_memories(
+            candidate_results,
+            query,
+            command_context,
+            recency_weight
+        )
+
+        # Take top results after scoring
+        top_results = scored_results[:top_k]
+
+        # Format the results
+        return self._format_command_memories(top_results, query, command_context)
+
+    def _extract_command_type_from_context(self, command_context: str) -> str:
+        """
+        Extract command type from context string.
+
+        Args:
+            command_context: Context about the command
+
+        Returns:
+            Command type string
+        """
+        # Extract the actual command if possible
+        command_match = re.search(r'`([^`]+)`', command_context)
+        if command_match:
+            command = command_match.group(1).strip()
+        else:
+            command = command_context.strip()
+
+        # Detect command type
+        if any(cmd in command for cmd in ["ls", "dir"]):
+            return "file_listing"
+        elif any(cmd in command for cmd in ["grep", "find", "locate"]):
+            return "search"
+        elif any(cmd in command for cmd in ["df", "du", "free", "top", "ps"]):
+            return "system_metrics"
+        elif any(cmd in command for cmd in ["cat", "less", "more", "head", "tail"]):
+            return "file_content"
+        elif any(cmd in command for cmd in ["uname", "hostname", "whoami", "id"]):
+            return "system_info"
+        else:
+            return "general_command"
+
+    def _is_tabular_command(self, command_context: str) -> bool:
+        """
+        Check if a command typically produces tabular output.
+
+        Args:
+            command_context: Command context string
+
+        Returns:
+            Boolean indicating if command likely produces tabular output
+        """
+        tabular_commands = [
+            "df", "du", "ls -l", "ps", "top", "free",
+            "netstat", "ip addr", "mount", "docker ps",
+            "systemctl list", "apt list", "pip list"
+        ]
+
+        # Check if any tabular command is in the context
+        return any(cmd in command_context for cmd in tabular_commands)
+
+    def _retrieve_tabular_data(self, query: str, command_context: str, top_k: int) -> List[Dict]:
+        """
+        Specialized retrieval for tabular data with column/row awareness.
+
+        Args:
+            query: User query
+            command_context: Command context
+            top_k: Maximum results to return
+
+        Returns:
+            List of relevant tabular data memories
+        """
+        store = self.memory_manager._get_user_store(self.current_user_id)
+        results = []
+
+        # Try to extract column/row references from the query
+        column_references = self._extract_column_references(query)
+        row_references = self._extract_row_references(query)
+
+        # If we have specific column/row references, prioritize those memories
+        if column_references or row_references:
+            # Get all memories with tabular metadata
+            all_memories = store.documents
+            all_metadata = store.metadata
+
+            # Find memories that match the column/row references
+            for i, (memory, metadata) in enumerate(zip(all_memories, all_metadata)):
+                # Skip non-tabular memories
+                if not metadata.get('is_tabular', False):
+                    continue
+
+                # Check command match if context provided
+                if command_context and 'command' in metadata:
+                    if not self._commands_match(command_context, metadata['command']):
+                        continue
+
+                # Check column references
+                columns_match = False
+                if column_references and 'values' in metadata:
+                    values = metadata.get('values', {})
+                    for col in column_references:
+                        if col in values:
+                            columns_match = True
+                            break
+
+                # Check row references
+                row_match = False
+                if row_references and 'row_index' in metadata:
+                    row_idx = metadata.get('row_index', -1)
+                    if any(ref == row_idx for ref in row_references):
+                        row_match = True
+
+                # Add if either columns or rows match
+                if columns_match or row_match:
+                    # Calculate a base similarity (we'll refine later)
+                    results.append({
+                        'text': memory,
+                        'similarity': 0.7,  # Start with high base similarity for matches
+                        'metadata': metadata,
+                        'index': i
+                    })
+
+        # If no specialized results or not enough, supplement with semantic search
+        if len(results) < top_k:
+            # Generate specialized tabular query embedding
+            tabular_query = f"tabular data from command {command_context}: {query}"
+            tabular_embedding = self.memory_manager.generate_embedding(tabular_query)
+
+            # Search for tabular data memories
+            semantic_results = store.search(
+                tabular_embedding,
+                top_k=top_k*2,
+                min_similarity=0.2
+            )
+
+            # Filter for tabular data and add to results
+            for result in semantic_results:
+                metadata = result.get('metadata', {})
+                if metadata.get('is_tabular', False) or metadata.get('memory_type', '') in ['tabular_data', 'tabular_row', 'system_metrics']:
+                    # Check if already in results
+                    if not any(r.get('index', -1) == result.get('index', -2) for r in results):
+                        results.append(result)
+
+        return results
+
+    def _extract_column_references(self, query: str) -> List[str]:
+        """
+        Extract column name references from a query.
+
+        Args:
+            query: User query
+
+        Returns:
+            List of column names referenced
+        """
+        # Common column names in tabular data commands
+        common_columns = [
+            "filesystem", "size", "used", "avail", "use%", "mounted", "mount",
+            "pid", "user", "cpu", "mem", "command", "name", "device",
+            "type", "total", "free", "shared", "buff/cache", "available"
+        ]
+
+        # Extract column references (case insensitive)
+        query_lower = query.lower()
+        referenced_columns = []
+
+        for col in common_columns:
+            # Look for column name mentions
+            if col.lower() in query_lower:
+                # Check if it's actually a column reference
+                # (surrounded by spaces or punctuation, not part of another word)
+                pattern = r'(?:^|\W)(' + re.escape(col) + r')(?:$|\W)'
+                if re.search(pattern, query_lower, re.IGNORECASE):
+                    referenced_columns.append(col)
+
+        return referenced_columns
+
+    def _extract_row_references(self, query: str) -> List[int]:
+        """
+        Extract row number references from a query.
+
+        Args:
+            query: User query
+
+        Returns:
+            List of row indices referenced
+        """
+        # Look for patterns like "first row", "row 3", "third line", etc.
+        row_indices = []
+
+        # Numeric references
+        num_matches = re.findall(r'(?:row|line)\s+(\d+)', query.lower())
+        for match in num_matches:
+            try:
+                # Convert to 0-based index
+                idx = int(match) - 1
+                if idx >= 0:
+                    row_indices.append(idx)
+            except ValueError:
+                pass
+
+        # Textual references
+        text_map = {
+            'first': 0, 'second': 1, 'third': 2, 'fourth': 3, 'fifth': 4,
+            'last': -1, 'final': -1
+        }
+
+        for text, idx in text_map.items():
+            if f"{text} row" in query.lower() or f"{text} line" in query.lower():
+                row_indices.append(idx)
+
+        return row_indices
+
+    def _commands_match(self, context: str, command: str) -> bool:
+        """
+        Check if a command context matches a command string.
+
+        Args:
+            context: Command context
+            command: Command string
+
+        Returns:
+            Boolean indicating if they match
+        """
+        # Extract main command (first word)
+        context_cmd = context.split()[0] if context else ""
+        command_cmd = command.split()[0] if command else ""
+
+        # Direct match
+        if context == command:
+            return True
+
+        # Main command match
+        if context_cmd and context_cmd == command_cmd:
+            return True
+
+        # Check if one contains the other
+        if context in command or command in context:
+            return True
+
+        return False
+
+    def _score_command_memories(self, results: List[Dict], query: str,
+                              command_context: Optional[str] = None,
+                              recency_weight: float = 0.3) -> List[Dict]:
+        """
+        Enhanced scoring for command memories with recency bias.
+
+        Args:
+            results: Search results to score
+            query: User query
+            command_context: Optional command context
+            recency_weight: Weight for recency (0-1)
+
+        Returns:
+            List of scored results
+        """
+        now = datetime.now()
+
+        for result in results:
+            # Start with base similarity
+            base_similarity = result.get('similarity', 0)
+            result['original_similarity'] = base_similarity
+
+            # Initialize components
+            semantic_score = base_similarity
+            recency_score = 0.5  # Default mid-value
+            command_match_score = 0.5  # Default mid-value
+            type_match_score = 0.5  # Default mid-value
+            metadata_match_score = 0.0  # Default zero
+
+            # Extract metadata
+            metadata = result.get('metadata', {})
+
+            # Calculate recency score
+            if 'timestamp' in metadata:
+                try:
+                    timestamp = datetime.fromisoformat(metadata['timestamp'])
+                    # Calculate time difference in hours
+                    time_diff = (now - timestamp).total_seconds() / 3600
+
+                    # Exponential decay formula for recency
+                    # 1.0 for very recent, decaying over time
+                    recency_score = math.exp(-0.01 * time_diff)
+                except (ValueError, TypeError):
+                    # Default mid-value if timestamp parsing fails
+                    recency_score = 0.5
+
+            # Calculate command match score
+            if command_context and 'command' in metadata:
+                stored_command = metadata['command']
+                if self._commands_match(command_context, stored_command):
+                    command_match_score = 1.0
+                else:
+                    command_match_score = 0.2
+
+            # Calculate type match score
+            if command_context:
+                context_type = self._extract_command_type_from_context(command_context)
+                memory_type = metadata.get('command_type', metadata.get('memory_type', ''))
+
+                if context_type == memory_type:
+                    type_match_score = 1.0
+                elif context_type in memory_type or memory_type in context_type:
+                    type_match_score = 0.8
+                else:
+                    type_match_score = 0.3
+
+            # Check for metadata matches with query terms
+            query_terms = set(query.lower().split())
+            for key, value in metadata.items():
+                # Skip non-relevant metadata fields
+                if key in ['timestamp', 'memory_type', 'command_type']:
+                    continue
+
+                # Convert value to string if needed
+                if not isinstance(value, str):
+                    value = str(value)
+
+                # Check for query term matches in metadata
+                value_lower = value.lower()
+                for term in query_terms:
+                    if term in value_lower:
+                        metadata_match_score += 0.1  # Increment score for each match
+
+            # Cap metadata match score
+            metadata_match_score = min(metadata_match_score, 1.0)
+
+            # Special boost for tabular data when relevant
+            is_tabular = metadata.get('is_tabular', False)
+            if is_tabular and self._contains_tabular_query_terms(query):
+                tabular_boost = 0.2
+            else:
+                tabular_boost = 0.0
+
+            # Calculate final score: weighted combination of components
+            final_score = (
+                (1 - recency_weight) * semantic_score +  # Semantic similarity
+                recency_weight * recency_score +         # Recency bias
+                0.2 * command_match_score +              # Command match bonus
+                0.15 * type_match_score +                # Type match bonus
+                0.1 * metadata_match_score +             # Metadata match bonus
+                tabular_boost                            # Tabular data boost
+            )
+
+            # Ensure score is in valid range
+            result['final_score'] = max(0.0, min(1.0, final_score))
+
+            # Store component scores for debugging/analysis
+            result['score_components'] = {
+                'semantic': semantic_score,
+                'recency': recency_score,
+                'command_match': command_match_score,
+                'type_match': type_match_score,
+                'metadata_match': metadata_match_score,
+                'tabular_boost': tabular_boost
+            }
+
+        # Sort by final score
+        sorted_results = sorted(results, key=lambda x: x.get('final_score', 0), reverse=True)
+
+        return sorted_results
+
+    def _contains_tabular_query_terms(self, query: str) -> bool:
+        """
+        Check if query contains terms related to tabular data.
+
+        Args:
+            query: User query
+
+        Returns:
+            Boolean indicating if query relates to tabular data
+        """
+        tabular_terms = [
+            'table', 'row', 'column', 'cell', 'header', 'value',
+            'field', 'record', 'entry', 'data', 'metric', 'percentage',
+            'filesystem', 'memory', 'storage', 'cpu', 'disk'
+        ]
+
+        query_lower = query.lower()
+        return any(term in query_lower for term in tabular_terms)
+
+    def _format_command_memories(self, results: List[Dict], query: str,
+                               command_context: Optional[str] = None) -> str:
+        """
+        Format command memories for inclusion in the prompt.
+
+        Args:
+            results: Scored search results
+            query: User query
+            command_context: Optional command context
+
+        Returns:
+            Formatted string of memories
+        """
+        if not results:
+            return ""
+
+        # Detect if query is about tabular data
+        is_tabular_query = self._contains_tabular_query_terms(query)
+
+        # Group results into categories
+        tabular_results = []
+        metric_results = []
+        general_results = []
+
+        for result in results:
+            metadata = result.get('metadata', {})
+
+            # Categorize by result type
+            if metadata.get('is_tabular', False) or metadata.get('memory_type', '') in ['tabular_data', 'tabular_row']:
+                tabular_results.append(result)
+            elif metadata.get('memory_type', '') == 'system_metric':
+                metric_results.append(result)
+            else:
+                general_results.append(result)
+
+        # Format the output with clear sections
+        memory_text = ""
+
+        # Format tabular data first if relevant
+        if tabular_results and is_tabular_query:
+            memory_text += "TABULAR DATA:\n"
+
+            # Check if we have both table and row memories
+            table_memories = [r for r in tabular_results if metadata_refers_to_full_table(r.get('metadata', {}))]
+            row_memories = [r for r in tabular_results if not metadata_refers_to_full_table(r.get('metadata', {}))]
+
+            # If we have both, organize by table then rows
+            if table_memories and row_memories:
+                # First add table overview
+                for i, result in enumerate(table_memories[:1]):  # Just add the first table for context
+                    memory_text += f"- {result['text']}\n\n"
+
+                # Then add specific rows with clear references
+                memory_text += "SPECIFIC ROWS:\n"
+                for i, result in enumerate(row_memories[:5]):  # Limit to 5 rows
+                    # Extract row index if available
+                    metadata = result.get('metadata', {})
+                    row_idx = metadata.get('row_index', i)
+
+                    # Format with explicit row reference
+                    memory_text += f"- Row {row_idx + 1}: {result['text']}\n"
+            else:
+                # Just add all tabular results
+                for i, result in enumerate(tabular_results[:5]):  # Limit to 5 entries
+                    memory_text += f"- {result['text']}\n"
+
+            memory_text += "\n"
+
+        # Add system metrics if any
+        if metric_results:
+            memory_text += "SYSTEM METRICS:\n"
+            for i, result in enumerate(metric_results[:3]):  # Limit to 3 metrics
+                memory_text += f"- {result['text']}\n"
+            memory_text += "\n"
+
+        # Add general command results
+        if general_results or (not is_tabular_query and tabular_results):
+            memory_text += "COMMAND OUTPUT INFORMATION:\n"
+
+            # Add remaining results
+            remaining = general_results
+            if not is_tabular_query:
+                remaining += tabular_results
+
+            for i, result in enumerate(remaining[:5]):  # Limit to 5 general results
+                memory_text += f"- {result['text']}\n"
+
+        return memory_text
+
+    def metadata_refers_to_full_table(metadata: Dict) -> bool:
+        """
+        Check if metadata refers to a full table or just a row.
+
+        Args:
+            metadata: Result metadata
+
+        Returns:
+            Boolean indicating if metadata refers to full table
+        """
+        # Check memory type
+        if metadata.get('memory_type', '') == 'tabular_data':
+            return True
+
+        # Check if it has column and row counts (table overview)
+        if 'column_count' in metadata and 'row_count' in metadata:
+            return True
+
+        # Check if it has row index (specific row)
+        if 'row_index' in metadata:
+            return False
+
+        # Check memory text for table indicators
+        memory_text = metadata.get('memory_text', '')
+        if isinstance(memory_text, str) and any(indicator in memory_text.lower() for indicator in ['table from', 'tabular data', 'command output']):
+            return True
+
+        return False
+
+    def _is_command_related_query(self, query: str) -> bool:
+        """
+        Detect if a query is related to command execution or output.
+
+        Args:
+            query: User query
+
+        Returns:
+            Boolean indicating if query is command-related
+        """
+        # Look for explicit command markers
+        if re.search(r'[!`]{\s*[^}]+\s*}', query):
+            return True
+
+        # Look for command references
+        command_references = [
+            r'\b(command|cmd|terminal|shell|bash|console)\b',
+            r'\b(output|result) of\b',
+            r'\b(ran|executed|typed|entered)\b',
+            r'\b(df|ls|ps|top|grep|find|cat)\b'
+        ]
+
+        for pattern in command_references:
+            if re.search(pattern, query, re.IGNORECASE):
+                return True
+
+        return False
+
+    def _extract_command_context(self, query: str) -> Optional[str]:
+        """
+        Extract command context from a query.
+
+        Args:
+            query: User query
+
+        Returns:
+            Command context string or None
+        """
+        # Check for explicit command references
+        cmd_match = re.search(r'[!`]{\s*([^}]+)\s*}', query)
+        if cmd_match:
+            return cmd_match.group(1).strip()
+
+        # Look for command mentions
+        cmd_mention = re.search(r'(?:command|cmd|ran|executed|typed|entered)\s+[`"]([^`"]+)[`"]', query)
+        if cmd_mention:
+            return cmd_mention.group(1).strip()
+
+        # Extract command name references
+        for cmd in ['df', 'ls', 'ps', 'top', 'grep', 'find', 'cat', 'du']:
+            # Look for cmd or cmd -flags pattern
+            cmd_pattern = rf'\b({cmd}(?:\s+-\w+)?)\b'
+            cmd_ref = re.search(cmd_pattern, query)
+            if cmd_ref:
+                return cmd_ref.group(1).strip()
+
+        return None
 
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
