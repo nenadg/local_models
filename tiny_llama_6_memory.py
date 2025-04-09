@@ -251,7 +251,7 @@ class TinyLlamaChat:
 
             # Ensure recent memories are included by forcing a higher k value for recent queries
             recency_boost = True
-            top_k = 12 if recency_boost else 8  # Increase from default 8
+            top_k = 8 if recency_boost else 8  # Increase from default 8
 
             if command_context:
                 # Use specialized command memory retrieval

@@ -148,13 +148,13 @@ class ResponseFilter:
             # Apply domain-specific thresholds
             if domain == 'arithmetic' or domain == 'factual':
                 # Stricter thresholds for factual/math queries
-                domain_confidence_threshold = 0.75  # Higher threshold
-                domain_entropy_threshold = 1.8      # Lower threshold
-                domain_perplexity_threshold = 8.0   # Lower threshold
+                domain_confidence_threshold = 0.5   # Higher threshold = 0.75
+                domain_entropy_threshold = 5.8      # Lower threshold = 1.8
+                domain_perplexity_threshold = 8.0   # Lower threshold = 8.0
             elif domain == 'translation':
                 # Stricter thresholds for translations
                 domain_confidence_threshold = 0.7
-                domain_entropy_threshold = 1.9
+                domain_entropy_threshold = 3.9
                 domain_perplexity_threshold = 9.0
 
         sharpened_metrics = self.sharpen_metrics(metrics)
@@ -167,13 +167,13 @@ class ResponseFilter:
 
         # Calculate a combined uncertainty score
         uncertainty_score = (
-            (1.0 - sharpened_metrics["confidence"]) * 0.5 +     # Weight confidence more
+            (1 - sharpened_metrics["confidence"]) * 0.5 +     # Weight confidence more
             (sharpened_metrics["entropy"] / domain_entropy_threshold) * 0.3 +
             (sharpened_metrics["perplexity"] / domain_perplexity_threshold) * 0.2
         )
 
         # High uncertainty score indicates problem
-        if uncertainty_score > 0.7:  # Threshold to be tuned
+        if uncertainty_score > 0.49:  # Threshold to be tuned
             return True, "high_uncertainty"
 
         # Individual metrics can still trigger filtering if they're really bad

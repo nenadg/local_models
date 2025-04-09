@@ -217,7 +217,7 @@ class EnhancedConfidenceMetrics:
         perplexity = 2 ** mean_entropy
 
         # More aggressive scaling for perplexity
-        perplexity_score = max(0.0, min(1.0, 1.0 - (perplexity / 5.0)))
+        perplexity_score = max(0.0, min(1.0, 1.0 - (perplexity / 10.0)))
 
         # More aggressive entropy-based confidence
         max_possible_entropy = 4.0  # Lower threshold makes this more sensitive
