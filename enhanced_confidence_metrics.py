@@ -217,17 +217,17 @@ class EnhancedConfidenceMetrics:
         perplexity = 2 ** mean_entropy
 
         # More aggressive scaling for perplexity
-        perplexity_score = max(0.0, min(1.0, 1.0 - (perplexity / 20.0)))
+        perplexity_score = max(0.0, min(1.0, 1.0 - (perplexity / 5.0)))
 
         # More aggressive entropy-based confidence
-        max_possible_entropy = 6.0  # Lower threshold makes this more sensitive
+        max_possible_entropy = 4.0  # Lower threshold makes this more sensitive
         entropy_confidence = max(0.0, min(1.0, 1.0 - (mean_entropy / max_possible_entropy)))
 
         # More weight on entropy/perplexity, less on raw probability
-        confidence = 0.3 * mean_prob + 0.35 * perplexity_score + 0.35 * entropy_confidence
+        confidence = 0.3 * mean_prob + 0.3 * perplexity_score + 0.4 * entropy_confidence
 
         # Apply power function to create greater separation between values
-        confidence = confidence ** 1.5  # Exponentiate to create more separation
+        # confidence = confidence ** 1.5  # Exponentiate to create more separation
 
         # Analyze the distribution of token probabilities for signs of inconsistency
         if len(probs) > 10:

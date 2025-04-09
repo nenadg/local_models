@@ -18,17 +18,19 @@ class ResponseFilter:
         fallback_messages: Optional[List[str]] = None,
         continuation_phrases: Optional[List[str]] = None,
         user_context: Optional[Dict[str, Any]] = None,
-        sharpening_factor: float = 0.3
+        sharpening_factor: float = 0.3,
+        question_classifier=None
     ):
         self.confidence_threshold = confidence_threshold
         self.entropy_threshold = entropy_threshold
         self.perplexity_threshold = perplexity_threshold
         self.user_context = user_context or {}
         self.sharpening_factor = sharpening_factor
+        self.question_classifier = question_classifier
 
         # Default fallback messages when low confidence is detected
         self.fallback_messages = fallback_messages or [
-            "... I don't know man, but I've heard some theories about that, if you want me to continue just say 'please continue' or 'speculate anyway'"
+            "... I don't know, however if you want me to continue with low confidence answer, just say 'please continue' or 'speculate anyway'"
             # "... I don't know enough about this topic to provide a reliable answer. If you'd like me to speculate anyway, please let me know by saying 'please continue' or 'speculate anyway'.",
             # "... I'm not confident in my knowledge about this. I might make mistakes if I answer. If you still want me to try, please say 'continue anyway' or 'please speculate'.",
             # "... I don't have enough information to answer this accurately. I could try to speculate if you reply with 'please continue' or 'give it your best guess'.",
@@ -121,35 +123,68 @@ class ResponseFilter:
 
         return sharpened
 
-    def should_filter(self, metrics: Dict[str, float]) -> Tuple[bool, str]:
+    def should_filter(self, metrics: Dict[str, float], query: Optional[str] = None) -> Tuple[bool, str]:
         """
-        Determine if a response should be filtered based on sharpened confidence metrics.
+        Determine if a response should be filtered based on metrics and domain.
 
         Args:
             metrics: Dictionary containing confidence, perplexity, and entropy values
+            query: The user's query (for domain detection)
 
         Returns:
             Tuple of (should_filter, reason)
         """
-        # if metrics["confidence"] < self.confidence_threshold:
-        #     return True, "low_confidence"
 
-        # if metrics["entropy"] > self.entropy_threshold:
-        #     return True, "high_entropy"
+        domain = None
+        domain_confidence_threshold = self.confidence_threshold
+        domain_entropy_threshold = self.entropy_threshold
+        domain_perplexity_threshold = self.perplexity_threshold
 
-        # if metrics["perplexity"] > self.perplexity_threshold:
-        #     return True, "high_perplexity"
+        if query and hasattr(self, 'question_classifier'):
+            # Get domain and adjust thresholds
+            domain_settings = self.question_classifier.get_domain_settings(query)
+            domain = domain_settings.get('domain', 'unknown')
+
+            # Apply domain-specific thresholds
+            if domain == 'arithmetic' or domain == 'factual':
+                # Stricter thresholds for factual/math queries
+                domain_confidence_threshold = 0.75  # Higher threshold
+                domain_entropy_threshold = 1.8      # Lower threshold
+                domain_perplexity_threshold = 8.0   # Lower threshold
+            elif domain == 'translation':
+                # Stricter thresholds for translations
+                domain_confidence_threshold = 0.7
+                domain_entropy_threshold = 1.9
+                domain_perplexity_threshold = 9.0
 
         sharpened_metrics = self.sharpen_metrics(metrics)
 
-        # Use sharpened metrics for filtering decision
-        if (sharpened_metrics["confidence"] < self.confidence_threshold and
-            sharpened_metrics["entropy"] > self.entropy_threshold and
-            sharpened_metrics["perplexity"] > self.perplexity_threshold):
-            return True, "low_confidence"
-        else:
-            if (metrics["confidence"] < self.confidence_threshold and metrics["entropy"] > self.entropy_threshold and metrics["perplexity"] > self.perplexity_threshold):
-                return True, "low_confidence"
+        # Use all sharpened metrics for filtering decision
+        # if (sharpened_metrics["confidence"] < self.confidence_threshold and
+        #     sharpened_metrics["entropy"] > self.entropy_threshold and
+        #     sharpened_metrics["perplexity"] > self.perplexity_threshold):
+        #     return True, "low_confidence"
+
+        # Calculate a combined uncertainty score
+        uncertainty_score = (
+            (1.0 - sharpened_metrics["confidence"]) * 0.5 +     # Weight confidence more
+            (sharpened_metrics["entropy"] / domain_entropy_threshold) * 0.3 +
+            (sharpened_metrics["perplexity"] / domain_perplexity_threshold) * 0.2
+        )
+
+        # High uncertainty score indicates problem
+        if uncertainty_score > 0.7:  # Threshold to be tuned
+            return True, "high_uncertainty"
+
+        # Individual metrics can still trigger filtering if they're really bad
+        if sharpened_metrics["confidence"] < domain_confidence_threshold * 0.7:
+            return True, "very_low_confidence"
+
+        if sharpened_metrics["entropy"] > domain_entropy_threshold * 1.5:
+            return True, "very_high_entropy"
+
+        if sharpened_metrics["perplexity"] > domain_perplexity_threshold * 1.5:
+            return True, "very_high_perplexity"
 
         return False, "acceptable"
 
@@ -186,7 +221,7 @@ class ResponseFilter:
             metrics: Confidence metrics for the response
         """
         # Track the last uncertain query
-        should_filter, reason = self.should_filter(metrics)
+        should_filter, reason = self.should_filter(metrics, query)
         if should_filter:
             self.user_context["last_uncertain_query"] = query
             self.user_context["last_uncertain_reason"] = reason
@@ -216,7 +251,7 @@ class ResponseFilter:
         Returns:
             Filtered response or original response if confidence is high enough
         """
-        should_filter, reason = self.should_filter(metrics)
+        should_filter, reason = self.should_filter(metrics, query)
 
         # Skip filtering if metrics are good
         if not should_filter:
@@ -311,7 +346,7 @@ class ResponseFilter:
             Boolean indicating whether to stream a fallback
         """
         # Check if filtering should occur
-        should_filter, reason = self.should_filter(metrics)
+        should_filter, reason = self.should_filter(metrics, query)
         if not should_filter:
             return False
 

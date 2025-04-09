@@ -249,12 +249,16 @@ class TinyLlamaChat:
 
             command_context = self._extract_command_context(current_query)
 
+            # Ensure recent memories are included by forcing a higher k value for recent queries
+            recency_boost = True
+            top_k = 12 if recency_boost else 8  # Increase from default 8
+
             if command_context:
                 # Use specialized command memory retrieval
                 memories = self.retrieve_command_memories(
                     current_query,
                     command_context=command_context,
-                    top_k=8,
+                    top_k=top_k,
                     recency_weight=0.3,
                     include_tabular=True
                 )
@@ -1143,7 +1147,8 @@ class TinyLlamaChat:
         # Create enhanced response filter
         response_filter = ResponseFilter(
             confidence_threshold=args.confidence_threshold,
-            sharpening_factor=args.confidence_sharpening
+            sharpening_factor=args.confidence_sharpening,
+            question_classifier=self.question_classifier
         )
 
         # Create enhanced memory manager
@@ -2886,13 +2891,14 @@ def main():
         confidence_threshold=args.confidence_threshold,
         auto_memorize=not args.no_memory,
         enable_sharpening=args.enable_sharpening,
-        sharpening_factor=args.sharpening_factor
+        sharpening_factor=args.sharpening_factor,
     )
 
     try:
         response_filter = ResponseFilter(
             confidence_threshold=args.confidence_threshold,
-            user_context=user_context
+            user_context=user_context,
+            question_classifier=chat.question_classifier
         )
 
         current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
