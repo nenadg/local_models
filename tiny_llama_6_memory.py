@@ -2747,7 +2747,7 @@ class TinyLlamaChat:
 
     def cleanup(self):
         """Release all resources properly."""
-        print("Cleaning up resources...")
+        print("Cleaning up resources before exit...")
 
         try:
             # Unload models
@@ -2759,17 +2759,16 @@ class TinyLlamaChat:
                 self.resource_manager.unload_model(self.model)
                 self.model = None
 
-            # Clean up memory manager resources - fixed to work with refactored design
+            # For memory consolidation, we need to get the store first
             if hasattr(self, 'memory_manager') and hasattr(self, 'current_user_id'):
-                # Get the user's vector store first
-                if hasattr(self.memory_manager, '_get_user_store'):
-                    try:
-                        store = self.memory_manager._get_user_store(self.current_user_id)
-                        # Now call consolidate_memories on the store object
-                        if hasattr(store, 'consolidate_memories'):
-                            store.consolidate_memories()
-                    except Exception as e:
-                        print(f"Error consolidating memories: {e}")
+                try:
+                    # Get the user's vector store
+                    store = self.memory_manager._get_user_store(self.current_user_id)
+                    # Now call consolidate_memories on the store object
+                    store.consolidate_memories()
+                    print(f"Consolidated memories for user {self.current_user_id}")
+                except Exception as e:
+                    print(f"Error consolidating memories: {e}")
 
             # Final cleanup
             if hasattr(self, 'resource_manager'):
@@ -2993,11 +2992,12 @@ def main():
                         print("Sorry the response wasn't helpful.")
 
                 print("Consolidating memories before exit...")
-                chat.memory_manager.consolidate_memories(chat.current_user_id)
+                store = chat.memory_manager._get_user_store(chat.current_user_id)
+                store.consolidate_memories()
 
                 # Show final stats
-                stats = chat.memory_manager.get_stats(chat.current_user_id)
-                print(f"Total memories saved this session: {stats['total_memories']}")
+                stats = store.get_stats()
+                print(f"Total memories saved this session: {stats['total_documents']}")
                 break
 
             elif user_input.lower().startswith('!teach:'):
@@ -3054,14 +3054,14 @@ def main():
                 print(f"Detailed metrics display {'enabled' if show_all_metrics else 'disabled'}")
                 continue
             elif user_input.lower() == '!toggle-sharpening':
-                is_enabled = chat.toggle_sharpening()
+                is_enabled = chat.memory_manager.toggle_sharpening()
                 print(f"Vector space sharpening {'enabled' if is_enabled else 'disabled'}")
                 continue
             elif user_input.lower().startswith('!sharpening-factor:'):
                 try:
                     factor = float(user_input.split(':')[1].strip())
                     if 0.0 <= factor <= 1.0:
-                        chat.set_sharpening_factor(factor)
+                        chat.memory_manager.set_sharpening_factor(factor)
                     else:
                         print("Sharpening factor must be between 0.0 and 1.0")
                 except Exception as e:
@@ -3069,7 +3069,7 @@ def main():
                 continue
 
             elif user_input.lower() == '!memorize':
-                memories_added = chat.memory_manager.save_conversation(chat.current_user_id, conversation)
+                memories_added = chat.save_conversation(conversation)
                 print(f"Conversation saved to long-term memory! Added {memories_added} memories.")
                 continue
 
@@ -3079,9 +3079,10 @@ def main():
                 continue
 
             elif user_input.lower() == '!memory-stats':
-                stats = chat.memory_manager.get_stats(chat.current_user_id)
+                store = chat._get_user_store(chat.current_user_id)
+                stats = store.get_stats()
                 print("\nMemory System Statistics:")
-                print(f"Total memories: {stats['total_memories']}")
+                print(f"Total memories: {stats['total_documents']}")
                 print(f"Auto-memorize: {'Enabled' if stats['auto_memorize'] else 'Disabled'}")
                 print(f"Last consolidation: {stats['last_consolidation']}")
                 continue
@@ -3220,7 +3221,6 @@ def main():
         print(f"\nUnexpected error: {e}")
     finally:
         # This should only happen when exiting the program
-        print("Cleaning up resources before exit...")
         chat.cleanup()
 
 if __name__ == "__main__":

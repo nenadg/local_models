@@ -657,7 +657,18 @@ class MemoryManager:
                 embedding_dim=self.embedding_dim
             )
         return self.user_stores[user_id]
-    
+
+
+    def toggle_auto_memorize(self) -> bool:
+        """
+        Toggle automatic memorization on/off.
+
+        Returns:
+            New auto_memorize state
+        """
+        self.auto_memorize = not self.auto_memorize
+        return self.auto_memorize
+
     def generate_embedding(self, text: str) -> np.ndarray:
         """
         Generate an embedding for a text snippet.
@@ -731,6 +742,47 @@ class MemoryManager:
         
         return key_info[:10]  # Return up to 10 memories
     
+    def _check_maintenance(self, user_id: str):
+        """
+        Check if memory maintenance (consolidation) is due.
+
+        Args:
+            user_id: The user ID for the store to check
+        """
+        # Skip if the memory manager doesn't implement consolidation functionality
+        if not hasattr(self, 'consolidate_memories'):
+            return
+
+        # Check if we have access to the last consolidation time
+        if hasattr(self, 'last_consolidation') and hasattr(self, 'consolidation_interval'):
+            now = datetime.now()
+            time_diff = (now - self.last_consolidation).total_seconds()
+
+            if time_diff > self.consolidation_interval:
+                # Call consolidate_memories with user_id if method accepts it
+                try:
+                    self.consolidate_memories(user_id)
+                    self.last_consolidation = now
+                except TypeError:
+                    # If it doesn't accept user_id, try without it
+                    try:
+                        self.consolidate_memories()
+                        self.last_consolidation = now
+                    except Exception as e:
+                        print(f"Error during memory consolidation: {e}")
+        else:
+            # If we don't have access to timing attributes, try direct consolidation
+            # (will happen on every query, but better than never consolidating)
+            try:
+                # Try with and without user_id
+                try:
+                    self.consolidate_memories(user_id)
+                except TypeError:
+                    self.consolidate_memories()
+            except Exception:
+                # If consolidation fails, silently continue
+                pass
+
     def add_memory(self, 
                   user_id: str, 
                   query: str, 

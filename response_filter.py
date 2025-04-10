@@ -49,7 +49,10 @@ class ResponseFilter:
             "speculate",
             "just guess",
             "make something up",
-            "proceed anyway"
+            "proceed anyway",
+            "...",
+            ".",
+            ""
         ]
 
     def sharpen_confidence_scores(self, token_probs: List[float]) -> List[float]:
