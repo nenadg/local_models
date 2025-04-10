@@ -200,6 +200,7 @@ The confidence system:
 - **Slow generation**: Enable --turbo mode, use GPU if available
 - **Model not found**: Check internet connection, model name spelling
 - **Unexpected hallucinations**: Increase confidence threshold, add corrections
+- **Corrupt vector story erros**: `rm -rf ./memory/*_store*` or --no-memory flag to temporarily run without loading the existing memory
 
 # GPU
 

@@ -144,6 +144,7 @@ class TinyLlamaChat:
 
         # Create draft model from target model by reducing layers
         self.draft_model = self.create_draft_model()
+        
         if self.draft_model:
             print("Created draft model by reducing layers")
         else:

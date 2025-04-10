@@ -12,9 +12,9 @@ class ResponseFilter:
 
     def __init__(
         self,
-        confidence_threshold: float = 0.55,  # Lower this from 0.65
-        entropy_threshold: float = 2.0,      # Lower this from 2.5
-        perplexity_threshold: float = 10.0,  # Lower this from 15.0
+        confidence_threshold: float = 0.65,  # Lower this from 0.65
+        entropy_threshold: float = 2.5,      # Lower this from 2.5
+        perplexity_threshold: float = 15.0,  # Lower this from 15.0
         fallback_messages: Optional[List[str]] = None,
         continuation_phrases: Optional[List[str]] = None,
         user_context: Optional[Dict[str, Any]] = None,
@@ -30,13 +30,13 @@ class ResponseFilter:
 
         # Default fallback messages when low confidence is detected
         self.fallback_messages = fallback_messages or [
-            "... I don't know."
-            # "... I don't know enough about this topic to provide a reliable answer. If you'd like me to speculate anyway, please let me know by saying 'please continue' or 'speculate anyway'.",
-            # "... I'm not confident in my knowledge about this. I might make mistakes if I answer. If you still want me to try, please say 'continue anyway' or 'please speculate'.",
-            # "... I don't have enough information to answer this accurately. I could try to speculate if you reply with 'please continue' or 'give it your best guess'.",
-            # "... I'm not familiar enough with this topic to give a reliable response. If you'd like me to attempt an answer despite my uncertainty, please say 'go ahead anyway'.",
-            # "... I should acknowledge that I don't have sufficient knowledge on this subject. If you'd still like me to provide my best attempt, please reply with 'please continue'."
-        ]
+            "... I don't know :/.",
+            "... I don't know :(.",
+            "... I don't know :|.",
+            "... I don't know :\\.",
+            "... I don't know :[.",
+            "... I don't know !|."
+       ]
 
         # Phrases that indicate user wants to continue despite uncertainty
         self.continuation_phrases = continuation_phrases or [
@@ -148,14 +148,14 @@ class ResponseFilter:
             # Apply domain-specific thresholds
             if domain == 'arithmetic' or domain == 'factual':
                 # Stricter thresholds for factual/math queries
-                domain_confidence_threshold = 0.5   # Higher threshold = 0.75
-                domain_entropy_threshold = 5.8      # Lower threshold = 1.8
+                domain_confidence_threshold = 0.75   # Higher threshold = 0.75
+                domain_entropy_threshold = 1.8      # Lower threshold = 1.8
                 domain_perplexity_threshold = 8.0   # Lower threshold = 8.0
             elif domain == 'translation':
                 # Stricter thresholds for translations
-                domain_confidence_threshold = 0.7
+                domain_confidence_threshold = 0.4
                 domain_entropy_threshold = 3.9
-                domain_perplexity_threshold = 9.0
+                domain_perplexity_threshold = 12.0
 
         sharpened_metrics = self.sharpen_metrics(metrics)
 
@@ -173,18 +173,31 @@ class ResponseFilter:
         )
 
         # High uncertainty score indicates problem
-        if uncertainty_score > 0.49:  # Threshold to be tuned
-            return True, "high_uncertainty"
+        # if uncertainty_score > 0.49:  # Threshold to be tuned
+        #     return True, "high_uncertainty"
+        # print("CONFIDENCE", sharpened_metrics["confidence"] , domain_confidence_threshold)
+        # print("ENTROPY", sharpened_metrics["entropy"], domain_entropy_threshold)
+        # print("PERPLEXITY", sharpened_metrics["perplexity"], domain_perplexity_threshold)
+
+        if sharpened_metrics["confidence"] > domain_confidence_threshold:
+            return True, "very_high_confidence"
+
+        if sharpened_metrics["entropy"] > domain_entropy_threshold or sharpened_metrics["entropy"] < 1:
+            return True, "very_retarded_entropy"
+
+        if sharpened_metrics["perplexity"] > domain_perplexity_threshold:
+            return True, "very_overconfident_perplexity"
+
 
         # Individual metrics can still trigger filtering if they're really bad
-        if sharpened_metrics["confidence"] < domain_confidence_threshold * 0.7:
-            return True, "very_low_confidence"
+        # if sharpened_metrics["confidence"] < domain_confidence_threshold * 0.7:
+        #     return True, "very_low_confidence"
 
-        if sharpened_metrics["entropy"] > domain_entropy_threshold * 1.5:
-            return True, "very_high_entropy"
+        # if sharpened_metrics["entropy"] > domain_entropy_threshold * 1.5:
+        #     return True, "very_high_entropy"
 
-        if sharpened_metrics["perplexity"] > domain_perplexity_threshold * 1.5:
-            return True, "very_high_perplexity"
+        # if sharpened_metrics["perplexity"] > domain_perplexity_threshold * 1.5:
+        #     return True, "very_high_perplexity"
 
         return False, "acceptable"
 
