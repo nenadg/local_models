@@ -345,14 +345,15 @@ Output files are saved to: {os.path.abspath(self.output_dir)}
                     }
 
                     # Display the output (truncated for very large outputs)
-                    print("\n--- Command Output ---")
-                    if len(output) > 2000:
-                        print(output[:1000] + "\n...[output truncated]...\n" + output[-1000:])
-                    elif output:
-                        print(output)
-                    if error:
-                        print("Error:", error)
-                    print("--- End Output ---\n")
+                    # print("\n--- Command Output ---")
+                    # if len(output) > 2000:
+                    #     print(output[:1000] + "\n...[output truncated]...\n" + output[-1000:])
+                    # elif output:
+                    #     print(output)
+                    # if error:
+                    #     print("Error:", error)
+                    # print("--- End Output ---\n")
+                    print(output)
 
                     # Remove the command from the input
                     clean_input = clean_input.replace(f"!{{{match}}}", "")

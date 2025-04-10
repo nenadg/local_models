@@ -30,7 +30,7 @@ class ResponseFilter:
 
         # Default fallback messages when low confidence is detected
         self.fallback_messages = fallback_messages or [
-            "... I don't know.'"
+            "... I don't know."
             # "... I don't know enough about this topic to provide a reliable answer. If you'd like me to speculate anyway, please let me know by saying 'please continue' or 'speculate anyway'.",
             # "... I'm not confident in my knowledge about this. I might make mistakes if I answer. If you still want me to try, please say 'continue anyway' or 'please speculate'.",
             # "... I don't have enough information to answer this accurately. I could try to speculate if you reply with 'please continue' or 'give it your best guess'.",

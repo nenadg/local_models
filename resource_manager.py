@@ -39,8 +39,8 @@ class CUDAMemoryManager:
         max_allocated = torch.cuda.max_memory_allocated() / (1024 * 1024)  # MB
         reserved = torch.cuda.memory_reserved() / (1024 * 1024)  # MB
 
-        print(f"[{label}] CUDA Memory: {allocated:.2f}MB allocated, "
-              f"{max_allocated:.2f}MB peak, {reserved:.2f}MB reserved")
+        #print(f"[{label}] CUDA Memory: {allocated:.2f}MB allocated, "
+        #      f"{max_allocated:.2f}MB peak, {reserved:.2f}MB reserved")
 
     def clear_cache(self):
         """Clear CUDA cache and run garbage collection."""
@@ -52,7 +52,7 @@ class CUDAMemoryManager:
         gc.collect()
 
         # Print memory stats after clearing
-        self.print_memory_stats("After clearing cache")
+        # self.print_memory_stats("After clearing cache")
 
     def optimize_for_inference(self):
         """Apply optimizations for inference mode."""
