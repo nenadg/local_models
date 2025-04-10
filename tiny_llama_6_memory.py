@@ -21,15 +21,14 @@ import numpy as np
 from typing import List, Dict, Tuple, Optional
 from transformers import LogitsProcessor, LogitsProcessorList
 from history import setup_readline_history
-from enhanced_memory_store import EnhancedMemoryManager
+
 from resource_manager import ResourceManager
-from memory_optimized_vector_store import MemoryOptimizedVectorStore
 
 from keyboard_interrupt import KeyboardInterruptHandler
 from mcp_handler import MCPHandler
 from enhanced_confidence_metrics import EnhancedConfidenceMetrics, TokenProbabilityCaptureProcessor
 from response_filter import ResponseFilter
-from enhanced_memory_manager_with_sharpening import EnhancedMemoryManagerWithSharpening
+from memory_manager import MemoryManager, VectorStore
 
 from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
 from question_classifier import QuestionClassifier
@@ -72,13 +71,12 @@ class TinyLlamaChat:
         self.resource_manager = ResourceManager(device=device)
 
         # Initialize memory manager
-        self.memory_manager = EnhancedMemoryManagerWithSharpening(
+        self.memory_manager = MemoryManager(
             memory_dir=memory_dir,
             device=device,
             auto_memorize=auto_memorize,
             sharpening_enabled=enable_sharpening,
-            sharpening_factor=sharpening_factor,
-            vector_store_class=MemoryOptimizedVectorStore
+            sharpening_factor=sharpening_factor
         )
 
         # Initialize the question classifier
@@ -144,7 +142,7 @@ class TinyLlamaChat:
 
         # Create draft model from target model by reducing layers
         self.draft_model = self.create_draft_model()
-        
+
         if self.draft_model:
             print("Created draft model by reducing layers")
         else:
@@ -1153,7 +1151,7 @@ class TinyLlamaChat:
         )
 
         # Create enhanced memory manager
-        memory_manager = EnhancedMemoryManagerWithSharpening(
+        memory_manager = MemoryManager(
             memory_dir=args.memory_dir,
             device=args.device,
             auto_memorize=not args.no_memory,
@@ -2751,23 +2749,42 @@ class TinyLlamaChat:
         """Release all resources properly."""
         print("Cleaning up resources...")
 
-        # Unload models
-        if hasattr(self, 'draft_model') and self.draft_model is not None:
-            self.resource_manager.unload_model(self.draft_model)
-            self.draft_model = None
+        try:
+            # Unload models
+            if hasattr(self, 'draft_model') and self.draft_model is not None:
+                self.resource_manager.unload_model(self.draft_model)
+                self.draft_model = None
 
-        if hasattr(self, 'model') and self.model is not None:
-            self.resource_manager.unload_model(self.model)
-            self.model = None
+            if hasattr(self, 'model') and self.model is not None:
+                self.resource_manager.unload_model(self.model)
+                self.model = None
 
-        # Clean up memory manager resources
-        if hasattr(self, 'memory_manager'):
-            self.memory_manager.consolidate_memories(self.current_user_id)
+            # Clean up memory manager resources - fixed to work with refactored design
+            if hasattr(self, 'memory_manager') and hasattr(self, 'current_user_id'):
+                # Get the user's vector store first
+                if hasattr(self.memory_manager, '_get_user_store'):
+                    try:
+                        store = self.memory_manager._get_user_store(self.current_user_id)
+                        # Now call consolidate_memories on the store object
+                        if hasattr(store, 'consolidate_memories'):
+                            store.consolidate_memories()
+                    except Exception as e:
+                        print(f"Error consolidating memories: {e}")
 
-        # Final cleanup
-        self.resource_manager.cleanup()
+            # Final cleanup
+            if hasattr(self, 'resource_manager'):
+                self.resource_manager.cleanup()
 
-        print("Resources cleaned up successfully")
+            print("Resources cleaned up successfully")
+
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+            # Attempt to run basic cleanup even after an error
+            try:
+                if hasattr(self, 'resource_manager'):
+                    self.resource_manager.cleanup()
+            except:
+                pass
 
 
 
