@@ -2747,7 +2747,6 @@ class TinyLlamaChat:
 
     def cleanup(self):
         """Release all resources properly."""
-        print("Cleaning up resources before exit...")
 
         try:
             # Unload models
