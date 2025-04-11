@@ -42,6 +42,7 @@ from pattern_matching_utils import (
 )
 
 from batch_utils import tensor_batch_processing
+from web_knowledge_enhancer import WebKnowledgeEnhancer
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -59,7 +60,7 @@ It’s like being a superhero: you use your superpower of speaking wisely and li
 }
 
 class TinyLlamaChat:
-    def __init__(self, model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0", device=None, memory_dir="./memory", output_dir="./output", confidence_threshold=0.7, auto_memorize=True, enable_sharpening=True, sharpening_factor=0.3):
+    def __init__(self, model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0", device=None, memory_dir="./memory", output_dir="./output", confidence_threshold=0.7, auto_memorize=True, enable_sharpening=True, sharpening_factor=0.3, enable_web_knowledge=True):
         self.model_name = model_name
         self.memory_dir = memory_dir
         self.interrupt_handler = KeyboardInterruptHandler()
@@ -87,6 +88,19 @@ class TinyLlamaChat:
             memory_manager=self.memory_manager,
             question_classifier=self.question_classifier
         )
+
+        # Initialize the web knowledge enhancer
+        self.enable_web_knowledge = enable_web_knowledge
+        if enable_web_knowledge:
+            self.web_enhancer = WebKnowledgeEnhancer(
+                memory_manager=self.memory_manager,
+                confidence_threshold=confidence_threshold,
+                vector_sharpening_factor=sharpening_factor,
+                search_engine="duckduckgo"  # Use DuckDuckGo by default for fewer rate limits
+            )
+            print("Web knowledge enhancement initialized")
+        else:
+            self.web_enhancer = None
 
         self.current_user_id = "default_user"
 
@@ -245,8 +259,24 @@ class TinyLlamaChat:
         # Use the weighted memory integrator for domain-aware memory retrieval
         if current_query:
             # Detect if this is a command-related query
-
             command_context = self._extract_command_context(current_query)
+
+            # Get domain information if available
+            domain = None
+            settings = None
+
+            if hasattr(self, 'question_classifier'):
+                settings = self.question_classifier.get_domain_settings(current_query)
+                domain = settings['domain']
+
+            # Check confidence to determine if web enhancement is needed
+            confidence_data = self.confidence_metrics.get_metrics(apply_sharpening=self.memory_manager.sharpening_enabled)
+
+            # Try to enhance with web knowledge if confidence is low
+            web_enhancement = None
+            if hasattr(self, 'enable_web_knowledge') and self.enable_web_knowledge and hasattr(self, 'web_enhancer'):
+                web_enhancement = self.enhance_with_web_knowledge(current_query, confidence_data, domain)
+
 
             # Ensure recent memories are included by forcing a higher k value for recent queries
             recency_boost = True
@@ -287,9 +317,22 @@ class TinyLlamaChat:
                             # Append to memories with high priority
                             memories = instruction + procedure_section + "\n\n" + memories
 
-            if memories:
-                enhanced_system_content += "\n\nIMPORTANT: You MUST apply the following information in all your responses:"
+            # Add web search results if available
+            web_context = ""
+            if web_enhancement and web_enhancement.get('enhanced', False):
+                web_context = self.web_enhancer.format_web_results_for_context(web_enhancement)
+
+            # Combine local memory and web knowledge
+            if memories and web_context:
+                enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
+                enhanced_system_content += f"\n{memories}\n"
+                enhanced_system_content += f"\n{web_context}"
+            elif memories:
+                enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
                 enhanced_system_content += f"\n{memories}"
+            elif web_context:
+                enhanced_system_content += "\n\nIMPORTANT: Use the following web search results in your response:\n"
+                enhanced_system_content += f"\n{web_context}"
 
         # Create messages with enhanced system prompt
         enhanced_messages = [
@@ -304,6 +347,64 @@ class TinyLlamaChat:
         enhanced_messages.extend(history_messages[-5:])  # Keep up to 5 recent messages
 
         return enhanced_messages
+
+    def enhance_with_web_knowledge(self, query: str, confidence_data: Dict[str, float], domain: Optional[str] = None) -> Dict[str, any]:
+        """
+        Enhance response generation with web knowledge when confidence is low.
+
+        Args:
+            query: User query
+            confidence_data: Confidence metrics from the model
+            domain: Optional domain classification
+
+        Returns:
+            Web enhancement data
+        """
+        if not self.enable_web_knowledge or self.web_enhancer is None:
+            return {
+                'enhanced': False,
+                'reason': 'web_knowledge_disabled',
+                'web_results': []
+            }
+
+        # Use the web enhancer to get relevant information
+        enhancement_data = self.web_enhancer.enhance_response(
+            query,
+            confidence_data,
+            domain,
+            process_urls=False  # Set to True to fetch full content (slower but more thorough)
+        )
+
+        # Add to memory if enhancement was successful
+        if enhancement_data.get('enhanced', False):
+            self.web_enhancer.add_web_results_to_memory(
+                self.current_user_id,
+                query,
+                enhancement_data,
+                min_similarity=0.5  # Minimum similarity threshold for memory storage
+            )
+
+        return enhancement_data
+
+    def toggle_web_knowledge(self) -> bool:
+        """
+        Toggle web knowledge enhancement on/off.
+
+        Returns:
+            New web_knowledge state
+        """
+        self.enable_web_knowledge = not self.enable_web_knowledge
+
+        # Initialize web enhancer if needed
+        if self.enable_web_knowledge and self.web_enhancer is None:
+            self.web_enhancer = WebKnowledgeEnhancer(
+                memory_manager=self.memory_manager,
+                confidence_threshold=self.confidence_metrics.get_metrics()['confidence'],
+                vector_sharpening_factor=self.memory_manager.sharpening_factor,
+                search_engine="duckduckgo"
+            )
+
+        return self.enable_web_knowledge
 
     def get_domain_specific_generation_config(self, query, base_config):
         """
@@ -2889,7 +2990,12 @@ def main():
                       help="Enable vector space and confidence sharpening")
     parser.add_argument("--sharpening-factor", type=float, default=0.3,
                       help="Sharpening factor for vector embeddings (0.0-1.0)")
-
+    parser.add_argument("--web-knowledge", action="store_true", default=True,
+                    help="Enable web search for knowledge enhancement")
+    parser.add_argument("--search-engine", type=str, default="duckduckgo", choices=["duckduckgo", "google"],
+                        help="Search engine to use for web knowledge")
+    parser.add_argument("--web-confidence", type=float, default=0.65,
+                        help="Confidence threshold below which to trigger web search")
 
     args = parser.parse_args()
 
@@ -2908,9 +3014,18 @@ def main():
         auto_memorize=not args.no_memory,
         enable_sharpening=args.enable_sharpening,
         sharpening_factor=args.sharpening_factor,
+        enable_web_knowledge=args.web_knowledge
     )
 
     try:
+
+        # If web knowledge is enabled, configure the search engine
+        if args.web_knowledge and chat.web_enhancer:
+            chat.web_enhancer.search_engine = args.search_engine
+            chat.web_enhancer.confidence_threshold = args.web_confidence
+            print(f"Web knowledge enhancement enabled using {args.search_engine}")
+
+
         response_filter = ResponseFilter(
             confidence_threshold=args.confidence_threshold,
             user_context=user_context,
@@ -2957,6 +3072,9 @@ def main():
         print("  !memorize - Force save the entire conversation to memory")
         print("  !toggle-memory - Toggle automatic memorization on/off")
         print("  !memory-stats - Display info about memories")
+        print("  !toggle-web - Toggle web knowledge enhancement on/off")
+        print("  !web-stats - Show web search statistics")
+        print("  !search-engine: [engine] - Set search engine (duckduckgo/google)")
         print("\n")
         print("\nIf the model expresses uncertainty, you can ask it to speculate")
         print("by saying 'please continue anyway' or 'please speculate'")
@@ -3074,6 +3192,36 @@ def main():
                 print(f"Total memories: {stats['total_documents']}")
                 print(f"Auto-memorize: {'Enabled' if stats['auto_memorize'] else 'Disabled'}")
                 print(f"Last consolidation: {stats['last_consolidation']}")
+                continue
+
+            elif user_input.lower() == '!toggle-web':
+                is_enabled = chat.toggle_web_knowledge()
+                print(f"Web knowledge enhancement {'enabled' if is_enabled else 'disabled'}")
+                continue
+
+            elif user_input.lower() == '!web-stats':
+                if hasattr(chat, 'web_enhancer') and chat.web_enhancer:
+                    stats = chat.web_enhancer.get_stats()
+                    print("\nWeb Knowledge Statistics:")
+                    print(f"Total searches: {stats['total_searches']}")
+                    print(f"Successful searches: {stats['successful_searches']}")
+                    print(f"Success rate: {stats['success_rate']*100:.1f}%")
+                    print(f"Cache hits: {stats['cache_hits']}")
+                    print(f"Cache hit rate: {stats['cache_hit_rate']*100:.1f}%")
+                else:
+                    print("Web knowledge enhancement is not enabled")
+                continue
+
+            elif user_input.lower().startswith('!search-engine:'):
+                if hasattr(chat, 'web_enhancer') and chat.web_enhancer:
+                    engine = user_input.split(':')[1].strip().lower()
+                    if engine in ["duckduckgo", "google"]:
+                        chat.web_enhancer.search_engine = engine
+                        print(f"Search engine set to: {engine}")
+                    else:
+                        print(f"Unsupported search engine: {engine}. Please use 'duckduckgo' or 'google'")
+                else:
+                    print("Web knowledge enhancement is not enabled")
                 continue
 
             # Add user message to conversation

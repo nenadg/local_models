@@ -1,0 +1,201 @@
+"""
+Example usage of the web knowledge enhancement and integration tests.
+"""
+
+#
+# Example 1: Basic usage with low confidence query
+#
+
+def example_low_confidence_query():
+    """Example of using web knowledge enhancement with a low confidence query."""
+    
+    # Create a chat instance with web knowledge enabled
+    chat = TinyLlamaChat(
+        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        enable_web_knowledge=True
+    )
+    
+    # Initialize confidence metrics with low confidence
+    chat.confidence_metrics.reset()
+    
+    # Create sample low confidence metrics
+    for i in range(5):
+        # Create dummy logits tensor with low confidence values
+        dummy_logits = torch.zeros(chat.tokenizer.vocab_size)
+        dummy_logits[i % 100] = 2.0  # Lower logit value
+        chat.confidence_metrics.add_token_score(dummy_logits, i % 100)
+    
+    # Get confidence metrics
+    confidence_data = chat.confidence_metrics.get_metrics()
+    
+    # Example factual query where the model might have low confidence
+    query = "What are the latest developments in quantum computing in 2024?"
+    
+    # Enhance with web knowledge
+    enhancement = chat.enhance_with_web_knowledge(query, confidence_data, domain="factual")
+    
+    # Check if enhancement succeeded
+    if enhancement.get('enhanced', False):
+        print(f"Enhanced with {len(enhancement.get('web_results', []))} web results")
+        
+        # Format web results for context
+        web_context = chat.web_enhancer.format_web_results_for_context(enhancement)
+        print("\nWEB SEARCH CONTEXT:")
+        print(web_context)
+    else:
+        print(f"Not enhanced: {enhancement.get('reason', 'unknown')}")
+
+
+#
+# Example 2: Integration with the full response generation flow
+#
+
+def simulate_response_generation():
+    """Simulate the full response generation flow with web knowledge enhancement."""
+    
+    # Create a chat instance
+    chat = TinyLlamaChat(
+        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        enable_web_knowledge=True
+    )
+    
+    # Sample conversation
+    conversation = [
+        {"role": "system", "content": "You are a helpful assistant with access to web search."},
+        {"role": "user", "content": "What were the major technology announcements at CES 2024?"}
+    ]
+    
+    # Extract the query
+    query = conversation[-1]["content"]
+    
+    # Reset confidence metrics
+    chat.confidence_metrics.reset()
+    
+    # Simulate low confidence in the model's knowledge about this topic
+    for i in range(10):
+        # Create dummy logits tensor with low confidence values
+        dummy_logits = torch.zeros(chat.tokenizer.vocab_size)
+        dummy_logits[i % 100] = 3.0  # Lower values = lower confidence
+        chat.confidence_metrics.add_token_score(dummy_logits, i % 100)
+    
+    # Get confidence metrics
+    confidence_data = chat.confidence_metrics.get_metrics()
+    print(f"Simulated confidence: {confidence_data['confidence']:.2f}")
+    
+    # Detect domain with question classifier
+    domain, domain_confidence = chat.question_classifier.classify(query)
+    print(f"Detected domain: {domain} (confidence: {domain_confidence:.2f})")
+    
+    # Check if web knowledge should be used
+    should_enhance = chat.web_enhancer.should_enhance_with_web_knowledge(
+        query, confidence_data, domain
+    )
+    print(f"Should enhance with web knowledge: {should_enhance}")
+    
+    if should_enhance:
+        # Enhance with web knowledge
+        enhancement = chat.enhance_with_web_knowledge(query, confidence_data, domain)
+        
+        if enhancement.get('enhanced', False):
+            # Add to the context
+            web_context = chat.web_enhancer.format_web_results_for_context(enhancement)
+            
+            # Create prompt with web knowledge
+            enhanced_messages = chat.create_prompt_with_knowledge(conversation)
+            
+            print("\nENHANCED PROMPT:")
+            print("-" * 40)
+            # Print just the first 500 characters to avoid cluttering output
+            print(enhanced_messages[0]["content"][:500] + "...")
+            print("-" * 40)
+            
+            # Now would call generate_response if this were real
+            print("\nAt this point, the system would generate a response using the enhanced prompt")
+            
+            # Add to memory
+            chat.web_enhancer.add_web_results_to_memory(
+                chat.current_user_id,
+                query,
+                enhancement
+            )
+    else:
+        print("Web knowledge enhancement not triggered (confidence sufficient)")
+
+
+#
+# Example 3: Comparing query and result vectors
+#
+
+def test_vector_comparison():
+    """Test the vector comparison functionality."""
+    
+    # Create a chat instance
+    chat = TinyLlamaChat(
+        model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        enable_web_knowledge=True
+    )
+    
+    # Sample query
+    query = "What are the effects of climate change on coral reefs?"
+    
+    # Sample search results
+    search_results = [
+        {
+            "title": "Impact of Climate Change on Coral Reef Ecosystems",
+            "snippet": "Rising ocean temperatures and acidification from climate change are causing widespread coral bleaching and mortality.",
+            "url": "https://example.com/coral-impact"
+        },
+        {
+            "title": "Best Coral Reefs to Visit in 2024",
+            "snippet": "Top vacation destinations for coral reef snorkeling and diving this year.",
+            "url": "https://example.com/travel"
+        },
+        {
+            "title": "Climate Change Effects on Marine Biodiversity",
+            "snippet": "Research shows coral reefs may decline by 70-90% with 1.5°C warming, threatening thousands of marine species.",
+            "url": "https://example.com/biodiversity"
+        }
+    ]
+    
+    # Generate query vector
+    query_vector = chat.web_enhancer.generate_embedding(query)
+    
+    # Generate result vectors
+    result_vectors = []
+    for result in search_results:
+        # Generate embedding for title + snippet
+        text = f"{result['title']} {result['snippet']}"
+        embedding = chat.web_enhancer.generate_embedding(text)
+        result_vectors.append((embedding, result))
+    
+    # Compare vectors
+    scored_results = chat.web_enhancer.compare_vectors(query_vector, result_vectors)
+    
+    print("\nQUERY VECTOR COMPARISON RESULTS:")
+    print("-" * 40)
+    for i, result in enumerate(scored_results):
+        print(f"{i+1}. [{result['similarity']:.3f}] {result['title']}")
+        print(f"   {result['snippet']}")
+        print()
+
+
+#
+# Integration test function
+#
+
+def run_integration_tests():
+    """Run all integration tests."""
+    print("\n=== TESTING LOW CONFIDENCE QUERY ENHANCEMENT ===")
+    example_low_confidence_query()
+    
+    print("\n=== TESTING RESPONSE GENERATION FLOW ===")
+    simulate_response_generation()
+    
+    print("\n=== TESTING VECTOR COMPARISON ===")
+    test_vector_comparison()
+    
+    print("\nAll integration tests complete!")
+
+
+if __name__ == "__main__":
+    run_integration_tests()
