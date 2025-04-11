@@ -604,7 +604,7 @@ class TinyLlamaChat:
             except Exception as specific_e:
                 print(f"Error ending streamer: {specific_e}")
 
-    def generate_response(self, messages, max_new_tokens=128, temperature=0.7, stream=True, turbo_mode=True, show_confidence=False, response_filter=None):
+    def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
 
         self.stop_event.clear()  # Reset the event
@@ -2873,8 +2873,6 @@ def main():
                       help="Temperature for response generation (lower = more deterministic)")
     parser.add_argument("--max-tokens", type=int, default=128,
                       help="Maximum number of tokens to generate in response")
-    parser.add_argument("--no-stream", action="store_true",
-                      help="Disable streaming output (word by word generation)")
     parser.add_argument("--turbo", action="store_true", default=True,
                       help="Enable turbo mode for ultra-fast generation")
     parser.add_argument("--output-dir", type=str, default="./output",
@@ -2935,8 +2933,7 @@ def main():
             _ = chat.generate_response(
                 [{"role": "user", "content": "Say some nice greeting."}],
                 max_new_tokens=16,
-                temperature=0.7,
-                stream=False
+                temperature=0.7
             )
 
         # Start conversation loop
@@ -2952,7 +2949,6 @@ def main():
         print("  !mcp-help - Show MCP commands for directing output to files")
         print("  !confidence: [0.0-1.0] - Set confidence threshold")
         print("  !sharpening-factor: [0.0-1.0] - Set the sharpening factor for vector embeddings")
-        print("  !toggle-stream - Toggle streaming output on/off")
         print("  !toggle-turbo - Toggle turbo mode on/off")
         print("  !toggle-filter - Toggle uncertainty filtering on/off")
         print("  !toggle-heatmap - Toggle confidence heatmap visualization on/off")
@@ -2968,7 +2964,6 @@ def main():
         print("="*50 + "\n")
 
         # Set initial mode settings
-        streaming_enabled = not args.no_stream
         turbo_mode = args.turbo
         show_confidence = args.heatmap
 
@@ -3024,11 +3019,6 @@ def main():
                 }
                 conversation[0] = chat.system_message
                 print(f"System message updated: {new_system}")
-                continue
-
-            elif user_input.lower() == '!toggle-stream':
-                streaming_enabled = not streaming_enabled
-                print(f"Streaming output {'enabled' if streaming_enabled else 'disabled'}")
                 continue
 
             elif user_input.lower() == '!toggle-turbo':
@@ -3106,7 +3096,6 @@ def main():
                     conversation,
                     temperature=args.temperature,
                     max_new_tokens=args.max_tokens,
-                    stream=streaming_enabled,
                     turbo_mode=turbo_mode,
                     show_confidence=show_confidence,
                     response_filter=response_filter if filter_enabled else None  # Pass the filter only if enabled
