@@ -975,6 +975,8 @@ class TinyLlamaChat:
         except Exception as e:
             print(f"Error saving conversation: {e}")
 
+        return len(conversation)
+
     def quality_score(self, confidence, perplexity=None, entropy=None, max_perplexity=10, max_entropy=3, w1=0.4, w2=0.4, w3=0.2):
          # If all metrics are available
         if perplexity is not None and entropy is not None:
@@ -2990,9 +2992,7 @@ def main():
                     else:
                         print("Sorry the response wasn't helpful.")
 
-                print("Consolidating memories before exit...")
                 store = chat.memory_manager._get_user_store(chat.current_user_id)
-                store.consolidate_memories()
 
                 # Show final stats
                 stats = store.get_stats()
