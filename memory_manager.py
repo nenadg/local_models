@@ -25,7 +25,9 @@ class VectorStore:
                  storage_path: str = "./memory/vector_store", 
                  embedding_function: Optional[Callable] = None,
                  embedding_dim: int = 384,
-                 auto_save: bool = True):
+                 auto_save: bool = True,
+                 fractal_enabled: bool = True,
+                 max_fractal_levels: int = 3):
         """
         Initialize the vector store.
         
@@ -34,6 +36,12 @@ class VectorStore:
             embedding_function: Function to generate embeddings from text
             embedding_dim: Dimension of the embedding vectors
             auto_save: Whether to automatically save changes
+
+        Enhanced vector store with fractal capabilities
+
+        Args:
+            fractal_enabled: Enable multi-resolution embedding
+            max_fractal_levels: Maximum number of fractal decomposition levels
         """
         self.storage_path = storage_path
         self.index_path = f"{storage_path}.index"
@@ -41,6 +49,9 @@ class VectorStore:
         self.embedding_function = embedding_function
         self.embedding_dim = embedding_dim
         self.auto_save = auto_save
+        self.fractal_enabled = fractal_enabled
+        self.max_fractal_levels = max_fractal_levels
+        self.fractal_indices = {}  # Indices for different fractal levels
         
         # Thread lock for concurrent access
         self._lock = threading.RLock()
@@ -112,6 +123,22 @@ class VectorStore:
             
             # Normalize embedding for cosine similarity
             normalized_embedding = embedding / np.linalg.norm(embedding)
+
+            if self.fractal_enabled:
+                # Generate multi-level fractal embeddings
+                fractal_embeddings = self._generate_fractal_embeddings(embedding)
+
+                # Add embeddings to different level indices
+                for level, level_embedding in fractal_embeddings.items():
+                    # Ensure index exists for this level
+                    if level not in self.fractal_indices:
+                        self.fractal_indices[level] = faiss.IndexFlatIP(self.embedding_dim)
+
+                    # Add to level-specific index
+                    self.fractal_indices[level].add(np.array([level_embedding], dtype=np.float32))
+
+            # Continue with existing add method
+            return super().add(text, embedding, metadata)
             
             try:
                 # Add to FAISS index
@@ -135,6 +162,27 @@ class VectorStore:
                 print(f"Error adding document to vector store: {e}")
                 return False
     
+    def _generate_fractal_embeddings(self, embedding: np.ndarray) -> Dict[int, np.ndarray]:
+        """
+        Generate multi-resolution fractal embeddings
+
+        Actual implementation would involve sophisticated decomposition techniques
+        """
+        fractal_embeddings = {0: embedding}  # Base level
+
+        current_embedding = embedding.copy()
+        for level in range(1, self.max_fractal_levels + 1):
+            # Simple recursive decomposition
+            # Real implementation would be much more complex
+            noise = np.random.normal(0, 0.1, current_embedding.shape)
+            new_embedding = current_embedding + noise
+            new_embedding = new_embedding / np.linalg.norm(new_embedding)
+
+            fractal_embeddings[level] = new_embedding
+            current_embedding = new_embedding
+
+        return fractal_embeddings
+
     def _trim_cache(self):
         """Trim the embeddings cache if it grows too large"""
         if len(self._embeddings_cache) > self._max_cache_size:
@@ -180,7 +228,60 @@ class VectorStore:
             
             return True
     
-    def search(self, 
+    def search(self,
+               query_embedding: np.ndarray,
+               top_k: int = 10,
+               min_similarity: float = 0.25,
+               apply_sharpening: bool = False,
+               sharpening_factor: float = 0.3,
+               fractal_level: Optional[int] = None,
+               multi_level_search: bool = True) -> List[Dict[str, Any]]:
+        """
+        Enhanced search with fractal capabilities
+        """
+        if not self.fractal_enabled or not multi_level_search:
+            # Fall back to standard search
+            return super().search_default(query_embedding, top_k, min_similarity)
+
+        # If no specific level provided, search across multiple levels
+        results = []
+        searched_levels = []
+
+        # Determine levels to search
+        if fractal_level is not None:
+            search_levels = [fractal_level]
+        else:
+            search_levels = list(range(min(self.max_fractal_levels + 1, len(self.fractal_indices))))
+
+        for level in search_levels:
+            if level not in self.fractal_indices:
+                continue
+
+            # Generate level-specific query embedding
+            level_query = self._generate_level_query_embedding(query_embedding, level)
+
+            # Perform search at this level
+            level_results = self._search_at_level(level_query, level, top_k, min_similarity)
+
+            # Merge and deduplicate results
+            results.extend(level_results)
+            searched_levels.append(level)
+
+        # Sort and deduplicate results
+        unique_results = {}
+        for result in results:
+            key = result['text']
+            if key not in unique_results or result['similarity'] > unique_results[key]['similarity']:
+                unique_results[key] = result
+
+        # Sort by similarity and return top results
+        return sorted(
+            unique_results.values(),
+            key=lambda x: x['similarity'],
+            reverse=True
+        )[:top_k]
+
+    def search_default(self,
                query_embedding: np.ndarray, 
                top_k: int = 10, 
                min_similarity: float = 0.25,
