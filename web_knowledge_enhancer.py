@@ -483,7 +483,7 @@ class WebKnowledgeEnhancer:
         
         # Extract seo_friendly_query from query
         seo_friendly_query = self.create_seo_friendly_sentence(query)
-
+        seo_friendly_query = self._strip_preambles_strictly(seo_friendly_query)
 
         # Generate embedding for original query
         query_vector = self.generate_embedding(seo_friendly_query)
@@ -740,71 +740,120 @@ class WebKnowledgeEnhancer:
             'cache_hit_rate': self.cache_hits / max(1, self.total_searches)
         }
 
-    def create_seo_friendly_sentence(self, query: str, max_words: int = 10) -> List[str]:
+    def create_seo_friendly_sentence(self, query: str, max_words: int = 10) -> str:
         """
-        Extract keywords from a query using the local LLM to identify key search terms.
+        Create an SEO-friendly search query based on the original query.
 
         Args:
             query: The user query
-            max_keywords: Maximum number of keywords to extract
+            max_words: Maximum number of words for the SEO query
 
         Returns:
-            List of extracted keywords
+            SEO-friendly query string
         """
         # If we don't have access to the main chat instance, fall back to simpler method
         if not hasattr(self, 'chat') or self.chat is None:
-            return self._fallback_extract_keywords(query, max_words)
+            return query  # Just return the original query as fallback
 
-        # Prepare a specialized prompt to extract keywords
-        seo_friendly_sentence = [
-            {"role": "system", "content": f"You are a professional SEO expert. Provide me a sentence not longer that {max_words} words, emphasized with most important search terms from the query without 'SEO-Friendy query' preamble, or anything of a such, just plain sentence."},
-            {"role": "user", "content": f"Create a SEO friendly query no longer that {max_words} words, emphasizeing with most important terms from search term: '{query}'"}
+        # Prepare a specialized prompt with examples of desired output format
+        seo_friendly_prompt = [
+            {"role": "system", "content":
+             """You are a search term generator.
+
+             IMPORTANT: Respond ONLY with the search term itself. No explanations, labels, or formatting.
+
+             Examples:
+             User: what is quantum computing?
+             Assistant: quantum computing
+
+             User: who was the 16th president of the United States?
+             Assistant: Abraham Lincoln 16th president United States
+
+             User: what are the side effects of ibuprofen?
+             Assistant: ibuprofen side effects
+
+             Remember: Output ONLY the search term. Nothing else."""
+            },
+            {"role": "user", "content": f"Generate a search term for: {query}"}
         ]
 
         try:
-            # Call the model to extract keywords (with web search disabled)
+            # Call the model to create SEO-friendly query (with web search disabled)
             seo_friendly_response = self.chat.generate_response(
-                seo_friendly_sentence,
+                seo_friendly_prompt,
                 max_new_tokens=20,  # Short response
-                temperature=0.2,    # Low temperature for consistent results
+                temperature=0.1,    # Lower temperature for more deterministic output
                 turbo_mode=True,    # Use speedy mode
                 show_confidence=False,
                 response_filter=None,
                 use_web_search=False  # Important: disable web search to avoid recursion
             )
 
+            # Clean up and validate the response
+            seo_friendly_response = seo_friendly_response.strip()
+
+            # If the response is still too verbose or contains the problematic preamble
+            if len(seo_friendly_response.split()) > max_words * 2 or ":" in seo_friendly_response:
+                # Try to extract just the relevant part
+                if ":" in seo_friendly_response:
+                    seo_friendly_response = seo_friendly_response.split(":", 1)[1].strip()
+
+                # Truncate to max_words
+                words = seo_friendly_response.split()
+                seo_friendly_response = " ".join(words[:max_words])
+
+            # Remove any quotation marks
+            seo_friendly_response = seo_friendly_response.replace('"', '').replace("'", "")
 
             if seo_friendly_response:
                 print(f"\n[Web] Model SEO friendly query: {seo_friendly_response}")
                 return seo_friendly_response
             else:
-                # Fall back if no keywords were returned
-                return self._fallback_extract_keywords(query, max_words)
+                return query  # Fall back to original query
 
         except Exception as e:
-            print(f"[Web] Error using model for seo friendly query: {e}")
-            return self._fallback_extract_keywords(query, max_words)
+            print(f"[Web] Error creating SEO-friendly query: {e}")
+            return query  # Return original query as fallback
 
-    def _fallback_extract_keywords(self, query: str, max_keywords: int = 2) -> List[str]:
+    def _strip_preambles_strictly(self, text: str) -> str:
         """
-        Fallback method for keyword extraction when model extraction fails.
+        Aggressively strip any preambles or formatting from the model's output.
+
+        Args:
+            text: Text to clean
+
+        Returns:
+            Cleaned text with preambles removed
         """
-        # Clean the query
-        clean_query = re.sub(r'[^\w\s]', ' ', query.lower())
+        # Strip common prefixes
+        prefixes = [
+            "SEO-Friendly Query:", "SEO Friendly Query:", "SEO Query:",
+            "Search Term:", "Query:", "Keywords:", "Search Keywords:",
+            "Generated Search Term:"
+        ]
 
-        # Split into tokens
-        tokens = clean_query.split()
+        # Check for each prefix and remove it
+        for prefix in prefixes:
+            if prefix.lower() in text.lower():
+                parts = text.lower().split(prefix.lower(), 1)
+                if len(parts) > 1:
+                    text = parts[1].strip()
 
-        # Filter out common stop words
-        stop_words = {'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been',
-                     'and', 'or', 'but', 'if', 'then', 'else', 'when', 'up', 'down',
-                     'in', 'on', 'at', 'to', 'for', 'with', 'by', 'about', 'of',
-                     'what', 'who', 'where', 'when', 'why', 'how', 'which', 'do', 'does'}
+        # Remove section headers that might appear
+        lines = text.split('\n')
+        filtered_lines = []
+        for line in lines:
+            if not line.endswith(':') and not line.startswith('#'):
+                filtered_lines.append(line)
 
-        filtered_tokens = [token for token in tokens if token not in stop_words and len(token) > 2]
+        text = ' '.join(filtered_lines)
 
-        # If no tokens found, use the longest word from the query
-        if not filtered_tokens and tokens:
-            filtered_tokens = [max(tokens, key=len)]
+        # Remove quotation marks
+        text = text.replace('"', '').replace("'", "")
 
-        return filtered_tokens[:max_keywords]
+        # Remove any remaining non-query content
+        keywords_marker = "keywords:"
+        if keywords_marker in text.lower():
+            text = text.lower().split(keywords_marker)[0].strip()
+
+        return text.strip()

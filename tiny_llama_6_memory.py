@@ -430,12 +430,12 @@ class TinyLlamaChat:
         if domain == 'arithmetic':
             # More deterministic for math
             config['temperature'] = min(config.get('temperature', 0.7), 0.3)
-            config['top_p'] = 0.85
+            # config['top_p'] = 0.85 # use only if use_sample=False
 
         elif domain == 'translation':
             # More deterministic for translations too
             config['temperature'] = min(config.get('temperature', 0.7), 0.4)
-            config['top_p'] = 0.9
+            # config['top_p'] = 0.9 # use only if use_sample=False
 
         elif domain == 'factual':
             # Slightly more deterministic for facts
@@ -473,7 +473,7 @@ class TinyLlamaChat:
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     max_new_tokens=num_draft_tokens,
-                    do_sample=False,  # Use greedy decoding for draft
+                    do_sample=True,  # set to False for greedy decoding for draft
                     use_cache=True,
                     return_dict_in_generate=True,
                     output_scores=True,
@@ -674,6 +674,7 @@ class TinyLlamaChat:
                         attention_mask=torch.ones_like(input_ids),
                         streamer=streamer,
                         max_new_tokens=remaining_tokens,
+                        do_sample=True,
                         **streaming_config
                     )
 
@@ -787,7 +788,7 @@ class TinyLlamaChat:
                 "do_sample": temperature > 0.1,
                 "temperature": temperature if temperature > 0.1 else 1.0,
                 "top_k": 50,
-                "top_p": 0.95,
+                # "top_p": 0.95, # use only if do_sample=False
                 "repetition_penalty": 1.0,
                 "num_beams": 1,
                 "pad_token_id": self.tokenizer.eos_token_id,
