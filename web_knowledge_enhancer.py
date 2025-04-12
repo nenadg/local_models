@@ -457,10 +457,11 @@ class WebKnowledgeEnhancer:
         return scored_results
     
     def enhance_response(self, 
-                        query: str, 
+                        query: str,
                         confidence_data: Dict[str, float],
                         domain: Optional[str] = None,
-                        process_urls: bool = False) -> Dict[str, Any]:
+                        process_urls: bool = False,
+                        messages: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
         Enhance model response with web knowledge.
         
@@ -482,7 +483,7 @@ class WebKnowledgeEnhancer:
             }
         
         # Extract seo_friendly_query from query
-        seo_friendly_query = self.create_seo_friendly_sentence(query)
+        seo_friendly_query = self.create_seo_friendly_sentence(query, messages)
         seo_friendly_query = self._strip_preambles_strictly(seo_friendly_query)
 
         # Generate embedding for original query
@@ -740,80 +741,212 @@ class WebKnowledgeEnhancer:
             'cache_hit_rate': self.cache_hits / max(1, self.total_searches)
         }
 
-    def create_seo_friendly_sentence(self, query: str, max_words: int = 10) -> str:
+    def create_seo_friendly_sentence(self, query: str, messages=None, max_words: int = 5) -> str:
         """
-        Create an SEO-friendly search query based on the original query.
-
-        Args:
-            query: The user query
-            max_words: Maximum number of words for the SEO query
-
-        Returns:
-            SEO-friendly query string
+        Create an SEO-friendly search query based on the original query and conversation context.
         """
-        # If we don't have access to the main chat instance, fall back to simpler method
+        # If no chat instance available, fall back to simple extraction
         if not hasattr(self, 'chat') or self.chat is None:
-            return query  # Just return the original query as fallback
+            return self._extract_key_terms(query)
 
-        # Prepare a specialized prompt with examples of desired output format
-        seo_friendly_prompt = [
-            {"role": "system", "content":
-             """You are a search term generator.
+        # Prepare reference examples with CLEAR before/after transformation
+        examples = [
+            {"query": "what is quantum computing?", "search_term": "quantum computing explained"},
+            {"query": "who is barack obama?", "search_term": "barack obama biography"},
+            {"query": "what are the side effects of ibuprofen?", "search_term": "ibuprofen side effects risks"},
+            {"query": "why is the sky blue?", "search_term": "sky blue rayleigh scattering"},
+            {"query": "how to make chocolate chip cookies?", "search_term": "chocolate chip cookies recipe"}
+        ]
 
-             IMPORTANT: Respond ONLY with the search term itself. No explanations, labels, or formatting.
+        # Extract relevant context from conversation history
+        context = self._extract_conversation_context(messages)
 
-             Examples:
-             User: what is quantum computing?
-             Assistant: quantum computing
+        # Format examples for the prompt
+        examples_text = "\n".join([
+            f"User query: \"{ex['query']}\"\nSearch term: {ex['search_term']}"
+            for ex in examples
+        ])
 
-             User: who was the 16th president of the United States?
-             Assistant: Abraham Lincoln 16th president United States
+        # Build a more directive prompt
+        system_content = f"""You are a search query optimizer. Your ONLY job is to convert verbose questions into concise search terms.
 
-             User: what are the side effects of ibuprofen?
-             Assistant: ibuprofen side effects
+    RULES:
+    1. Output ONLY 3-5 words maximum
+    2. NEVER repeat the question format - extract key terms only
+    3. Include specific entities and technical terms
+    4. If this is a follow-up question, use context from previous exchanges
+    5. NEVER include phrases like "Search term:" or any other labels
+    6. DO NOT use quotation marks unless they're part of a proper name
 
-             Remember: Output ONLY the search term. Nothing else."""
-            },
-            {"role": "user", "content": f"Generate a search term for: {query}"}
+    EXAMPLES:
+    {examples_text}
+
+    IMPORTANT: The user will provide a question. Your entire response must be ONLY the search term (3-5 words). Nothing else."""
+
+        # Create prompt with conversation context
+        context_text = f"\nPrevious conversation context:\n{context}" if context else ""
+        seo_prompt = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": f"Create a search term for: {query}{context_text}"}
         ]
 
         try:
-            # Call the model to create SEO-friendly query (with web search disabled)
+            # Call the model without temperature
             seo_friendly_response = self.chat.generate_response(
-                seo_friendly_prompt,
-                max_new_tokens=20,  # Short response
-                temperature=0.1,    # Lower temperature for more deterministic output
-                turbo_mode=True,    # Use speedy mode
+                seo_prompt,
+                max_new_tokens=20,
+                turbo_mode=True,
                 show_confidence=False,
                 response_filter=None,
-                use_web_search=False  # Important: disable web search to avoid recursion
+                use_web_search=False
             )
 
-            # Clean up and validate the response
-            seo_friendly_response = seo_friendly_response.strip()
+            # Aggressively clean the response
+            cleaned_response = self._clean_search_term(seo_friendly_response, query)
 
-            # If the response is still too verbose or contains the problematic preamble
-            if len(seo_friendly_response.split()) > max_words * 2 or ":" in seo_friendly_response:
-                # Try to extract just the relevant part
-                if ":" in seo_friendly_response:
-                    seo_friendly_response = seo_friendly_response.split(":", 1)[1].strip()
+            # Force limit to max_words
+            words = cleaned_response.split()
+            if len(words) > max_words:
+                cleaned_response = " ".join(words[:max_words])
 
-                # Truncate to max_words
-                words = seo_friendly_response.split()
-                seo_friendly_response = " ".join(words[:max_words])
+            # Ensure we have at least one meaningful term
+            if not cleaned_response or cleaned_response.isspace():
+                cleaned_response = self._extract_key_terms(query)
 
-            # Remove any quotation marks
-            seo_friendly_response = seo_friendly_response.replace('"', '').replace("'", "")
-
-            if seo_friendly_response:
-                print(f"\n[Web] Model SEO friendly query: {seo_friendly_response}")
-                return seo_friendly_response
-            else:
-                return query  # Fall back to original query
+            print(f"\n[Web] Model SEO friendly query: {cleaned_response}")
+            return cleaned_response
 
         except Exception as e:
             print(f"[Web] Error creating SEO-friendly query: {e}")
-            return query  # Return original query as fallback
+            return self._extract_key_terms(query)
+
+    def _clean_search_term(self, response: str, original_query: str) -> str:
+        """Aggressively clean a search term response."""
+        # Remove any text before a colon
+        if ":" in response:
+            response = response.split(":", 1)[1].strip()
+
+        # Remove quotes
+        response = response.replace('"', '').replace("'", "")
+
+        # Remove common prefixes and labels
+        prefixes = ["search term", "search query", "query", "keywords", "search for",
+                    "i would search for", "search", "term", "look for"]
+
+        response_lower = response.lower()
+        for prefix in prefixes:
+            if response_lower.startswith(prefix):
+                response = response[len(prefix):].strip()
+                # Remove any leading punctuation
+                response = response.lstrip(',:;.- ')
+
+        # If it's just repeating the original query, extract key terms
+        if response.lower() == original_query.lower():
+            return self._extract_key_terms(original_query)
+
+        return response.strip()
+
+    def _extract_conversation_context(self, messages: List[Dict]) -> str:
+        """Extract focused context from conversation history."""
+        if not messages or len(messages) <= 2:
+            return ""
+
+        # Take only the last 2-3 exchanges for relevance
+        relevant_messages = messages[-5:] if len(messages) > 5 else messages[1:]
+
+        # Extract subjects and entities
+        context = []
+        entities = set()
+
+        for msg in relevant_messages:
+            content = msg.get("content", "").strip()
+            if not content:
+                continue
+
+            # Extract potential entities (capitalized words)
+            words = content.split()
+            for word in words:
+                clean_word = word.strip(",.?!():;'\"-")
+                if clean_word and clean_word[0].isupper() and len(clean_word) > 2:
+                    entities.add(clean_word)
+
+            # Add truncated content
+            if len(content) > 100:
+                # Just take first sentence or truncate
+                first_sentence = content.split('.')[0]
+                context.append(first_sentence[:100])
+            else:
+                context.append(content)
+
+        # Format the context
+        formatted_context = "\n".join(context[-2:])  # Just latest exchanges
+
+        # Add extracted entities if they exist
+        if entities:
+            entity_text = ", ".join(list(entities)[:5])  # Limit to 5 most recent
+            formatted_context += f"\nEntities mentioned: {entity_text}"
+
+        return formatted_context
+
+    def _extract_key_terms(self, query: str, max_terms: int = 5) -> str:
+        """
+        Extract key terms from a query using simple NLP techniques.
+        This serves as a fallback when model-based extraction fails.
+
+        Args:
+            query: The user query
+            max_terms: Maximum number of terms to extract
+
+        Returns:
+            String of key terms for search
+        """
+        # Clean the query
+        clean_query = re.sub(r'[^\w\s]', ' ', query.lower())
+
+        # Split into tokens
+        tokens = clean_query.split()
+
+        # Filter out common stop words
+        stop_words = {
+            'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been',
+            'and', 'or', 'but', 'if', 'then', 'else', 'when', 'up', 'down',
+            'in', 'on', 'at', 'to', 'for', 'with', 'by', 'about', 'of',
+            'what', 'who', 'where', 'when', 'why', 'how', 'which', 'do', 'does',
+            'can', 'could', 'would', 'should', 'will', 'shall', 'may', 'might',
+            'me', 'my', 'mine', 'your', 'yours', 'their', 'them', 'i', 'we', 'us',
+            'show', 'tell', 'explain', 'describe', 'say', 'know'
+        }
+
+        # Calculate a simple weight for each token
+        term_weights = {}
+        for token in tokens:
+            if token in stop_words or len(token) <= 2:
+                continue
+
+            # Terms appearing at the start get higher weight (often the subject)
+            position_factor = 1.0 - (tokens.index(token) / len(tokens) / 2)  # 1.0 to 0.5
+
+            # Longer words often more important
+            length_factor = min(1.0, len(token) / 10)  # Up to 1.0 for words of length 10+
+
+            # Combined weight
+            weight = position_factor * (1.0 + length_factor)
+
+            term_weights[token] = weight
+
+        # If no terms found, return original query
+        if not term_weights:
+            return query
+
+        # Sort by weight and take top terms
+        sorted_terms = sorted(term_weights.items(), key=lambda x: x[1], reverse=True)
+        top_terms = [term for term, _ in sorted_terms[:max_terms]]
+
+        # Ensure we don't return an empty string
+        if not top_terms:
+            return query
+
+        return " ".join(top_terms)
 
     def _strip_preambles_strictly(self, text: str) -> str:
         """
