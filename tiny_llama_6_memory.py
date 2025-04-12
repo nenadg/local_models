@@ -61,7 +61,19 @@ It’s like being a superhero: you use your superpower of speaking wisely and li
 }
 
 class TinyLlamaChat:
-    def __init__(self, model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0", device=None, memory_dir="./memory", output_dir="./output", confidence_threshold=0.7, auto_memorize=True, enable_sharpening=True, sharpening_factor=0.3, enable_web_knowledge=True):
+    def __init__(self,
+             model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+             device=None,
+             memory_dir="./memory",
+             output_dir="./output",
+             confidence_threshold=0.7,
+             auto_memorize=True,
+             enable_sharpening=True,
+             sharpening_factor=0.3,
+             enable_web_knowledge=True,
+             fractal_enabled=True,
+             max_fractal_levels=3
+             ):
         self.model_name = model_name
         self.memory_dir = memory_dir
         self.interrupt_handler = KeyboardInterruptHandler()
@@ -78,7 +90,9 @@ class TinyLlamaChat:
             device=device,
             auto_memorize=auto_memorize,
             sharpening_enabled=enable_sharpening,
-            sharpening_factor=sharpening_factor
+            sharpening_factor=sharpening_factor,
+            fractal_enabled=fractal_enabled,  # Enable fractal embeddings
+            max_fractal_levels=max_fractal_levels   # Number of fractal levels
         )
 
         # Initialize the question classifier
@@ -3056,7 +3070,9 @@ def main():
         auto_memorize=not args.no_memory,
         enable_sharpening=args.enable_sharpening,
         sharpening_factor=args.sharpening_factor,
-        enable_web_knowledge=args.web_knowledge
+        enable_web_knowledge=args.web_knowledge,
+        fractal_enabled=True,
+        max_fractal_levels=3
     )
 
     try:
