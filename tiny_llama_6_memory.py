@@ -12,7 +12,8 @@ import termios
 import tty
 
 import argparse
-from typing import List, Dict, Optional, Tuple
+
+from typing import List, Dict, Any, Optional, Tuple
 
 from datetime import datetime
 from threading import Thread
@@ -94,6 +95,7 @@ class TinyLlamaChat:
         if enable_web_knowledge:
             self.web_enhancer = WebKnowledgeEnhancer(
                 memory_manager=self.memory_manager,
+                chat=self,
                 confidence_threshold=confidence_threshold,
                 vector_sharpening_factor=sharpening_factor,
                 search_engine="duckduckgo"  # Use DuckDuckGo by default for fewer rate limits
@@ -248,7 +250,7 @@ class TinyLlamaChat:
         # Save updated knowledge
         self.save_knowledge()
 
-    def create_prompt_with_knowledge(self, messages):
+    def create_prompt_with_knowledge(self, messages, use_web_search=True):
         """Create a prompt that incorporates relevant knowledge with domain-aware weighting"""
         # Extract the user's current query
         current_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
@@ -274,7 +276,7 @@ class TinyLlamaChat:
 
             # Try to enhance with web knowledge if confidence is low
             web_enhancement = None
-            if hasattr(self, 'enable_web_knowledge') and self.enable_web_knowledge and hasattr(self, 'web_enhancer'):
+            if use_web_search and hasattr(self, 'enable_web_knowledge') and self.enable_web_knowledge and hasattr(self, 'web_enhancer'):
                 web_enhancement = self.enhance_with_web_knowledge(current_query, confidence_data, domain)
 
 
@@ -348,7 +350,7 @@ class TinyLlamaChat:
 
         return enhanced_messages
 
-    def enhance_with_web_knowledge(self, query: str, confidence_data: Dict[str, float], domain: Optional[str] = None) -> Dict[str, any]:
+    def enhance_with_web_knowledge(self, query: str, confidence_data: Dict[str, float], domain: Optional[str] = None) -> Dict[str, Any]:
         """
         Enhance response generation with web knowledge when confidence is low.
 
@@ -705,7 +707,7 @@ class TinyLlamaChat:
             except Exception as specific_e:
                 print(f"Error ending streamer: {specific_e}")
 
-    def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None):
+    def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None, use_web_search=True):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
 
         self.stop_event.clear()  # Reset the event
@@ -753,7 +755,7 @@ class TinyLlamaChat:
                     print(f"[User content saved to: {files_info}]")
 
         # Create enhanced prompt with knowledge
-        enhanced_messages = self.create_prompt_with_knowledge(messages)
+        enhanced_messages = self.create_prompt_with_knowledge(messages, use_web_search)
 
         # Apply chat template
         prompt = self.tokenizer.apply_chat_template(
@@ -3048,7 +3050,8 @@ def main():
             _ = chat.generate_response(
                 [{"role": "user", "content": "Say some nice greeting."}],
                 max_new_tokens=16,
-                temperature=0.7
+                temperature=0.7,
+                use_web_search=False
             )
 
         # Start conversation loop

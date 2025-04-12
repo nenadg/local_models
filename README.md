@@ -41,13 +41,19 @@ source local_models_venv/bin/activate
 ### 3. Install dependencies
 
 ```bash
-pip install torch transformers faiss-cpu numpy scikit-learn accelerate peft datasets
+pip install torch transformers faiss-cpu numpy scikit-learn accelerate peft datasets spacy textpipeliner
 ```
 
 If you have CUDA, install the GPU version of FAISS for better performance:
 
 ```bash
 pip install faiss-gpu
+```
+
+For language (url search query building):
+
+```bash
+python -m spacy download en_core_web_sm
 ```
 
 ## Usage

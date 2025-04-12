@@ -22,6 +22,7 @@ class WebKnowledgeEnhancer:
     def __init__(
         self, 
         memory_manager=None,
+        chat=None,
         confidence_threshold: float = 0.65,
         vector_sharpening_factor: float = 0.3, 
         max_results: int = 8,
@@ -42,6 +43,7 @@ class WebKnowledgeEnhancer:
             user_agents: List of user agents to rotate through for requests
         """
         self.memory_manager = memory_manager
+        self.chat = chat
         self.confidence_threshold = confidence_threshold
         self.vector_sharpening_factor = vector_sharpening_factor
         self.max_results = max_results
@@ -479,11 +481,25 @@ class WebKnowledgeEnhancer:
                 'web_results': []
             }
         
-        # Generate embedding for query
-        query_vector = self.generate_embedding(query)
-        
-        # Search the web
-        search_results = self.search_web(query)
+        # Extract seo_friendly_query from query
+        seo_friendly_query = self.create_seo_friendly_sentence(query)
+
+
+        # Generate embedding for original query
+        query_vector = self.generate_embedding(seo_friendly_query)
+
+        # Generate embedding for seo_friendly_query
+        keyword_vector = self.generate_embedding(seo_friendly_query)
+
+        # Search the web using seo_friendly_query
+        search_results = self.search_web(seo_friendly_query)
+
+        if not search_results:
+            return {
+                'enhanced': False,
+                'reason': 'no_search_results',
+                'web_results': []
+            }
         
         if not search_results:
             return {
@@ -516,13 +532,8 @@ class WebKnowledgeEnhancer:
         result_vectors = []
         
         for result in search_results:
-            # Determine text to embed based on available content
-            if process_urls and 'content' in result:
-                # Use title + full content if available
-                text_to_embed = f"{result['title']} {result['content']}"
-            else:
-                # Use title + snippet
-                text_to_embed = f"{result['title']} {result['snippet']}"
+            # Determine text to embed
+            text_to_embed = f"{result['title']} {result['snippet']}"
             
             # Generate embedding
             embedding = self.generate_embedding(text_to_embed)
@@ -531,13 +542,17 @@ class WebKnowledgeEnhancer:
             result_vectors.append((embedding, result))
         
         # Compare vectors
-        scored_results = self.compare_vectors(query_vector, result_vectors)
+        scored_results = self.compare_vectors_with_dual_verification(
+            query_vector,
+            keyword_vector,
+            result_vectors,
+            query_weight=0.7,
+            keyword_weight=0.3,
+            min_threshold=0.4
+        )
         
         # Filter results by minimum similarity
-        filtered_results = [
-            result for result in scored_results 
-            if result['similarity'] >= 0.3  # Minimum similarity threshold
-        ]
+        filtered_results = scored_results[:self.max_results]
         
         return {
             'enhanced': True,
@@ -547,6 +562,73 @@ class WebKnowledgeEnhancer:
             'all_results_count': len(search_results),
             'filtered_count': len(filtered_results)
         }
+
+    def compare_vectors_with_dual_verification(
+        self,
+        query_vector: np.ndarray,
+        keyword_vector: np.ndarray,
+        result_vectors: List[Tuple[np.ndarray, Dict]],
+        query_weight: float = 0.7,
+        keyword_weight: float = 0.3,
+        min_threshold: float = 0.3
+    ) -> List[Dict]:
+        """
+        Compare result vectors against both query and keywords vectors.
+
+        Args:
+            query_vector: Vector representation of the original query
+            keyword_vector: Vector representation of the keywords
+            result_vectors: List of (vector, metadata) tuples
+            query_weight: Weight for query similarity (0-1)
+            keyword_weight: Weight for keyword similarity (0-1)
+            min_threshold: Minimum similarity threshold
+
+        Returns:
+            List of results with combined similarity scores
+        """
+        scored_results = []
+
+        # Normalize vectors
+        query_vector_norm = query_vector / np.linalg.norm(query_vector)
+        keyword_vector_norm = keyword_vector / np.linalg.norm(keyword_vector)
+
+        for vec, metadata in result_vectors:
+            # Normalize result vector
+            vec_norm = vec / np.linalg.norm(vec)
+
+            # Calculate similarities
+            query_similarity = np.dot(query_vector_norm, vec_norm)
+            keyword_similarity = np.dot(keyword_vector_norm, vec_norm)
+
+            # Calculate weighted combined similarity
+            combined_similarity = (query_weight * query_similarity) + (keyword_weight * keyword_similarity)
+
+            # Apply sharpening if enabled
+            if self.vector_sharpening_factor > 0:
+                # Enhanced similarity with sharpening
+                if combined_similarity > 0.7:
+                    # Boost high similarities
+                    combined_similarity = combined_similarity + (combined_similarity - 0.7) * self.vector_sharpening_factor
+                elif combined_similarity < 0.3:
+                    # Penalize low similarities
+                    combined_similarity = combined_similarity - (0.3 - combined_similarity) * self.vector_sharpening_factor
+
+                # Ensure valid range
+                combined_similarity = max(0.0, min(1.0, combined_similarity))
+
+            # Only include results above minimum threshold
+            if combined_similarity >= min_threshold:
+                # Add to results with similarity score
+                result = metadata.copy()
+                result['similarity'] = float(combined_similarity)
+                result['query_similarity'] = float(query_similarity)
+                result['keyword_similarity'] = float(keyword_similarity)
+                scored_results.append(result)
+
+        # Sort by similarity score
+        scored_results.sort(key=lambda x: x['similarity'], reverse=True)
+
+        return scored_results
     
     def format_web_results_for_context(self, enhancement_data: Dict[str, Any], max_results: int = 5) -> str:
         """
@@ -657,3 +739,72 @@ class WebKnowledgeEnhancer:
             'success_rate': self.successful_searches / max(1, self.total_searches),
             'cache_hit_rate': self.cache_hits / max(1, self.total_searches)
         }
+
+    def create_seo_friendly_sentence(self, query: str, max_words: int = 10) -> List[str]:
+        """
+        Extract keywords from a query using the local LLM to identify key search terms.
+
+        Args:
+            query: The user query
+            max_keywords: Maximum number of keywords to extract
+
+        Returns:
+            List of extracted keywords
+        """
+        # If we don't have access to the main chat instance, fall back to simpler method
+        if not hasattr(self, 'chat') or self.chat is None:
+            return self._fallback_extract_keywords(query, max_words)
+
+        # Prepare a specialized prompt to extract keywords
+        seo_friendly_sentence = [
+            {"role": "system", "content": f"You are a professional SEO expert. Provide me a sentence not longer that {max_words} words, emphasized with most important search terms from the query without 'SEO-Friendy query' preamble, or anything of a such, just plain sentence."},
+            {"role": "user", "content": f"Create a SEO friendly query no longer that {max_words} words, emphasizeing with most important terms from search term: '{query}'"}
+        ]
+
+        try:
+            # Call the model to extract keywords (with web search disabled)
+            seo_friendly_response = self.chat.generate_response(
+                seo_friendly_sentence,
+                max_new_tokens=20,  # Short response
+                temperature=0.2,    # Low temperature for consistent results
+                turbo_mode=True,    # Use speedy mode
+                show_confidence=False,
+                response_filter=None,
+                use_web_search=False  # Important: disable web search to avoid recursion
+            )
+
+
+            if seo_friendly_response:
+                print(f"\n[Web] Model SEO friendly query: {seo_friendly_response}")
+                return seo_friendly_response
+            else:
+                # Fall back if no keywords were returned
+                return self._fallback_extract_keywords(query, max_words)
+
+        except Exception as e:
+            print(f"[Web] Error using model for seo friendly query: {e}")
+            return self._fallback_extract_keywords(query, max_words)
+
+    def _fallback_extract_keywords(self, query: str, max_keywords: int = 2) -> List[str]:
+        """
+        Fallback method for keyword extraction when model extraction fails.
+        """
+        # Clean the query
+        clean_query = re.sub(r'[^\w\s]', ' ', query.lower())
+
+        # Split into tokens
+        tokens = clean_query.split()
+
+        # Filter out common stop words
+        stop_words = {'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been',
+                     'and', 'or', 'but', 'if', 'then', 'else', 'when', 'up', 'down',
+                     'in', 'on', 'at', 'to', 'for', 'with', 'by', 'about', 'of',
+                     'what', 'who', 'where', 'when', 'why', 'how', 'which', 'do', 'does'}
+
+        filtered_tokens = [token for token in tokens if token not in stop_words and len(token) > 2]
+
+        # If no tokens found, use the longest word from the query
+        if not filtered_tokens and tokens:
+            filtered_tokens = [max(tokens, key=len)]
+
+        return filtered_tokens[:max_keywords]
