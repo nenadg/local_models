@@ -3052,6 +3052,8 @@ def main():
                         help="Search engine to use for web knowledge")
     parser.add_argument("--web-confidence", type=float, default=0.65,
                         help="Confidence threshold below which to trigger web search")
+    parser.add_argument("--test-fractal", action="store_true", default=False,
+                    help="Run fractal embedding diagnostics")
 
     args = parser.parse_args()
 
@@ -3083,6 +3085,19 @@ def main():
             chat.web_enhancer.confidence_threshold = args.web_confidence
             print(f"Web knowledge enhancement enabled using {args.search_engine}")
 
+        if args.test_fractal:
+            # Initialize memory manager with fractal enabled
+            memory_manager = MemoryManager(
+                memory_dir="./memory",
+                fractal_enabled=True
+            )
+
+            # Get a user store
+            store = memory_manager._get_user_store("diagnostic_user")
+
+            # Run and print diagnostics
+            store.print_fractal_embedding_diagnostics()
+            return  # Exit after diagnostics
 
         response_filter = ResponseFilter(
             confidence_threshold=args.confidence_threshold,
@@ -3168,7 +3183,7 @@ def main():
 
                 # Show final stats
                 stats = store.get_stats()
-                print(f"Total memories saved this session: {stats['total_documents']}")
+                print(f"Total memories saved this session: {stats['active_documents']}")
                 break
 
             elif user_input.lower().startswith('!teach:'):
@@ -3419,5 +3434,5 @@ def main():
         chat.cleanup()
 
 if __name__ == "__main__":
-
     main()
+

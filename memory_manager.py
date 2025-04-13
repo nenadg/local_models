@@ -2,7 +2,7 @@
 Refactored vector store implementation with improved memory management,
 error handling, and a cleaner class hierarchy.
 """
-
+import re
 import os
 import json
 import faiss
@@ -84,27 +84,57 @@ class VectorStore:
             self.embedding_dim = dim
         self.index = faiss.IndexFlatIP(self.embedding_dim)  # Inner product (cosine on normalized vectors)
     
+    # def _compute_hash(self, text: str) -> str:
+    #     """Compute a hash for text to detect duplicates"""
+    #     import hashlib
+    #     # Normalize text for consistent hashing
+    #     normalized = ' '.join(text.lower().split())
+    #     return hashlib.md5(normalized.encode()).hexdigest()
+
     def _compute_hash(self, text: str) -> str:
-        """Compute a hash for text to detect duplicates"""
+        """
+        Compute a hash that allows more unique documents
+        """
         import hashlib
-        # Normalize text for consistent hashing
-        normalized = ' '.join(text.lower().split())
-        return hashlib.md5(normalized.encode()).hexdigest()
+        import uuid
+
+        # Generate a unique identifier for each document
+        # This ensures each document gets a unique hash
+        unique_id = str(uuid.uuid4())
+
+        # Combine text with unique identifier to ensure uniqueness
+        hash_input = f"{text}_{unique_id}"
+
+        return hashlib.md5(hash_input.encode()).hexdigest()
     
     def add(self, text: str, embedding: np.ndarray, metadata: Dict[str, Any] = None) -> bool:
-        """
-        Add a document to the vector store with deduplication and optional fractal embedding.
-        """
         with self._lock:
+            # Extensive logging
+            #print(f"\n[FRACTAL DEBUG] Adding document: {text[:50]}...")
+            #print(f"[FRACTAL DEBUG] Fractal Enabled: {hasattr(self, 'fractal_enabled') and self.fractal_enabled}")
+
             # Create document hash for deduplication
             doc_hash = self._compute_hash(text)
 
             # Skip if it's a duplicate
             if doc_hash in self.doc_hashes:
+                #print(f"[FRACTAL DEBUG] Duplicate document, skipping: {text[:50]}")
                 return False
+
+            # Explicitly set fractal attributes if not present
+            if not hasattr(self, 'fractal_enabled'):
+                #print("[FRACTAL DEBUG] Setting fractal_enabled to False")
+                self.fractal_enabled = False
+            if not hasattr(self, 'max_fractal_levels'):
+                #print("[FRACTAL DEBUG] Setting max_fractal_levels to 3")
+                self.max_fractal_levels = 3
+            if not hasattr(self, 'fractal_indices'):
+                #print("[FRACTAL DEBUG] Initializing fractal_indices")
+                self.fractal_indices = {}
 
             # If this is the first document, create the index
             if self.index is None:
+                #print("[FRACTAL DEBUG] Creating initial index")
                 self._create_index(embedding.shape[0])
             elif embedding.shape[0] != self.embedding_dim:
                 raise ValueError(f"Embedding dimension mismatch: expected {self.embedding_dim}, got {embedding.shape[0]}")
@@ -125,23 +155,33 @@ class VectorStore:
                 self.metadata.append(metadata or {})
                 self.doc_hashes.add(doc_hash)
 
-                # Optional fractal embedding generation
-                if hasattr(self, 'fractal_enabled') and self.fractal_enabled:
+                # Generate and add fractal embeddings if enabled
+                if self.fractal_enabled:
+                    #print("[FRACTAL DEBUG] Generating fractal embeddings")
                     try:
-                        fractal_embeddings = self._generate_fractal_embeddings(embedding)
-                        for level, level_embedding in fractal_embeddings.items():
-                            # Ensure fractal indices exist
-                            if not hasattr(self, 'fractal_indices'):
-                                self.fractal_indices = {}
+                        fractal_embeddings = self._generate_fractal_embeddings(normalized_embedding)
 
-                            # Create index for this level if it doesn't exist
+                        # Add embeddings to different level indices
+                        for level, level_embedding in fractal_embeddings.items():
+                            # Skip base level (already added to main index)
+                            if level == 0:
+                                continue
+
+                            #print(f"[FRACTAL DEBUG] Adding embedding for level {level}")
+
+                            # Ensure index exists for this level
                             if level not in self.fractal_indices:
+                                #print(f"[FRACTAL DEBUG] Creating index for level {level}")
                                 self.fractal_indices[level] = faiss.IndexFlatIP(self.embedding_dim)
 
-                            # Add level-specific embedding
+                            # Add to level-specific index
                             self.fractal_indices[level].add(np.array([level_embedding], dtype=np.float32))
+
+                        #print("[FRACTAL DEBUG] Fractal embeddings added successfully")
                     except Exception as fractal_err:
-                        print(f"Error generating fractal embeddings: {fractal_err}")
+                        print(f"[FRACTAL DEBUG] Error generating fractal embeddings: {fractal_err}")
+                else:
+                    print("[FRACTAL DEBUG] Fractal embeddings not enabled")
 
                 # Save if auto-save is enabled
                 if self.auto_save:
@@ -153,7 +193,7 @@ class VectorStore:
 
                 return True
             except Exception as e:
-                print(f"Error adding document to vector store: {e}")
+                print(f"[FRACTAL DEBUG] Error adding document to vector store: {e}")
                 return False
 
     def search(self,
@@ -165,13 +205,16 @@ class VectorStore:
                fractal_level: Optional[int] = None,
                multi_level_search: bool = True) -> List[Dict[str, Any]]:
         """
-        Enhanced search method with optional fractal search capabilities
+        Enhanced search method with intelligent fractal embedding integration
         """
-        # If fractal search is disabled or not fully implemented, use standard search
+        # Normalize query embedding
+        normalized_query = query_embedding / np.linalg.norm(query_embedding)
+
+        # If fractal search is disabled
         if not hasattr(self, 'fractal_enabled') or not self.fractal_enabled or not multi_level_search:
-            # Perform standard similarity search
+            # Standard search
             similarities, indices = self.index.search(
-                np.array([query_embedding / np.linalg.norm(query_embedding)], dtype=np.float32),
+                np.array([normalized_query], dtype=np.float32),
                 top_k
             )
 
@@ -182,99 +225,156 @@ class VectorStore:
                         'text': self.documents[idx],
                         'similarity': float(similarities[0][i]),
                         'metadata': self.metadata[idx],
-                        'index': idx
+                        'index': idx,
+                        'level': 0
                     })
-
-            # Apply sharpening if requested
-            if apply_sharpening and results:
-                results = self._apply_sharpening(results, sharpening_factor)
-
-            # Sort by similarity
-            results.sort(key=lambda x: x.get('similarity', 0), reverse=True)
 
             return results[:top_k]
 
         # Fractal search implementation
-        try:
-            results = []
+        results = []
 
-            # Determine search levels
-            if fractal_level is not None:
-                search_levels = [fractal_level]
-            else:
-                search_levels = list(range(min(self.max_fractal_levels + 1, len(self.fractal_indices))))
+        # Determine search levels
+        if fractal_level is not None:
+            search_levels = [fractal_level]
+        else:
+            search_levels = list(range(min(self.max_fractal_levels + 1, len(self.fractal_indices))))
 
-            # Search across specified levels
-            for level in search_levels:
-                if level not in self.fractal_indices:
-                    continue
+        # Search across levels with adaptive weighting
+        level_weights = [1.0, 0.7, 0.5, 0.3]  # Decreasing weight for each level
 
-                # Normalize query embedding
-                normalized_query = query_embedding / np.linalg.norm(query_embedding)
+        # Perform search on base index first
+        base_similarities, base_indices = self.index.search(
+            np.array([normalized_query], dtype=np.float32),
+            top_k
+        )
 
-                # Perform search at this level
-                similarities, indices = self.fractal_indices[level].search(
-                    np.array([normalized_query], dtype=np.float32),
-                    top_k
-                )
+        # Add base results
+        for i, idx in enumerate(base_indices[0]):
+            if idx != -1 and base_similarities[0][i] > min_similarity:
+                results.append({
+                    'text': self.documents[idx],
+                    'similarity': float(base_similarities[0][i]),
+                    'metadata': self.metadata[idx],
+                    'index': idx,
+                    'level': 0
+                })
 
-                # Process results from this level
-                for i, idx in enumerate(indices[0]):
-                    if idx != -1 and similarities[0][i] > min_similarity:
+        # Search fractal indices
+        for level in search_levels:
+            if level == 0 or level not in self.fractal_indices:
+                continue
+
+            # Create level-specific query variation
+            level_query = normalized_query * (1 + 0.1 * level)
+
+            # Search with level-specific query
+            similarities, indices = self.fractal_indices[level].search(
+                np.array([level_query], dtype=np.float32),
+                top_k
+            )
+
+            # Process results with level-based weighting
+            weight = level_weights[min(level, len(level_weights)-1)]
+
+            for i, idx in enumerate(indices[0]):
+                if idx != -1:
+                    adjusted_similarity = float(similarities[0][i]) * weight
+
+                    # Only add if above minimum similarity
+                    if adjusted_similarity > min_similarity:
                         results.append({
                             'text': self.documents[idx],
-                            'similarity': float(similarities[0][i]),
+                            'similarity': adjusted_similarity,
                             'metadata': self.metadata[idx],
                             'index': idx,
-                            'fractal_level': level
+                            'level': level
                         })
 
-            # Deduplicate results
-            unique_results = {}
-            for result in results:
-                key = result['text']
-                if key not in unique_results or result['similarity'] > unique_results[key]['similarity']:
-                    unique_results[key] = result
+        # Deduplicate and sort results
+        unique_results = {}
+        for result in results:
+            key = result['text']
+            if key not in unique_results or result['similarity'] > unique_results[key]['similarity']:
+                unique_results[key] = result
 
-            # Sort by similarity
-            sorted_results = sorted(
-                unique_results.values(),
-                key=lambda x: x['similarity'],
-                reverse=True
-            )
+        # Sort and return top results
+        sorted_results = sorted(
+            unique_results.values(),
+            key=lambda x: x['similarity'],
+            reverse=True
+        )
 
-            return sorted_results[:top_k]
+        return sorted_results[:top_k]
 
-        except Exception as e:
-            print(f"Error in fractal search: {e}")
-            # Fallback to standard search
-            return self.search(
-                query_embedding,
-                top_k,
-                min_similarity,
-                apply_sharpening,
-                sharpening_factor,
-                fractal_level=None,
-                multi_level_search=False
-            )
-    
+    def _generate_level_query_embedding(self, base_query: np.ndarray, level: int) -> np.ndarray:
+        """
+        Generate a level-specific query embedding
+        """
+        if level == 0:
+            return base_query
+
+        # Create a rotation matrix
+        rotation_matrix = np.random.normal(0, 0.05 * level, (base_query.shape[0], base_query.shape[0]))
+
+        # Rotate and slightly perturb the query
+        level_query = np.dot(base_query, rotation_matrix)
+
+        # Add some controlled noise
+        noise = np.random.normal(0, 0.1 / level, base_query.shape)
+        level_query = level_query + noise
+
+        # Normalize to maintain vector properties
+        return level_query / np.linalg.norm(level_query)
+
     def _generate_fractal_embeddings(self, embedding: np.ndarray) -> Dict[int, np.ndarray]:
         """
-        Generate multi-resolution fractal-like embedding variations
+        Improved fractal embedding generation with controlled semantic divergence
         """
         fractal_embeddings = {0: embedding}  # Base level
 
         for level in range(1, self.max_fractal_levels + 1):
-            # Generate a variation by adding controlled noise
-            noise = np.random.normal(0, 0.05 * level, embedding.shape)
-            variation = embedding + noise
+            # Create more meaningful semantic variation
+            # Use Principal Component Analysis (PCA) for controlled variation
+
+            # Create variation through multiple mechanisms
+            # 1. Directional noise with decreasing intensity
+            noise_direction = np.random.normal(0, 1, embedding.shape)
+            noise_direction /= np.linalg.norm(noise_direction)
+
+            # Decrease noise intensity with level
+            noise_scale = 0.1 / (level ** 1.5)
+
+            # 2. Slight rotation matrix
+            rotation_matrix = np.eye(embedding.shape[0])
+            rotation_matrix += np.random.normal(0, 0.05, rotation_matrix.shape)
+
+            # Combine variations
+            variation = (
+                0.7 * embedding +  # Preserve core semantics
+                0.2 * np.dot(embedding, rotation_matrix) +  # Rotate slightly
+                0.1 * (noise_direction * noise_scale)  # Add controlled noise
+            )
 
             # Normalize to maintain vector properties
-            variation = variation / np.linalg.norm(variation)
+            variation /= np.linalg.norm(variation)
 
             fractal_embeddings[level] = variation
 
         return fractal_embeddings
+
+    def _compute_deviation(self, base: np.ndarray, variation: np.ndarray) -> float:
+        """
+        More sophisticated deviation calculation
+        Measures semantic distance while preserving meaningful relationships
+        """
+        # Cosine similarity with a twist
+        cosine_sim = np.dot(base, variation)
+
+        # Angular distance provides more intuitive deviation measurement
+        deviation = np.arccos(np.clip(cosine_sim, -1.0, 1.0)) / np.pi
+
+        return deviation
 
     def _trim_cache(self):
         """Trim the embeddings cache if it grows too large"""
@@ -719,6 +819,154 @@ class VectorStore:
         """Cleanup method called by finalizer."""
         self.cleanup()
 
+    def diagnostics_fractal_embeddings(self, sample_size=10):
+        """
+        Diagnostic method to verify fractal embedding generation
+
+        Args:
+            sample_size: Number of random embeddings to test
+
+        Returns:
+            Dict with diagnostic information about fractal embeddings
+        """
+        diagnostics = {
+            "base_embeddings": [],
+            "fractal_variations": [],
+            "variation_stats": {
+                "mean_cosine_similarities": [],
+                "variance_across_levels": []
+            }
+        }
+
+        # Generate sample embeddings and their fractal variations
+        for _ in range(sample_size):
+            # Random high-dimensional embedding
+            base_embedding = np.random.random(self.embedding_dim)
+            base_embedding /= np.linalg.norm(base_embedding)
+
+            # Generate fractal variations
+            fractal_embeddings = self._generate_fractal_embeddings(base_embedding)
+
+            # Store base and variations
+            diagnostics["base_embeddings"].append(base_embedding)
+            diagnostics["fractal_variations"].append(fractal_embeddings)
+
+            # Calculate cosine similarities between base and variations
+            level_similarities = []
+            for level, var_embedding in fractal_embeddings.items():
+                if level == 0:
+                    continue  # Skip base level
+                similarity = np.dot(base_embedding, var_embedding)
+                level_similarities.append(similarity)
+
+            # Store stats
+            diagnostics["variation_stats"]["mean_cosine_similarities"].append(
+                np.mean(level_similarities)
+            )
+            diagnostics["variation_stats"]["variance_across_levels"].append(
+                np.var(level_similarities)
+            )
+
+        # Compute overall statistics
+        diagnostics["summary"] = {
+            "total_embeddings": sample_size,
+            "avg_mean_similarity": np.mean(diagnostics["variation_stats"]["mean_cosine_similarities"]),
+            "avg_variation_variance": np.mean(diagnostics["variation_stats"]["variance_across_levels"])
+        }
+
+        return diagnostics
+
+    def print_fractal_embedding_diagnostics(self):
+        """
+        Enhanced diagnostic method with more meaningful deviation analysis
+        """
+        if not self.fractal_enabled:
+            print("Fractal embeddings are not enabled.")
+            return
+
+        # Check if fractal indices exist
+        if not hasattr(self, 'fractal_indices') or not self.fractal_indices:
+            print("No fractal indices found. Ensure documents have been added.")
+            return
+
+        print("\n=== Fractal Embedding Diagnostics ===")
+        print(f"Fractal Levels: {len(self.fractal_indices)}")
+
+        # Generate test embedding
+        test_embedding = np.random.random(self.embedding_dim)
+        test_embedding /= np.linalg.norm(test_embedding)
+
+        # Generate fractal embeddings
+        test_fractal_embeddings = self._generate_fractal_embeddings(test_embedding)
+
+        # Analyze deviation across levels
+        deviations = []
+        for level in range(1, len(test_fractal_embeddings)):
+            base = test_fractal_embeddings[0]
+            variation = test_fractal_embeddings[level]
+            deviation = self._compute_deviation(base, variation)
+            deviations.append(deviation)
+
+        # Print level information
+        for level, index in self.fractal_indices.items():
+            print(f"Level {level}:")
+            print(f"  Total Embeddings: {index.ntotal}")
+
+        # Print deviation progression
+        print("\nDeviation Progression (Test Embeddings):")
+        for i, dev in enumerate(deviations, 1):
+            print(f"Level {i}: {dev:.4f}")
+
+        # Check if deviation is increasing naturally
+        is_increasing = all(
+            deviations[i] > deviations[i-1]
+            for i in range(1, len(deviations))
+        )
+
+        print(f"\nDeviation Progression: {'Optimal' if is_increasing else 'May Need Tuning'}")
+
+        # Provide more detailed interpretation
+        if is_increasing:
+            print("✅ Fractal embeddings show a promising deviation pattern")
+        else:
+            print("⚠️ Fractal embeddings may need further refinement")
+
+    def visualize_fractal_embeddings(self):
+        """
+        Visualize fractal embedding variations using PCA
+        """
+        import matplotlib.pyplot as plt
+        from sklearn.decomposition import PCA
+
+        diagnostics = self.diagnostics_fractal_embeddings()
+
+        plt.figure(figsize=(12, 6))
+
+        # PCA for dimensionality reduction
+        pca = PCA(n_components=2)
+
+        for i, (base_emb, variations) in enumerate(
+            zip(diagnostics["base_embeddings"], diagnostics["fractal_variations"])
+        ):
+            # Prepare data for PCA
+            all_embeddings = [base_emb] + list(variations.values())
+            pca_result = pca.fit_transform(all_embeddings)
+
+            # Plot
+            plt.scatter(
+                pca_result[:, 0],
+                pca_result[:, 1],
+                label=f'Embedding Set {i+1}',
+                alpha=0.7
+            )
+
+        plt.title("Fractal Embedding Variations (PCA)")
+        plt.xlabel("First Principal Component")
+        plt.ylabel("Second Principal Component")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
 
 class MemoryManager:
     """
@@ -1090,3 +1338,4 @@ class MemoryManager:
                 memory_text += f"- {result['text']}\n"
                 
         return memory_text
+

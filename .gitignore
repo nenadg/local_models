@@ -177,3 +177,4 @@ memory/
 output/
 local_models_venv/
 flat_learn/
+memory_test/
