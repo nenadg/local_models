@@ -139,6 +139,11 @@ class WebKnowledgeEnhancer:
             
         # Check cache first
         cache_key = f"{self.search_engine}:{query}:{num_results}"
+
+        if hasattr(self, '_last_search_query') and self._last_search_query == query:
+            print(f"[Web] WARNING: Reusing same query as previous request: '{query}'")
+        self._last_search_query = query
+
         if cache_key in self.search_cache:
             timestamp, results = self.search_cache[cache_key]
             if time.time() - timestamp < self.cache_ttl:
@@ -493,6 +498,7 @@ class WebKnowledgeEnhancer:
         keyword_vector = self.generate_embedding(seo_friendly_query)
 
         # Search the web using seo_friendly_query
+        self._last_search_query = seo_friendly_query
         search_results = self.search_web(seo_friendly_query)
 
         if not search_results:
@@ -851,6 +857,10 @@ class WebKnowledgeEnhancer:
         if not messages or len(messages) <= 2:
             return ""
 
+        # Check if current query contains math expression
+        current_query = messages[-1].get("content", "").strip() if messages[-1].get("role") == "user" else ""
+        contains_math = bool(re.search(r'\d+\s*[\+\-\*\/]\s*\d+', current_query))
+
         # Take only the last 2-3 exchanges for relevance
         relevant_messages = messages[-5:] if len(messages) > 5 else messages[1:]
 
@@ -863,6 +873,10 @@ class WebKnowledgeEnhancer:
             if not content:
                 continue
 
+            # Skip previous mathematical expressions if current query contains math
+            if contains_math and re.search(r'\d+\s*[\+\-\*\/]\s*\d+', content) and content != current_query:
+                continue
+
             # Extract potential entities (capitalized words)
             words = content.split()
             for word in words:
@@ -872,11 +886,20 @@ class WebKnowledgeEnhancer:
 
             # Add truncated content
             if len(content) > 100:
-                # Just take first sentence or truncate
                 first_sentence = content.split('.')[0]
                 context.append(first_sentence[:100])
             else:
                 context.append(content)
+
+        # Format the context
+        formatted_context = "\n".join(context[-2:])  # Just latest exchanges
+
+        # Add extracted entities if they exist
+        if entities:
+            entity_text = ", ".join(list(entities)[:5])  # Limit to 5 most recent
+            formatted_context += f"\nEntities mentioned: {entity_text}"
+
+        return formatted_context
 
         # Format the context
         formatted_context = "\n".join(context[-2:])  # Just latest exchanges
