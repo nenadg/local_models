@@ -747,38 +747,111 @@ class WebKnowledgeEnhancer:
             'cache_hit_rate': self.cache_hits / max(1, self.total_searches)
         }
 
-    def create_seo_friendly_sentence(self, query: str, messages=None, max_words: int = 10) -> str:
+    def create_seo_friendly_sentence(self, query: str, messages=None, max_words: int = 8) -> str:
         """
-        Create an SEO-friendly search query based on the original query with improved fallback mechanisms.
+        Create an SEO-friendly search query with comprehensive fallbacks and entity extraction.
 
         Args:
             query: The user query
             messages: Optional conversation history
-            max_words: Maximum words in the search query
+            max_words: Maximum words in the search query (increased from 5 to 8)
 
         Returns:
             SEO-friendly search query
         """
-        # First try to extract from fractal memory if available
+        # Extract entities (titles, proper nouns) first - these are highest priority
+        entities = self._extract_entities(query)
+
+        # Log entities found for debugging
+        if entities:
+            print(f"[Web] Extracted entities: {entities}")
+
+        # Try multiple methods and build a composite query
+
+        # First try to extract from fractal memory for similar past queries
         fractal_query = self._extract_from_fractal_memory(query)
-        if fractal_query and len(fractal_query.split()) <= max_words:
+        if fractal_query:
             print(f"[Web] Using fractal memory query: {fractal_query}")
+
+            # Make sure entity is included
+            if entities and not any(entity.lower() in fractal_query.lower() for entity in entities):
+                enhanced_query = f"{fractal_query} {' '.join(entities)}"
+                enhanced_query = ' '.join(enhanced_query.split()[:max_words])
+                return enhanced_query
+
             return fractal_query
 
-        # Fallback to pattern-based extraction with hardcoded examples
+        # Try pattern matching, which is more context-aware
         pattern_query = self._extract_with_patterns(query)
         if pattern_query:
             print(f"[Web] Using pattern-based query: {pattern_query}")
+
+            # Make sure entity is included
+            if entities and not any(entity.lower() in pattern_query.lower() for entity in entities):
+                enhanced_query = f"{pattern_query} {' '.join(entities)}"
+                enhanced_query = ' '.join(enhanced_query.split()[:max_words])
+                return enhanced_query
+
             return pattern_query
 
         # Last resort - use rule-based key term extraction
         key_terms = self._extract_key_terms(query, max_words)
-        print(f"[Web] Using key terms extraction: {key_terms}")
+
+        # Ensure entities are included in key terms
+        if entities and not any(entity.lower() in key_terms.lower() for entity in entities):
+            # Prioritize entities and combine with key terms
+            terms = key_terms.split()
+            combined_terms = entities + [term for term in terms if term.lower() not in [e.lower() for e in entities]]
+            key_terms = ' '.join(combined_terms[:max_words])
+
+        print(f"[Web] Using enhanced key terms extraction: {key_terms}")
         return key_terms
+
+    def _extract_entities(self, query: str) -> List[str]:
+        """
+        Extract important entities from a query (titles, proper nouns, etc.)
+
+        Args:
+            query: The user query
+
+        Returns:
+            List of extracted entities
+        """
+        import re
+
+        entities = []
+
+        # Extract quoted text - highest priority
+        quoted_text = re.findall(r'"([^"]+)"', query)
+        quoted_text.extend(re.findall(r"'([^']+)'", query))
+        entities.extend(quoted_text)
+
+        # Extract proper nouns (sequences of capitalized words)
+        proper_noun_pattern = r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b'
+        proper_nouns = re.findall(proper_noun_pattern, query)
+        for noun in proper_nouns:
+            # Check if it's not just a capitalized first word of sentence
+            words = query.split()
+            if noun in words and words.index(noun) > 0:
+                entities.append(noun)
+
+        # Extract years - important for temporal context
+        years = re.findall(r'\b(19\d\d|20\d\d)\b', query)
+        entities.extend(years)
+
+        # Extract currency codes and specific items
+        currency_codes = re.findall(r'\b([A-Z]{3})\b', query)  # 3-letter currency codes
+
+        # Filter currency codes - only include known ones
+        known_currencies = {'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD', 'BAM'}
+        filtered_currencies = [code for code in currency_codes if code in known_currencies]
+        entities.extend(filtered_currencies)
+
+        return entities
 
     def _extract_from_fractal_memory(self, query: str) -> Optional[str]:
         """
-        Try to find similar queries in fractal memory to use as references.
+        Enhanced function to extract from fractal memory with retry mechanisms.
 
         Args:
             query: The current query
@@ -788,51 +861,78 @@ class WebKnowledgeEnhancer:
         """
         try:
             if not hasattr(self, 'memory_manager') or not self.memory_manager:
+                print("[Web] Memory manager not available for fractal retrieval")
                 return None
 
-            # Create fractal-enabled store if not already using one
-            user_id = getattr(self, 'current_user_id', 'default_user')
-            store = self.memory_manager._get_user_store(user_id)
+            # Ensure we have a user ID
+            current_user_id = getattr(self.chat, 'current_user_id', 'default_user') if hasattr(self, 'chat') else 'default_user'
+            print(f"[Web] Attempting fractal memory retrieval for user: {current_user_id}")
 
-            if not getattr(store, 'fractal_enabled', False):
+            # Create fractal-enabled store if not already using one
+            store = self.memory_manager._get_user_store(current_user_id)
+
+            if not hasattr(store, 'fractal_enabled') or not store.fractal_enabled:
+                print("[Web] Fractal embeddings not enabled in vector store")
                 return None
 
             # Generate embedding for query
             query_embedding = self.memory_manager.generate_embedding(query)
 
-            # Search with fractal enabled
+            # Log diagnostics
+            print(f"[Web] Fractal search enabled: {getattr(store, 'fractal_enabled', False)}")
+            print(f"[Web] Store total documents: {len(getattr(store, 'documents', []))}")
+
+            # Conduct a broader, multi-level fractal search with lower threshold to find anything related
+            print("[Web] Executing multi-level fractal search")
             search_results = store.search(
                 query_embedding,
-                top_k=3,
-                min_similarity=0.7,
+                top_k=5,
+                min_similarity=0.60,  # Lower threshold to find more potential matches
                 multi_level_search=True
             )
 
-            # Check if we found any good matches with search terms
+            print(f"[Web] Fractal search returned {len(search_results)} results")
+
+            # Process results
             for result in search_results:
-                if result.get('similarity', 0) < 0.7:
-                    continue
+                similarity = result.get('similarity', 0)
+                print(f"[Web] Fractal result: sim={similarity:.2f}, level={result.get('level', 0)}")
 
                 metadata = result.get('metadata', {})
+
+                # Check for search terms in metadata
                 if 'search_term' in metadata:
+                    print(f"[Web] Found search term in memory: {metadata['search_term']}")
                     return metadata['search_term']
 
-                # Look for web knowledge memories that might have search terms
+                # Check for web knowledge memories
                 if metadata.get('memory_type') == 'web_knowledge':
-                    # Return the first sentence as a search term
                     content = result.get('text', '')
+                    # Extract potential search terms
                     first_sentence = content.split('.')[0].strip()
-                    if first_sentence and len(first_sentence.split()) <= 7:
+                    if len(first_sentence.split()) <= 10:
+                        print(f"[Web] Extracted search term from web memory: {first_sentence}")
                         return first_sentence
 
+                # Look for source queries that might be similar
+                if 'source_query' in metadata:
+                    source_query = metadata['source_query']
+                    # Only use if reasonably short
+                    if len(source_query.split()) <= 15:
+                        # Extract key terms from the source query instead of using it directly
+                        extracted_terms = self._extract_key_terms(source_query, 7)
+                        print(f"[Web] Using terms from similar query: {extracted_terms}")
+                        return extracted_terms
+
+            print("[Web] No useful search terms found in fractal memory")
             return None
         except Exception as e:
-            print(f"[Web] Error extracting from fractal memory: {e}")
+            print(f"[Web] Error in fractal memory extraction: {e}")
             return None
 
     def _extract_with_patterns(self, query: str) -> Optional[str]:
         """
-        Extract search terms using pattern matching with hardcoded examples.
+        Extract search terms using improved pattern matching with entity awareness.
 
         Args:
             query: The user query
@@ -842,28 +942,41 @@ class WebKnowledgeEnhancer:
         """
         import re
 
-        # Hardcoded patterns for common query types
+        # First extract any entities in the query - critical for accuracy
+        entities = self._extract_entities(query)
+        entity_text = ' '.join(entities) if entities else ''
+
+        # Normalize query - remove quotes since we already extracted them
+        clean_query = re.sub(r'["\']+', '', query.lower())
+
+        # Enhanced patterns with better entity handling
         patterns = [
-            # Who is/was person
-            (r'who (?:is|was) ([^?]+)', r'\1 biography', 0.9),
+            # Movie/book character patterns
+            (r'(?:who|what) (?:was|is|plays|played) (?:the)? (.+?) (?:in|from) (?:the)? ((?:movie|film|book|novel|show|series).*)',
+             r'\1 \2 character', 0.95),
 
-            # When did event happen
-            (r'when did ([^?]+)', r'\1 date year', 0.8),
+            # Movie/character with year
+            (r'(?:who|what) (?:was|is|plays|played) (?:the)? (.+?) (?:in|from) (?:the)? (.+?) ((?:19|20)\d\d)',
+             r'\1 \2 \3 character', 0.95),
 
-            # Where is location
-            (r'where is ([^?]+)', r'\1 location', 0.8),
+            # Main character specifically
+            (r'(?:who|what) (?:was|is) (?:the)? (main|lead|primary|principal) character (?:in|from) (.+)',
+             r'\2 main character', 0.95),
 
-            # What is concept
-            (r'what is(?: an?)? ([^?]+)', r'\1 definition', 0.7),
+            # Specific actor query
+            (r'who (?:plays|played) (.+?) (?:in|from) (.+)',
+             r'\1 \2 actor', 0.95),
 
-            # How to do something
-            (r'how (?:do|to|can) I? ([^?]+)', r'\1 instructions', 0.8),
+            # When was something established/founded
+            (r'when was (?:the)? (.+?) (?:established|founded|created|formed|setup|started|introduced)',
+             r'\1 established date history', 0.9),
 
-            # Movies/actors - this pattern specifically targets "in movie" queries like we saw in the logs
-            (r'(?:who|what) (?:played|was) ([^?]+) in (.+?) (?:movie|film|show)', r'\1 \2 actor', 0.9),
-
-            # Movies/character
-            (r'(?:who|what) (?:played|was) (.+?) in ([^?]+)', r'\1 \2 character', 0.9)
+            # General patterns with proper context preservation
+            (r'who (?:is|was) (.+)', r'\1 biography', 0.85),
+            (r'when did (.+)', r'\1 date when', 0.85),
+            (r'where is (.+)', r'\1 location where', 0.85),
+            (r'what is(?: an?)? (.+)', r'\1 definition', 0.85),
+            (r'how (?:do|to|can) I? (.+)', r'\1 how to', 0.85),
         ]
 
         # Check for matches with confidence
@@ -871,23 +984,30 @@ class WebKnowledgeEnhancer:
         best_confidence = 0
 
         for pattern, replacement, confidence in patterns:
-            match = re.search(pattern, query.lower())
+            match = re.search(pattern, clean_query)
             if match and confidence > best_confidence:
                 try:
-                    result = re.sub(pattern, replacement, query.lower())
-                    # Limit to reasonable length and words
-                    result = ' '.join(result.split()[:7])
+                    result = re.sub(pattern, replacement, clean_query)
+                    # Clean up any extra spaces
+                    result = ' '.join(result.split())
                     best_match = result
                     best_confidence = confidence
                 except Exception:
                     continue
 
+        # If we have a match and entities, ensure entities are included
+        if best_match and entity_text and not any(entity.lower() in best_match.lower() for entity in entities):
+            best_match = f"{best_match} {entity_text}"
+
+        # Limit to 8 words
+        if best_match:
+            best_match = ' '.join(best_match.split()[:8])
+
         return best_match
 
-    def _extract_key_terms(self, query: str, max_terms: int = 5) -> str:
+    def _extract_key_terms(self, query: str, max_terms: int = 8) -> str:
         """
-        Extract key terms from query using NLP techniques.
-        More robust implementation than the original.
+        Extract key terms with improved entity recognition and prioritization.
 
         Args:
             query: User query
@@ -899,12 +1019,20 @@ class WebKnowledgeEnhancer:
         import re
         from collections import Counter
 
+        # First extract entities - they get highest priority
+        entities = self._extract_entities(query)
+
+        # Remove entities from query to avoid duplication
+        clean_query = query
+        for entity in entities:
+            clean_query = clean_query.replace(entity, '')
+
         # Normalize and clean query
-        query_lower = query.lower()
+        query_lower = clean_query.lower()
         query_clean = re.sub(r'[^\w\s]', ' ', query_lower)
         words = query_clean.split()
 
-        # Extended stop words list
+        # Extended stop words list (use the same list as in the previous implementation)
         stop_words = {
             'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
             'and', 'or', 'but', 'if', 'then', 'else', 'when', 'where', 'up', 'down',
@@ -922,47 +1050,44 @@ class WebKnowledgeEnhancer:
             'hello', 'hi', 'hey', 'please', 'thanks', 'thank', 'answer'
         }
 
-        # Get word frequencies
+        # Get word frequencies for remaining words
         word_counts = Counter([word for word in words if word not in stop_words and len(word) > 2])
 
-        # Look for proper nouns (capitalized words in original query)
-        proper_nouns = []
-        for word in query.split():
-            clean_word = re.sub(r'[^\w]', '', word)
-            if clean_word and clean_word[0].isupper() and len(clean_word) > 1:
-                proper_nouns.append(clean_word.lower())
-
-        # Prioritize proper nouns, then by frequency and position
+        # Score the words
         scored_words = {}
         for word, count in word_counts.items():
             # Position score - words at start are more important (0.5-1.0)
             try:
                 position = words.index(word)
-                position_score = 1.0 - (0.5 * position / len(words))
+                position_score = 1.0 - (0.5 * position / max(1, len(words)))
             except ValueError:
                 position_score = 0.5
 
             # Length score - longer words often more important (0.0-0.5)
             length_score = min(0.5, len(word) / 20)
 
-            # Proper noun bonus
-            proper_noun_bonus = 2.0 if word in proper_nouns else 1.0
-
-            # Final score combines all factors
-            scored_words[word] = (count * position_score + length_score) * proper_noun_bonus
+            # Final score
+            scored_words[word] = (count * position_score + length_score)
 
         # Get top terms
-        top_words = [word for word, _ in sorted(scored_words.items(), key=lambda x: x[1], reverse=True)[:max_terms]]
+        top_words = [word for word, _ in sorted(scored_words.items(), key=lambda x: x[1], reverse=True)]
 
-        # If no words were extracted, use a simple fallback
-        if not top_words and proper_nouns:
-            return ' '.join(proper_nouns[:max_terms])
-        elif not top_words:
-            # Last resort - just use the first few non-stop words
-            filtered_words = [w for w in words if w not in stop_words and len(w) > 2]
-            return ' '.join(filtered_words[:max_terms])
+        # Combine entities and top words, ensuring no duplication
+        all_terms = entities.copy()
+        for word in top_words:
+            if word.lower() not in [term.lower() for term in all_terms]:
+                all_terms.append(word)
 
-        return ' '.join(top_words)
+        # Check if we have enough terms
+        if len(all_terms) < 2 and top_words:
+            # If extremely few terms, add some more from top words
+            additional_terms = [w for w in words if w not in stop_words
+                               and w not in [t.lower() for t in all_terms]
+                               and len(w) > 2][:max_terms - len(all_terms)]
+            all_terms.extend(additional_terms)
+
+        # Return limited terms
+        return ' '.join(all_terms[:max_terms])
 
 
     def _clean_search_term(self, response: str, original_query: str) -> str:
