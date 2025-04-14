@@ -747,84 +747,223 @@ class WebKnowledgeEnhancer:
             'cache_hit_rate': self.cache_hits / max(1, self.total_searches)
         }
 
-    def create_seo_friendly_sentence(self, query: str, messages=None, max_words: int = 5) -> str:
+    def create_seo_friendly_sentence(self, query: str, messages=None, max_words: int = 10) -> str:
         """
-        Create an SEO-friendly search query based on the original query and conversation context.
+        Create an SEO-friendly search query based on the original query with improved fallback mechanisms.
+
+        Args:
+            query: The user query
+            messages: Optional conversation history
+            max_words: Maximum words in the search query
+
+        Returns:
+            SEO-friendly search query
         """
-        # If no chat instance available, fall back to simple extraction
-        if not hasattr(self, 'chat') or self.chat is None:
-            return self._extract_key_terms(query)
+        # First try to extract from fractal memory if available
+        fractal_query = self._extract_from_fractal_memory(query)
+        if fractal_query and len(fractal_query.split()) <= max_words:
+            print(f"[Web] Using fractal memory query: {fractal_query}")
+            return fractal_query
 
-        # Prepare reference examples with CLEAR before/after transformation
-        examples = [
-            {"query": "what is quantum computing?", "search_term": "quantum computing explained"},
-            {"query": "who is barack obama?", "search_term": "barack obama biography"},
-            {"query": "what are the side effects of ibuprofen?", "search_term": "ibuprofen side effects risks"},
-            {"query": "why is the sky blue?", "search_term": "sky blue rayleigh scattering"},
-            {"query": "how to make chocolate chip cookies?", "search_term": "chocolate chip cookies recipe"}
-        ]
+        # Fallback to pattern-based extraction with hardcoded examples
+        pattern_query = self._extract_with_patterns(query)
+        if pattern_query:
+            print(f"[Web] Using pattern-based query: {pattern_query}")
+            return pattern_query
 
-        # Extract relevant context from conversation history
-        context = self._extract_conversation_context(messages)
+        # Last resort - use rule-based key term extraction
+        key_terms = self._extract_key_terms(query, max_words)
+        print(f"[Web] Using key terms extraction: {key_terms}")
+        return key_terms
 
-        # Format examples for the prompt
-        examples_text = "\n".join([
-            f"User query: \"{ex['query']}\"\nSearch term: {ex['search_term']}"
-            for ex in examples
-        ])
+    def _extract_from_fractal_memory(self, query: str) -> Optional[str]:
+        """
+        Try to find similar queries in fractal memory to use as references.
 
-        # Build a more directive prompt
-        system_content = f"""You are a search query optimizer. Your ONLY job is to convert verbose questions into concise search terms.
+        Args:
+            query: The current query
 
-    RULES:
-    1. Output ONLY 3-5 words maximum
-    2. NEVER repeat the question format - extract key terms only
-    3. Include specific entities and technical terms
-    4. If this is a follow-up question, use context from previous exchanges
-    5. NEVER include phrases like "Search term:" or any other labels
-    6. DO NOT use quotation marks unless they're part of a proper name
-
-    EXAMPLES:
-    {examples_text}
-
-    IMPORTANT: The user will provide a question. Your entire response must be ONLY the search term (3-5 words). Nothing else."""
-
-        # Create prompt with conversation context
-        context_text = f"\nPrevious conversation context:\n{context}" if context else ""
-        seo_prompt = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": f"Create a search term for: {query}{context_text}"}
-        ]
-
+        Returns:
+            Extracted search terms or None if not found
+        """
         try:
-            # Call the model without temperature
-            seo_friendly_response = self.chat.generate_response(
-                seo_prompt,
-                max_new_tokens=20,
-                turbo_mode=True,
-                show_confidence=False,
-                response_filter=None,
-                use_web_search=False
+            if not hasattr(self, 'memory_manager') or not self.memory_manager:
+                return None
+
+            # Create fractal-enabled store if not already using one
+            user_id = getattr(self, 'current_user_id', 'default_user')
+            store = self.memory_manager._get_user_store(user_id)
+
+            if not getattr(store, 'fractal_enabled', False):
+                return None
+
+            # Generate embedding for query
+            query_embedding = self.memory_manager.generate_embedding(query)
+
+            # Search with fractal enabled
+            search_results = store.search(
+                query_embedding,
+                top_k=3,
+                min_similarity=0.7,
+                multi_level_search=True
             )
 
-            # Aggressively clean the response
-            cleaned_response = self._clean_search_term(seo_friendly_response, query)
+            # Check if we found any good matches with search terms
+            for result in search_results:
+                if result.get('similarity', 0) < 0.7:
+                    continue
 
-            # Force limit to max_words
-            words = cleaned_response.split()
-            if len(words) > max_words:
-                cleaned_response = " ".join(words[:max_words])
+                metadata = result.get('metadata', {})
+                if 'search_term' in metadata:
+                    return metadata['search_term']
 
-            # Ensure we have at least one meaningful term
-            if not cleaned_response or cleaned_response.isspace():
-                cleaned_response = self._extract_key_terms(query)
+                # Look for web knowledge memories that might have search terms
+                if metadata.get('memory_type') == 'web_knowledge':
+                    # Return the first sentence as a search term
+                    content = result.get('text', '')
+                    first_sentence = content.split('.')[0].strip()
+                    if first_sentence and len(first_sentence.split()) <= 7:
+                        return first_sentence
 
-            print(f"\n[Web] Model SEO friendly query: {cleaned_response}")
-            return cleaned_response
-
+            return None
         except Exception as e:
-            print(f"[Web] Error creating SEO-friendly query: {e}")
-            return self._extract_key_terms(query)
+            print(f"[Web] Error extracting from fractal memory: {e}")
+            return None
+
+    def _extract_with_patterns(self, query: str) -> Optional[str]:
+        """
+        Extract search terms using pattern matching with hardcoded examples.
+
+        Args:
+            query: The user query
+
+        Returns:
+            Extracted search terms or None if not matched
+        """
+        import re
+
+        # Hardcoded patterns for common query types
+        patterns = [
+            # Who is/was person
+            (r'who (?:is|was) ([^?]+)', r'\1 biography', 0.9),
+
+            # When did event happen
+            (r'when did ([^?]+)', r'\1 date year', 0.8),
+
+            # Where is location
+            (r'where is ([^?]+)', r'\1 location', 0.8),
+
+            # What is concept
+            (r'what is(?: an?)? ([^?]+)', r'\1 definition', 0.7),
+
+            # How to do something
+            (r'how (?:do|to|can) I? ([^?]+)', r'\1 instructions', 0.8),
+
+            # Movies/actors - this pattern specifically targets "in movie" queries like we saw in the logs
+            (r'(?:who|what) (?:played|was) ([^?]+) in (.+?) (?:movie|film|show)', r'\1 \2 actor', 0.9),
+
+            # Movies/character
+            (r'(?:who|what) (?:played|was) (.+?) in ([^?]+)', r'\1 \2 character', 0.9)
+        ]
+
+        # Check for matches with confidence
+        best_match = None
+        best_confidence = 0
+
+        for pattern, replacement, confidence in patterns:
+            match = re.search(pattern, query.lower())
+            if match and confidence > best_confidence:
+                try:
+                    result = re.sub(pattern, replacement, query.lower())
+                    # Limit to reasonable length and words
+                    result = ' '.join(result.split()[:7])
+                    best_match = result
+                    best_confidence = confidence
+                except Exception:
+                    continue
+
+        return best_match
+
+    def _extract_key_terms(self, query: str, max_terms: int = 5) -> str:
+        """
+        Extract key terms from query using NLP techniques.
+        More robust implementation than the original.
+
+        Args:
+            query: User query
+            max_terms: Maximum number of terms
+
+        Returns:
+            Space-separated key terms
+        """
+        import re
+        from collections import Counter
+
+        # Normalize and clean query
+        query_lower = query.lower()
+        query_clean = re.sub(r'[^\w\s]', ' ', query_lower)
+        words = query_clean.split()
+
+        # Extended stop words list
+        stop_words = {
+            'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+            'and', 'or', 'but', 'if', 'then', 'else', 'when', 'where', 'up', 'down',
+            'in', 'on', 'at', 'to', 'for', 'with', 'by', 'about', 'against', 'between',
+            'into', 'through', 'during', 'before', 'after', 'above', 'below', 'from',
+            'of', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here',
+            'what', 'who', 'where', 'when', 'why', 'how', 'which', 'do', 'does', 'did',
+            'can', 'could', 'would', 'should', 'will', 'shall', 'may', 'might', 'must',
+            'me', 'my', 'mine', 'your', 'yours', 'his', 'her', 'hers', 'their', 'them',
+            'i', 'we', 'us', 'you', 'he', 'she', 'it', 'they', 'am', 'this', 'that',
+            'these', 'those', 'had', 'has', 'have', 'having', 'get', 'gets', 'got',
+            'just', 'more', 'most', 'other', 'some', 'such', 'only', 'than', 'too',
+            'very', 'really', 'okay', 'ok', 'say', 'says', 'said', 'show', 'tell',
+            'know', 'think', 'see', 'look', 'try', 'help', 'explain', 'describe',
+            'hello', 'hi', 'hey', 'please', 'thanks', 'thank', 'answer'
+        }
+
+        # Get word frequencies
+        word_counts = Counter([word for word in words if word not in stop_words and len(word) > 2])
+
+        # Look for proper nouns (capitalized words in original query)
+        proper_nouns = []
+        for word in query.split():
+            clean_word = re.sub(r'[^\w]', '', word)
+            if clean_word and clean_word[0].isupper() and len(clean_word) > 1:
+                proper_nouns.append(clean_word.lower())
+
+        # Prioritize proper nouns, then by frequency and position
+        scored_words = {}
+        for word, count in word_counts.items():
+            # Position score - words at start are more important (0.5-1.0)
+            try:
+                position = words.index(word)
+                position_score = 1.0 - (0.5 * position / len(words))
+            except ValueError:
+                position_score = 0.5
+
+            # Length score - longer words often more important (0.0-0.5)
+            length_score = min(0.5, len(word) / 20)
+
+            # Proper noun bonus
+            proper_noun_bonus = 2.0 if word in proper_nouns else 1.0
+
+            # Final score combines all factors
+            scored_words[word] = (count * position_score + length_score) * proper_noun_bonus
+
+        # Get top terms
+        top_words = [word for word, _ in sorted(scored_words.items(), key=lambda x: x[1], reverse=True)[:max_terms]]
+
+        # If no words were extracted, use a simple fallback
+        if not top_words and proper_nouns:
+            return ' '.join(proper_nouns[:max_terms])
+        elif not top_words:
+            # Last resort - just use the first few non-stop words
+            filtered_words = [w for w in words if w not in stop_words and len(w) > 2]
+            return ' '.join(filtered_words[:max_terms])
+
+        return ' '.join(top_words)
+
 
     def _clean_search_term(self, response: str, original_query: str) -> str:
         """Aggressively clean a search term response."""
@@ -911,65 +1050,7 @@ class WebKnowledgeEnhancer:
 
         return formatted_context
 
-    def _extract_key_terms(self, query: str, max_terms: int = 5) -> str:
-        """
-        Extract key terms from a query using simple NLP techniques.
-        This serves as a fallback when model-based extraction fails.
 
-        Args:
-            query: The user query
-            max_terms: Maximum number of terms to extract
-
-        Returns:
-            String of key terms for search
-        """
-        # Clean the query
-        clean_query = re.sub(r'[^\w\s]', ' ', query.lower())
-
-        # Split into tokens
-        tokens = clean_query.split()
-
-        # Filter out common stop words
-        stop_words = {
-            'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been',
-            'and', 'or', 'but', 'if', 'then', 'else', 'when', 'up', 'down',
-            'in', 'on', 'at', 'to', 'for', 'with', 'by', 'about', 'of',
-            'what', 'who', 'where', 'when', 'why', 'how', 'which', 'do', 'does',
-            'can', 'could', 'would', 'should', 'will', 'shall', 'may', 'might',
-            'me', 'my', 'mine', 'your', 'yours', 'their', 'them', 'i', 'we', 'us',
-            'show', 'tell', 'explain', 'describe', 'say', 'know'
-        }
-
-        # Calculate a simple weight for each token
-        term_weights = {}
-        for token in tokens:
-            if token in stop_words or len(token) <= 2:
-                continue
-
-            # Terms appearing at the start get higher weight (often the subject)
-            position_factor = 1.0 - (tokens.index(token) / len(tokens) / 2)  # 1.0 to 0.5
-
-            # Longer words often more important
-            length_factor = min(1.0, len(token) / 10)  # Up to 1.0 for words of length 10+
-
-            # Combined weight
-            weight = position_factor * (1.0 + length_factor)
-
-            term_weights[token] = weight
-
-        # If no terms found, return original query
-        if not term_weights:
-            return query
-
-        # Sort by weight and take top terms
-        sorted_terms = sorted(term_weights.items(), key=lambda x: x[1], reverse=True)
-        top_terms = [term for term, _ in sorted_terms[:max_terms]]
-
-        # Ensure we don't return an empty string
-        if not top_terms:
-            return query
-
-        return " ".join(top_terms)
 
     def _strip_preambles_strictly(self, text: str) -> str:
         """
