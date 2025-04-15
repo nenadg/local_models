@@ -461,6 +461,148 @@ class WebKnowledgeEnhancer:
         
         return scored_results
     
+    def compare_vectors_enhanced(
+        self,
+        query_vector: np.ndarray,
+        result_vectors: List[Tuple[np.ndarray, Dict]],
+        entities: List[str] = None,
+        min_threshold: float = 0.4,
+        diversity_factor: float = 0.1
+    ) -> List[Dict]:
+        """
+        Enhanced vector comparison with entity-boosting, diversity promotion,
+        and improved similarity calculation.
+
+        Args:
+            query_vector: Vector representation of the query
+            result_vectors: List of (vector, metadata) tuples
+            entities: List of extracted entities from the query
+            min_threshold: Minimum similarity threshold
+            diversity_factor: How much to penalize similar results (0-1)
+
+        Returns:
+            List of scored and ranked results
+        """
+        if not entities:
+            entities = []
+
+        # Convert entities to lowercase for matching
+        entities_lower = [e.lower() for e in entities]
+
+        # Initial scoring pass
+        scored_results = []
+
+        # Normalize query vector
+        query_vector_norm = query_vector / np.linalg.norm(query_vector)
+
+        for vec, metadata in result_vectors:
+            # Normalize result vector
+            vec_norm = vec / np.linalg.norm(vec)
+
+            # Calculate cosine similarity
+            similarity = np.dot(query_vector_norm, vec_norm)
+
+            # Skip if below threshold
+            if similarity < min_threshold:
+                continue
+
+            # Calculate entity matching score
+            entity_score = 0.0
+            result_text = (metadata.get('title', '') + ' ' + metadata.get('snippet', '')).lower()
+
+            # Count entity matches and prioritize exact matches
+            matched_entities = 0
+            for entity in entities_lower:
+                if entity in result_text:
+                    matched_entities += 1
+                    # Proximity boost for entities near the beginning
+                    pos = result_text.find(entity)
+                    if pos >= 0:
+                        proximity_factor = max(0.0, 1.0 - (pos / min(100, len(result_text))))
+                        entity_score += 0.1 * proximity_factor
+
+            # Calculate entity coverage proportion
+            if entities:
+                entity_coverage = matched_entities / len(entities)
+                entity_score += entity_coverage * 0.2
+
+            # Apply sharpening if enabled
+            if self.vector_sharpening_factor > 0:
+                # Enhanced similarity with sharpening
+                if similarity > 0.7:
+                    # Boost high similarities
+                    similarity_boost = (similarity - 0.7) * self.vector_sharpening_factor
+                    similarity = similarity + similarity_boost
+                elif similarity < 0.3:
+                    # Penalize low similarities
+                    similarity_penalty = (0.3 - similarity) * self.vector_sharpening_factor
+                    similarity = similarity - similarity_penalty
+
+                # Ensure valid range
+                similarity = max(0.0, min(1.0, similarity))
+
+            # Combine with entity score - entity matching can significantly boost results
+            combined_score = similarity + entity_score
+
+            # Add to results with similarity score
+            result = metadata.copy()
+            result['similarity'] = float(combined_score)
+            result['base_similarity'] = float(similarity)
+            result['entity_score'] = float(entity_score)
+            result['matched_entities'] = matched_entities
+
+            scored_results.append(result)
+
+        # If no results passed threshold, return empty list
+        if not scored_results:
+            return []
+
+        # Sort by combined score
+        scored_results.sort(key=lambda x: x['similarity'], reverse=True)
+
+        # Apply diversity penalty in second pass (avoid similar results)
+        if len(scored_results) > 1 and diversity_factor > 0:
+            # Start with first result
+            diversified_results = [scored_results[0]]
+            remaining = scored_results[1:]
+
+            while remaining and len(diversified_results) < len(scored_results):
+                # Calculate diversity penalty based on similarity to already included results
+                for candidate in remaining:
+                    candidate_text = f"{candidate.get('title', '')} {candidate.get('snippet', '')}"
+
+                    # Calculate text overlap penalty
+                    max_overlap = 0.0
+                    for included in diversified_results:
+                        included_text = f"{included.get('title', '')} {included.get('snippet', '')}"
+
+                        # Simple Jaccard similarity for text overlap
+                        candidate_words = set(candidate_text.lower().split())
+                        included_words = set(included_text.lower().split())
+
+                        if not candidate_words or not included_words:
+                            continue
+
+                        overlap = len(candidate_words.intersection(included_words)) / len(candidate_words.union(included_words))
+                        max_overlap = max(max_overlap, overlap)
+
+                    # Apply diversity penalty
+                    penalty = max_overlap * diversity_factor
+                    candidate['diversity_penalty'] = float(penalty)
+                    candidate['adjusted_similarity'] = max(0.0, candidate['similarity'] - penalty)
+
+                # Re-sort remaining by adjusted score
+                remaining.sort(key=lambda x: x['adjusted_similarity'], reverse=True)
+
+                # Take best and continue
+                if remaining:
+                    next_result = remaining.pop(0)
+                    diversified_results.append(next_result)
+
+            return diversified_results
+        else:
+            return scored_results
+
     def enhance_response(self, 
                         query: str,
                         confidence_data: Dict[str, float],
@@ -468,14 +610,16 @@ class WebKnowledgeEnhancer:
                         process_urls: bool = False,
                         messages: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
-        Enhance model response with web knowledge.
-        
+        Enhanced version of the response enhancement function with improved
+        query processing and result filtering.
+
         Args:
             query: User query
             confidence_data: Model confidence metrics
             domain: Optional domain classification
             process_urls: Whether to fetch full content from URLs
-            
+            messages: Optional conversation history
+
         Returns:
             Dictionary with enhancement data
         """
@@ -486,20 +630,30 @@ class WebKnowledgeEnhancer:
                 'reason': 'confidence_sufficient',
                 'web_results': []
             }
-        
+
+        # Extract entities first - these are critical for relevance
+        entities = self._extract_entities(query)
+
         # Extract seo_friendly_query from query
         seo_friendly_query = self.create_seo_friendly_sentence(query, messages)
         seo_friendly_query = self._strip_preambles_strictly(seo_friendly_query)
 
         # Generate embedding for original query
-        query_vector = self.generate_embedding(seo_friendly_query)
+        query_vector = self.generate_embedding(query)
 
         # Generate embedding for seo_friendly_query
         keyword_vector = self.generate_embedding(seo_friendly_query)
 
-        # Search the web using seo_friendly_query
-        self._last_search_query = seo_friendly_query
-        search_results = self.search_web(seo_friendly_query)
+        # Make sure entities are included in the search
+        if entities and not any(entity.lower() in seo_friendly_query.lower() for entity in entities):
+            search_query = f"{seo_friendly_query} {' '.join(entities)}"
+            search_query = ' '.join(search_query.split()[:10])  # Limit length
+        else:
+            search_query = seo_friendly_query
+
+        # Search the web
+        print(f"[Web] Enhanced search query: {search_query}")
+        search_results = self.search_web(search_query)
 
         if not search_results:
             return {
@@ -507,14 +661,7 @@ class WebKnowledgeEnhancer:
                 'reason': 'no_search_results',
                 'web_results': []
             }
-        
-        if not search_results:
-            return {
-                'enhanced': False,
-                'reason': 'no_search_results',
-                'web_results': []
-            }
-        
+
         # Process results in parallel if fetching full content
         if process_urls:
             with ThreadPoolExecutor(max_workers=4) as executor:
@@ -523,7 +670,7 @@ class WebKnowledgeEnhancer:
                     executor.submit(self.fetch_content, result['url']): result
                     for result in search_results[:5]  # Limit to top 5 for performance
                 }
-                
+
                 # Process completed futures
                 for future in future_to_result:
                     result = future_to_result[future]
@@ -534,40 +681,40 @@ class WebKnowledgeEnhancer:
                             result['content'] = content
                     except Exception as e:
                         print(f"[Web] Error processing URL {result['url']}: {e}")
-        
+
         # Create result vectors
         result_vectors = []
-        
+
         for result in search_results:
-            # Determine text to embed
+            # Determine text to embed (include title for better precision)
             text_to_embed = f"{result['title']} {result['snippet']}"
-            
+
             # Generate embedding
             embedding = self.generate_embedding(text_to_embed)
-            
+
             # Add to result vectors
             result_vectors.append((embedding, result))
-        
-        # Compare vectors
-        scored_results = self.compare_vectors_with_dual_verification(
+
+        # Use enhanced vector comparison
+        scored_results = self.compare_vectors_enhanced(
             query_vector,
-            keyword_vector,
             result_vectors,
-            query_weight=0.7,
-            keyword_weight=0.3,
-            min_threshold=0.4
+            entities=entities,
+            min_threshold=0.35,
+            diversity_factor=0.15
         )
-        
+
         # Filter results by minimum similarity
         filtered_results = scored_results[:self.max_results]
-        
+
         return {
             'enhanced': True,
             'reason': 'low_confidence',
             'query_vector': query_vector,
-            'web_results': filtered_results[:self.max_results],
+            'web_results': filtered_results,
             'all_results_count': len(search_results),
-            'filtered_count': len(filtered_results)
+            'filtered_count': len(filtered_results),
+            'entities': entities
         }
 
     def compare_vectors_with_dual_verification(
@@ -639,41 +786,89 @@ class WebKnowledgeEnhancer:
     
     def format_web_results_for_context(self, enhancement_data: Dict[str, Any], max_results: int = 5) -> str:
         """
-        Format web results for inclusion in the context.
-        
+        Enhanced formatting of web results for better context integration
+        with clearer guidance for the model.
+
         Args:
             enhancement_data: Web enhancement data
             max_results: Maximum number of results to include
-            
+
         Returns:
             Formatted string for context
         """
         if not enhancement_data.get('enhanced', False):
             return ""
-            
+
         web_results = enhancement_data.get('web_results', [])
-        
+
         if not web_results:
             return ""
-            
-        # Format results for context
-        context = "INFORMATION FROM WEB SEARCH:\n\n"
-        
-        for i, result in enumerate(web_results[:max_results]):
-            similarity = result.get('similarity', 0.0)
-            relevance_indicator = "★★★" if similarity > 0.7 else ("★★" if similarity > 0.5 else "★")
-            
-            # Add result with relevance indicator
-            context += f"{i+1}. {relevance_indicator} {result['title']}\n"
-            context += f"   {result['snippet']}\n"
-            
-            # Add source URL (shortened)
-            url = result['url']
-            if len(url) > 70:
-                url = url[:67] + "..."
-            context += f"   Source: {url}\n\n"
-        
-        context += f"[End of web search results. Found {len(web_results)} relevant sources.]\n"
+
+        # Extract entities for special handling
+        entities = enhancement_data.get('entities', [])
+        entity_str = '", "'.join(entities) if entities else ""
+
+        # Format results with clearer hierarchy and instructions
+        context = "WEB SEARCH RESULTS\n"
+        context += "----------------\n"
+        context += "Please synthesize a comprehensive answer using the following information from the web.\n\n"
+
+        # Group results by relevance tier
+        primary_sources = []
+        supporting_sources = []
+
+        for result in web_results:
+            if result.get('similarity', 0) > 0.7 or result.get('matched_entities', 0) > 0:
+                primary_sources.append(result)
+            else:
+                supporting_sources.append(result)
+
+        # Add primary sources first with clear labeling
+        if primary_sources:
+            context += "PRIMARY INFORMATION:\n"
+
+            for i, result in enumerate(primary_sources[:3]):  # Limit to top 3 primary sources
+                similarity = result.get('similarity', 0.0)
+                title = result.get('title', 'Untitled')
+                snippet = result.get('snippet', 'No description available')
+                url = result.get('url', '')
+
+                # Format with clear importance indicators
+                context += f"{i+1}. [{title}]\n"
+                context += f"   {snippet}\n"
+
+                # Include key metadata that might help the model assess source quality
+                if url:
+                    domain = url.split('/')[2] if len(url.split('/')) > 2 else url
+                    context += f"   Source: {domain}\n"
+
+                context += "\n"
+
+        # Add supporting sources if available
+        remaining_slots = max(0, max_results - len(primary_sources))
+        if supporting_sources and remaining_slots > 0:
+            context += "SUPPORTING INFORMATION:\n"
+
+            for i, result in enumerate(supporting_sources[:remaining_slots]):
+                title = result.get('title', 'Untitled')
+                snippet = result.get('snippet', 'No description available')
+
+                # Format supporting sources more concisely
+                context += f"{i+1}. {title}: {snippet}\n"
+
+            context += "\n"
+
+        # Add explicit instructions to help the model use the information effectively
+        context += "INSTRUCTIONS:\n"
+        context += "- Synthesize a direct answer from the information above\n"
+
+        if entities:
+            # For entity-specific queries, add focused guidance
+            context += f'- Focus on information about "{entity_str}"\n'
+
+        context += "- If the information appears contradictory, acknowledge this\n"
+        context += "- If search results don't contain relevant information, state this clearly\n"
+        context += "- Do not hallucinate information not present in the search results\n"
         
         return context
     
