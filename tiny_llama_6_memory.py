@@ -823,7 +823,7 @@ class TinyLlamaChat:
             # Generation configuration
             generation_config = {
                 "max_new_tokens": max_new_tokens,
-                "do_sample": temperature > 0.1, # use only if do_sample=false
+                "do_sample": temperature >= 0.1, # use only if do_sample=false
                 "temperature": temperature if temperature > 0.1 else 1.0,
                 "top_k": 50,
                 "top_p": 0.95, # use only if do_sample=False
