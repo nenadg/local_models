@@ -242,9 +242,9 @@ def main():
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=4,
-        evaluation_strategy="epoch",
         save_strategy="epoch",
-        load_best_model_at_end=True,
+        # Remove load_best_model_at_end line or set to False
+        load_best_model_at_end=False,
         learning_rate=args.lr,
         weight_decay=0.01,
         fp16=torch.cuda.is_available(),

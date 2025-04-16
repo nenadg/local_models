@@ -172,32 +172,84 @@ def create_prompt(system_content, query1, query2):
 def run_reasoning_test(model, tokenizer, device="cpu", temperature=0.1):
     """Run the semantic reasoning test on all test pairs"""
     results = []
-    success_count = 0
 
-    print("Starting test with system prompts:")
-    for i, prompt in enumerate(SYSTEM_PROMPTS):
-        print(f"Prompt #{i+1} starts with: {prompt[:50]}...")
+    print("Starting test with system prompts...")
 
     # Try each system prompt to see which works best
-    best_prompt = None
-    best_prompt_score = 0
-
     for prompt_idx, system_prompt in enumerate(SYSTEM_PROMPTS):
         print(f"\nTesting system prompt #{prompt_idx+1}...")
-        try:
-            # ... rest of the function ...
+        prompt_results = []
+        success_count = 0
 
-            # Add results to overall results
-            print(f"Adding results for prompt #{prompt_idx+1} with success rate {success_rate:.1f}%")
+        # Test all pairs with this prompt
+        for query1, query2, expected in TEST_PAIRS:
+            try:
+                # Create prompt
+                prompt = f"{system_prompt}\n\nQuery 1: {query1}\nQuery 2: {query2}\n\nRelationship:"
+
+                # Tokenize
+                inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+                # Generate
+                with torch.no_grad():
+                    outputs = model.generate(
+                        **inputs,
+                        max_new_tokens=10,
+                        temperature=temperature,
+                        do_sample=True,  # Enable sampling
+                        top_p=0.95,
+                        num_return_sequences=1,
+                        pad_token_id=tokenizer.eos_token_id
+                    )
+
+                # Decode
+                response = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+
+                # Clean response
+                cleaned_response = response.strip().upper()
+                if "SAME" in cleaned_response:
+                    cleaned_response = "SAME"
+                elif "OPPOSITE" in cleaned_response:
+                    cleaned_response = "OPPOSITE"
+                elif "DIFFERENT" in cleaned_response:
+                    cleaned_response = "DIFFERENT"
+                else:
+                    cleaned_response = "INVALID"
+
+                # Check if correct
+                is_correct = cleaned_response == expected
+                if is_correct:
+                    success_count += 1
+
+                # Add to results
+                prompt_results.append({
+                    "query1": query1,
+                    "query2": query2,
+                    "expected": expected,
+                    "response": response,
+                    "cleaned_response": cleaned_response,
+                    "is_correct": is_correct
+                })
+
+                # Print progress
+                print(f"  Pair: {query1} vs {query2} - Expected: {expected}, Got: {cleaned_response}")
+
+            except Exception as e:
+                print(f"Error testing pair ({query1}, {query2}): {e}")
+
+        # Calculate success rate
+        if prompt_results:
+            success_rate = (success_count / len(TEST_PAIRS)) * 100
+            print(f"Prompt #{prompt_idx+1} success rate: {success_rate:.1f}%")
+
+            # Add to results
             results.append({
                 "prompt_idx": prompt_idx,
                 "success_rate": success_rate,
                 "results": prompt_results
             })
-        except Exception as e:
-            print(f"Error during testing prompt #{prompt_idx+1}: {e}")
 
-    print(f"Test completed with {len(results)} result sets")
+    print(f"Completed testing {len(results)} prompts")
     return results
 
 def parse_response(response):
@@ -404,55 +456,29 @@ def main():
 
     results = run_reasoning_test(model, tokenizer, device, args.temperature)
 
+    # Fallback if results are empty
+    if not results:
+        print("WARNING: Test produced no results. Using fallback empty results.")
+        results = [{
+            "prompt_idx": 0,
+            "success_rate": 0.0,
+            "results": []
+        }]
+
     # Analyze results
     analyze_results(results)
 
-    # Print a conclusion
-    best_prompt_idx = max(range(len(results)), key=lambda i: results[i]["success_rate"])
-    best_result = results[best_prompt_idx]
+    # Find best prompt safely
+    if results:
+        best_prompt_idx = max(range(len(results)), key=lambda i: results[i]["success_rate"])
+        best_result = results[best_prompt_idx]
 
-    print(f"\nCONCLUSION: TinyLlama semantic reasoning test achieved {best_result['success_rate']:.1f}% accuracy")
-    print(f"Best prompt was #{best_prompt_idx+1}")
+        print(f"\nCONCLUSION: TinyLlama semantic reasoning test achieved {best_result['success_rate']:.1f}% accuracy")
+        print(f"Best prompt was #{best_prompt_idx+1}")
+    else:
+        print("\nCONCLUSION: Test failed to produce any results")
 
 if __name__ == "__main__":
     main()
 
-    # Print progress
-    print(f"  Pair {i+1}/{len(shuffled_pairs)}: {'✓' if is_correct else '✗'} Expected: {expected}, Got: {cleaned_response}")
-
-    # If using focus mode, adapt when we see errors
-    if focus_mode and not is_correct and i >= len(fixed_pairs):
-        # If model made an error, try to reinforce with a similar example
-        reinforcement_prompt = create_reinforcement_prompt(
-            system_prompt, query1, query2, expected)
-
-        # Only show this in verbose mode
-        # print(f"\n  Adding reinforcement: {query1} vs {query2} → {expected}")
-
-        # Run the reinforcement without scoring it
-        inputs = tokenizer(reinforcement_prompt, return_tensors="pt").to(device)
-        with torch.no_grad():
-            model.generate(
-                **inputs,
-                max_new_tokens=5,
-                temperature=0.1,  # Lower temperature for reinforcement
-                do_sample=True,
-                num_return_sequences=1,
-                pad_token_id=tokenizer.eos_token_id
-            )
-
-        # Calculate success rate for this prompt
-        success_rate = prompt_success / len(shuffled_pairs) * 100
-        print(f"Prompt #{prompt_idx+1} success rate: {success_rate:.1f}%")
-
-        # Check if this is the best prompt
-        if prompt_success > best_prompt_score:
-            best_prompt = prompt_idx
-            best_prompt_score = prompt_success
-
-        # Add results to overall results
-        results.append({
-            "prompt_idx": prompt_idx,
-            "success_rate": success_rate,
-            "results": prompt_results
-        })
+    
