@@ -44,7 +44,8 @@ from pattern_matching_utils import (
 
 from batch_utils import tensor_batch_processing
 from web_knowledge_enhancer import WebKnowledgeEnhancer
-
+from continuation_handler import ContinuationHandler
+import signal
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -3031,41 +3032,45 @@ class TinyLlamaChat:
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
     parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-                      help="Model to use for chat")
+                        help="Model to use for chat")
     parser.add_argument("--device", type=str, default=None,
-                      help="Device to use (cuda, cpu). If not specified, will autodetect.")
+                        help="Device to use (cuda, cpu). If not specified, will autodetect.")
     parser.add_argument("--system-prompt", type=str,
-                      default="You are a helpful and friendly assistant.",
-                      help="System prompt to use")
+                        default="You are a helpful and friendly assistant.",
+                        help="System prompt to use")
     parser.add_argument("--temperature", type=float, default=0.7,
-                      help="Temperature for response generation (lower = more deterministic)")
+                        help="Temperature for response generation (lower = more deterministic)")
     parser.add_argument("--max-tokens", type=int, default=128,
-                      help="Maximum number of tokens to generate in response")
+                        help="Maximum number of tokens to generate in response")
     parser.add_argument("--turbo", action="store_true", default=True,
-                      help="Enable turbo mode for ultra-fast generation")
+                        help="Enable turbo mode for ultra-fast generation")
     parser.add_argument("--output-dir", type=str, default="./output",
-                      help="Directory to store output files from MCP")
+                        help="Directory to store output files from MCP")
     parser.add_argument("--confidence_threshold", type=float, default=0.7,
-                      help="Filter confidence")
+                        help="Filter confidence")
     parser.add_argument("--heatmap", action="store_true", default=False,
-                   help="Show confidence heatmap visualization")
+                        help="Show confidence heatmap visualization")
     parser.add_argument("--no-memory", action="store_true",
-                  help="Disable automatic memory features")
+                        help="Disable automatic memory features")
     parser.add_argument("--all-metrics", action="store_true", default=False,
-                  help="Show all detailed metrics instead of just truthiness")
+                        help="Show all detailed metrics instead of just truthiness")
     parser.add_argument("--enable-sharpening", action="store_true", default=True,
-                      help="Enable vector space and confidence sharpening")
+                        help="Enable vector space and confidence sharpening")
     parser.add_argument("--sharpening-factor", type=float, default=0.3,
-                      help="Sharpening factor for vector embeddings (0.0-1.0)")
+                        help="Sharpening factor for vector embeddings (0.0-1.0)")
     parser.add_argument("--web-knowledge", action="store_true", default=True,
-                    help="Enable web search for knowledge enhancement")
+                        help="Enable web search for knowledge enhancement")
     parser.add_argument("--search-engine", type=str, default="duckduckgo", choices=["duckduckgo", "google"],
                         help="Search engine to use for web knowledge")
     parser.add_argument("--web-confidence", type=float, default=0.65,
                         help="Confidence threshold below which to trigger web search")
     parser.add_argument("--test-fractal", action="store_true", default=False,
-                    help="Run fractal embedding diagnostics")
-    
+                        help="Run fractal embedding diagnostics")
+    parser.add_argument("--max-continuations", type=int, default=5,
+                        help="Maximum number of times to allow 'please continue' for a single response")
+    parser.add_argument("--continuation-tokens", type=int, default=None,
+                        help="Maximum tokens to generate when continuing (defaults to 2x max-tokens)")
+
     args = parser.parse_args()
 
 
@@ -3087,6 +3092,10 @@ def main():
         fractal_enabled=True,
         max_fractal_levels=3
     )
+
+    # Initialize continuation handler
+    continuation_handler = ContinuationHandler(chat)
+    continuation_handler.max_continuations = args.max_continuations
 
     try:
         # If web knowledge is enabled, configure the search engine
@@ -3195,6 +3204,76 @@ def main():
                 stats = store.get_stats()
                 print(f"Total memories saved this session: {stats['active_documents']}")
                 break
+
+            if continuation_handler.is_continuation_request(user_input):
+                # Before generating, ensure the interrupt handler is installed
+                chat.interrupt_handler.install()
+                chat.stop_event.clear()  # Reset the stop event
+
+                # Add timestamp for model output
+                response_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+                print(f"\n{response_time} Assistant: ", end='', flush=True)
+
+                # Generate continuation
+                start_time = time.time()
+
+                # Set max continuation tokens
+                max_continuation_tokens = args.continuation_tokens or (args.max_tokens * 2)
+
+                try:
+                    continuation, confidence_data = continuation_handler.continue_response(
+                        conversation,
+                        user_input,
+                        max_new_tokens=max_continuation_tokens,
+                        temperature=args.temperature,
+                        show_confidence=show_confidence  # Pass the show_confidence parameter
+                    )
+
+                    # When printing the continuation, skip any repeated text markers
+                    # if "// --- CONTINUE FROM THIS EXACT POINT --- " in continuation:
+                    #     parts = continuation.split("// --- CONTINUE FROM THIS EXACT POINT ---")
+                    #     continuation = parts[-1].strip()
+                    #     if continuation.startswith("Please continue exactly from where you left off"):
+                    #         continuation = continuation.split("\n", 1)[-1] if "\n" in continuation else ""
+
+                    # Print the continuation
+                    print(continuation)
+
+                    # Calculate generation time
+                    end_time = time.time()
+                    generation_time = max(0.01, end_time - start_time)
+
+                    # Update the last response in conversation
+                    if conversation[-1]["role"] == "assistant":
+                        # Append continuation to the last assistant message
+                        conversation[-1]["content"] += "\n\n" + continuation
+
+                    # Add to memory
+                    chat.add_conversation_to_memory(user_input, continuation)
+
+                    # Print metrics
+                    if confidence_data:
+                        response_tokens = len(chat.tokenizer.encode(continuation))
+                        chat.print_generation_metrics(
+                            confidence_data,
+                            generation_time,
+                            response_tokens,
+                            show_all_metrics
+                        )
+                except KeyboardInterrupt:
+                    # Handle Ctrl+C interruption
+                    print("\n[Generation interrupted by user (Ctrl+C)]")
+                    chat.stop_event.set()  # Set the stop event
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    break
+
+                finally:
+                    # Ensure the interrupt handler is uninstalled
+                    chat.interrupt_handler.uninstall()
+
+                continue
 
             elif user_input.lower().startswith('!teach:'):
                 new_fact = user_input[7:].strip()
@@ -3382,6 +3461,9 @@ def main():
 
                 assistant_message = {"role": "assistant", "content": filtered_response}
                 conversation.append(assistant_message)
+
+                # Store the response for potential continuation
+                continuation_handler.set_last_response(filtered_response, len(conversation) - 1)
 
                 chat.add_conversation_to_memory(user_input, filtered_response)
 
