@@ -1004,7 +1004,7 @@ class WebKnowledgeEnhancer:
 
     def _extract_entities(self, query: str) -> List[str]:
         """
-        Extract important entities from a query (titles, proper nouns, etc.)
+        Extract important entities from a query with enhanced coverage for various entity types.
 
         Args:
             query: The user query
@@ -1013,36 +1013,120 @@ class WebKnowledgeEnhancer:
             List of extracted entities
         """
         import re
-
         entities = []
 
-        # Extract quoted text - highest priority
-        quoted_text = re.findall(r'"([^"]+)"', query)
-        quoted_text.extend(re.findall(r"'([^']+)'", query))
-        entities.extend(quoted_text)
+        # 1. Extract quoted text (highest priority)
+        # Catch both double and single quotes including curly/smart quotes
+        quoted_text = re.findall(r'[""\']([^""\']+)[""\'"]', query)
+        for text in quoted_text:
+            if len(text) > 1:  # Ignore single character quotes
+                entities.append(text.strip())
 
-        # Extract proper nouns (sequences of capitalized words)
+        # 2. Extract proper nouns (sequences of capitalized words)
+        # This catches multi-word proper nouns like "New York" or "John Smith"
         proper_noun_pattern = r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b'
         proper_nouns = re.findall(proper_noun_pattern, query)
+
+        # Filter out matches that are just capitalized first words of sentences
+        words = query.split()
         for noun in proper_nouns:
-            # Check if it's not just a capitalized first word of sentence
-            words = query.split()
+            # Check if it's not just the first word of the sentence
             if noun in words and words.index(noun) > 0:
                 entities.append(noun)
+            # Also include proper nouns that appear after punctuation
+            elif re.search(r'[.!?:;]\s+' + re.escape(noun), query):
+                entities.append(noun)
 
-        # Extract years - important for temporal context
-        years = re.findall(r'\b(19\d\d|20\d\d)\b', query)
+        # 3. Extract dates and years (including ranges)
+        # Years pattern captures 19xx, 20xx, 18xx patterns
+        years = re.findall(r'\b((?:19|20|18)\d\d)\b', query)
         entities.extend(years)
 
-        # Extract currency codes and specific items
-        currency_codes = re.findall(r'\b([A-Z]{3})\b', query)  # 3-letter currency codes
+        # Date patterns for common formats (MM/DD/YYYY, etc.)
+        date_patterns = [
+            r'\b(\d{1,2}/\d{1,2}/\d{2,4})\b',  # MM/DD/YYYY or DD/MM/YYYY
+            r'\b(\d{1,2}-\d{1,2}-\d{2,4})\b',  # MM-DD-YYYY or DD-MM-YYYY
+            r'\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b'  # January 1st, 2020
+        ]
 
-        # Filter currency codes - only include known ones
-        known_currencies = {'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD', 'BAM'}
+        for pattern in date_patterns:
+            dates = re.findall(pattern, query, re.IGNORECASE)
+            entities.extend(dates)
+
+        # 4. Extract currency codes and symbols with amounts
+        # Match 3-letter currency codes
+        currency_codes = re.findall(r'\b([A-Z]{3})\b', query)
+
+        # Known currency codes list (expanded)
+        known_currencies = {
+            'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD', 'CNY', 'CNH',
+            'HKD', 'SGD', 'SEK', 'NOK', 'DKK', 'RUB', 'TRY', 'ZAR', 'BRL', 'MXN',
+            'INR', 'KRW', 'THB', 'IDR', 'MYR', 'PHP', 'PLN', 'CZK', 'HUF', 'ILS',
+            'QAR', 'SAR', 'AED', 'BAM'  # Added BAM (Bosnian Convertible Mark)
+        }
+
+        # Filter currency codes to known ones
         filtered_currencies = [code for code in currency_codes if code in known_currencies]
         entities.extend(filtered_currencies)
 
-        return entities
+        # 5. Extract currency symbols with amounts
+        currency_amounts = re.findall(r'[$€£¥₹₽₩₺₴₾₼₸฿₫₲₪₿¢](\d+(?:[.,]\d+)?)', query)
+        if currency_amounts:
+            for amount in currency_amounts:
+                currency_entity = f"currency {amount}"
+                entities.append(currency_entity)
+
+        # 6. Extract numeric ranges and measurements
+        measurements = re.findall(r'(\d+(?:\.\d+)?\s*(?:kg|g|lbs?|tons?|m|km|cm|mm|ft|feet|inches?|mi|miles|km/h|mph|°C|°F|GB|MB|TB|KB|kW|MW|GW))', query, re.IGNORECASE)
+        entities.extend(measurements)
+
+        # 7. Extract version numbers and product identifiers
+        versions = re.findall(r'\b(v\d+(?:\.\d+)*|\d+(?:\.\d+)+|[A-Za-z]+\d+(?:-[A-Za-z0-9]+)?)\b', query)
+
+        # Filter version numbers to avoid including regular numbers
+        for v in versions:
+            # Only include if it has a decimal point or starts with 'v' or ends with non-numeric character
+            if '.' in v or v.startswith('v') or re.search(r'[A-Za-z]', v):
+                entities.append(v)
+
+        # 8. Extract common entity types by pattern
+        entity_patterns = {
+            'email': r'\b([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\b',
+            'url': r'\b((?:https?://)?(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?)\b',
+            'ip_address': r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b',
+            'hashtag': r'(#[a-zA-Z0-9_]+)',
+        }
+
+        for entity_type, pattern in entity_patterns.items():
+            matches = re.findall(pattern, query)
+            for match in matches:
+                # Don't add empty matches or very short ones
+                if match and len(match) > 3:
+                    entities.append(match)
+
+        # 9. Extract potential named entities following specific words
+        # This catches things like "in Paris" or "about Napoleon"
+        context_entities = re.findall(r'(?:about|in|at|from|by|of|for)\s+([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)*)', query)
+        for entity in context_entities:
+            if entity not in entities and len(entity) > 2:
+                entities.append(entity)
+
+        # 10. Extract industry-specific entities
+        # Technical terms like programming languages, file formats, algorithms
+        tech_terms = re.findall(r'\b(JSON|XML|HTML|CSS|API|SQL|Python|JavaScript|Go|Rust|React|Angular|Vue|BERT|GPT|REST|HTTP|HTTPS)\b', query)
+        entities.extend([term for term in tech_terms if term not in entities])
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_entities = []
+        for entity in entities:
+            # Normalize for comparison but keep original for return
+            normalized = entity.lower()
+            if normalized not in seen:
+                seen.add(normalized)
+                unique_entities.append(entity)
+
+        return unique_entities
 
     def _extract_from_fractal_memory(self, query: str) -> Optional[str]:
         """

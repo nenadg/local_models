@@ -45,6 +45,7 @@ from pattern_matching_utils import (
 from batch_utils import tensor_batch_processing
 from web_knowledge_enhancer import WebKnowledgeEnhancer
 
+
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
     "role": "system",
@@ -2958,6 +2959,7 @@ class TinyLlamaChat:
         try:
             from prompt_toolkit import prompt
             from prompt_toolkit.history import FileHistory
+            from prompt_toolkit.styles import Style
             import os
         except ImportError:
             print("prompt_toolkit is not installed. Install it with 'pip install prompt_toolkit'")
@@ -2966,6 +2968,8 @@ class TinyLlamaChat:
             # Fallback to previous implementation if prompt_toolkit is not available
             print(prompt)
             print("(Enter your text, paste multiline content. Press Ctrl+D or submit an empty line to finish)")
+
+
 
             try:
                 lines = []
@@ -2987,10 +2991,17 @@ class TinyLlamaChat:
         # Create a history file for persistent input history
         history_file = os.path.join(self.memory_dir, '.multiline_history')
 
-        print(prompt)
         print("(Multiline input mode. Use Ctrl+D or Alt+Enter to submit, Ctrl+C to cancel)")
 
         try:
+            style = Style.from_dict({
+                # The empty string key '' is the “default” token,
+                # so anything you type (that isn’t otherwise styled) gets this color.
+                '': 'fg:#0BB8E2',
+                # If you also want your continuation dots to be the same color:
+                'prompt.continuation': 'fg:#ADD8E6',
+            })
+
             # Use prompt_toolkit for advanced multiline input
             user_input = prompt(
                 '',  # No initial prompt inside the input area
@@ -2999,8 +3010,8 @@ class TinyLlamaChat:
                 history=FileHistory(history_file),  # Persistent history
                 complete_while_typing=True,  # Enable autocompletion
                 enable_open_in_editor=True,  # Allow opening in external editor with F4
+                style=style
             )
-
             # Trim trailing whitespace if needed
             user_input = user_input.rstrip()
 
@@ -3054,7 +3065,7 @@ def main():
                         help="Confidence threshold below which to trigger web search")
     parser.add_argument("--test-fractal", action="store_true", default=False,
                     help="Run fractal embedding diagnostics")
-
+    
     args = parser.parse_args()
 
 
@@ -3078,7 +3089,6 @@ def main():
     )
 
     try:
-
         # If web knowledge is enabled, configure the search engine
         if args.web_knowledge and chat.web_enhancer:
             chat.web_enhancer.search_engine = args.search_engine
