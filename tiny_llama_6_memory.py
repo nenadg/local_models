@@ -471,10 +471,7 @@ class TinyLlamaChat:
 
         return config
 
-    def speculative_decode(self,
-                         input_ids: torch.Tensor,
-                         attention_mask: torch.Tensor,
-                         num_draft_tokens: int = 5) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def speculative_decode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, num_draft_tokens: int = 5) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Implement speculative decoding with loop detection:
         1. Generate tokens with the smaller draft model
@@ -597,7 +594,6 @@ class TinyLlamaChat:
         """Fixed implementation of speculative decoding with streaming and accurate metrics capture"""
 
         try:
-
             with torch.no_grad():
                 # Reset confidence metrics for a new generation
                 self.confidence_metrics.reset()
@@ -1187,8 +1183,6 @@ class TinyLlamaChat:
         return f"[{bar}] {label}: {value:.2f}"
 
     # This patch fixes the sharpening metrics display issue in tiny_llama_6_memory.py
-    # Add this to the print_generation_metrics function in the TinyLlamaChat class
-
     def print_generation_metrics(self, metrics, generation_time, response_tokens, show_all_metrics=False):
         """
         Print generation metrics with sharpening information if available.
@@ -1284,43 +1278,6 @@ class TinyLlamaChat:
         )
         if memories_added > 0:
             print(f"[Memory] Added {memories_added} new memories")
-
-    def add_sharpening_arguments(parser):
-        """Add sharpening-related arguments to the parser"""
-        sharpening_group = parser.add_argument_group('Sharpening Options')
-        sharpening_group.add_argument("--enable-sharpening", action="store_true", default=True,
-                            help="Enable vector space and confidence sharpening")
-        sharpening_group.add_argument("--confidence-sharpening", type=float, default=1.5,
-                            help="Sharpening factor for confidence metrics (1.0-2.0)")
-        sharpening_group.add_argument("--vector-sharpening", type=float, default=0.3,
-                            help="Sharpening factor for vector embeddings (0.0-1.0)")
-        return parser
-
-    def initialize_components_with_sharpening(args):
-        """Initialize components with sharpening support"""
-        # Create enhanced confidence metrics
-        confidence_metrics = EnhancedConfidenceMetrics(
-            sharpening_factor=args.confidence_sharpening
-        )
-
-        # Create enhanced response filter
-        response_filter = ResponseFilter(
-            confidence_threshold=args.confidence_threshold,
-            sharpening_factor=args.confidence_sharpening,
-            question_classifier=self.question_classifier
-        )
-
-        # Create enhanced memory manager
-        memory_manager = MemoryManager(
-            memory_dir=args.memory_dir,
-            device=args.device,
-            auto_memorize=not args.no_memory,
-            sharpening_enabled=args.enable_sharpening,
-            sharpening_factor=args.vector_sharpening
-        )
-
-        return confidence_metrics, response_filter, memory_manager
-
 
     def toggle_sharpening(self):
         """Toggle vector space sharpening on/off"""
@@ -1931,344 +1888,6 @@ class TinyLlamaChat:
                 chunks.append('\n'.join(chunk))
 
         return chunks
-    def parse_command_output(self, command: str, output: str) -> List[Dict]:
-        """
-        Parse command output with content-type detection and specialized parsing.
-
-        Args:
-            command: The shell command that was executed
-            output: Command output text
-
-        Returns:
-            List of parsed items with content, type, and attributes
-        """
-        # Detect content type based on command and output patterns
-        if self._is_mapping_data(command, output):
-            return self._parse_mapping_content(command, output)
-        elif self._is_mathematical_content(command, output):
-            return self._parse_mathematical_content(command, output)
-        elif self._is_entity_description(command, output):
-            return self._parse_entity_content(command, output)
-        elif command.startswith("ls") or "find" in command:
-            return self._parse_file_listing(command, output)
-        elif "grep" in command:
-            return self._parse_search_results(command, output)
-        elif any(cmd in command for cmd in ["cat", "head", "tail"]):
-            return self._parse_file_content(command, output)
-        else:
-            return self._parse_general_content(command, output)
-
-    def _is_mapping_data(self, command: str, output: str) -> bool:
-        """Detect if content contains mapping data (like transliteration tables)"""
-        # Look for patterns indicating mapping data
-        mapping_indicators = [
-            r'\w+\s*→\s*\w+',  # word → word
-            r'\w+\s*->\s*\w+',  # word -> word
-            r'mapping|map|translation|conversion',  # Keywords
-            r'table|chart|correspondence'  # Structure indicators
-        ]
-
-        # Check if file is likely a mapping table
-        if any(re.search(pattern, output, re.IGNORECASE) for pattern in mapping_indicators):
-            return True
-
-        # Check if filename indicates mapping
-        if "map" in command or "translation" in command:
-            return True
-
-        return False
-
-    def _is_mathematical_content(self, command: str, output: str) -> bool:
-        """Detect if content contains mathematical information"""
-        # Look for patterns indicating mathematical content
-        math_indicators = [
-            r'=\s*\d+',  # Equations with numbers
-            r'[+\-*/^]',  # Mathematical operators
-            r'log|sin|cos|tan|sqrt',  # Mathematical functions
-            r'theorem|formula|equation',  # Mathematical terms
-            r'∫|∑|∏|√|π|∞|≠|≤|≥'  # Mathematical symbols
-        ]
-
-        # Check file content for math indicators
-        if any(re.search(pattern, output) for pattern in math_indicators):
-            return True
-
-        # Check filename for math indicators
-        math_files = ["math", "calc", "formula", "equation", "log", "algorithm"]
-        if any(term in command.lower() for term in math_files):
-            return True
-
-        return False
-
-    def _is_entity_description(self, command: str, output: str) -> bool:
-        """Detect if content contains entity descriptions"""
-        # Look for patterns indicating entity descriptions
-        entity_indicators = [
-            r'^[A-Z][a-z]+(?:\s+[a-z]+){0,3}(?:\s+[A-Z][a-z]+)*\s+is\s+a',  # Entity is a...
-            r'\([A-Z]{2,}\)',  # Acronyms in parentheses
-            r'species|genus|family|class|order|type',  # Taxonomic terms
-            r'was\s+born|founded|established|discovered|created',  # Historical statements
-            r'located\s+in|found\s+in|native\s+to',  # Location statements
-            r'\d+\s*(?:cm|m|km|ft|year|kg)'  # Measurements/quantitative properties
-        ]
-
-        # Check for entity description patterns
-        if any(re.search(pattern, output) for pattern in entity_indicators):
-            return True
-
-        return False
-
-    def _parse_mapping_content(self, command: str, output: str) -> List[Dict]:
-        """
-        Parse mapping content (transliteration tables, conversion charts, etc.).
-
-        Args:
-            command: The shell command
-            output: Command output text
-
-        Returns:
-            List of parsed mapping entries
-        """
-        parsed_items = []
-
-        # Look for mapping table sections and headings
-        sections = re.split(r'^#\s+(.+)$', output, flags=re.MULTILINE)
-
-        # If no clear sections, treat as a single section
-        if len(sections) <= 1:
-            sections = ["Mappings", output]
-
-        # Process each section
-        for i in range(1, len(sections), 2):
-            if i + 1 >= len(sections):
-                continue
-
-            section_name = sections[i].strip()
-            section_content = sections[i+1].strip()
-
-            # Extract mapping pairs with regex
-            mapping_pattern = r'(\w+(?:\/\w+)?)\s*(?:→|->)\s*([^\s(]+)(?:\s*\(([^)]+)\))?'
-            mappings = re.findall(mapping_pattern, section_content)
-
-            if mappings:
-                # Process mappings in this section
-                mapping_entries = []
-                for source, target, note in mappings:
-                    mapping_entries.append({
-                        "source": source.strip(),
-                        "target": target.strip(),
-                        "note": note.strip() if note else ""
-                    })
-
-                # Create a structured memory item
-                mapping_item = {
-                    "content": f"Mapping table: {section_name}\n" +
-                               "\n".join([f"{m['source']} → {m['target']}{' (' + m['note'] + ')' if m['note'] else ''}"
-                                         for m in mapping_entries]),
-                    "type": "mapping",
-                    "attributes": {
-                        "section": section_name,
-                        "entries": mapping_entries,
-                        "mapping_count": len(mapping_entries)
-                    }
-                }
-                parsed_items.append(mapping_item)
-
-        # Look for examples
-        example_section = re.search(r'(?:Example|Examples):\s*(.+?)(?=$|#)', output, re.DOTALL | re.IGNORECASE)
-        if example_section:
-            example_text = example_section.group(1).strip()
-
-            # Extract example pairs
-            example_pattern = r'"([^"]+)"\s*(?:→|->)\s*"([^"]+)"'
-            examples = re.findall(example_pattern, example_text)
-
-            if examples:
-                example_item = {
-                    "content": "Mapping examples:\n" +
-                               "\n".join([f'"{source}" → "{target}"' for source, target in examples]),
-                    "type": "mapping_example",
-                    "attributes": {
-                        "examples": [{"source": s, "target": t} for s, t in examples]
-                    }
-                }
-                parsed_items.append(example_item)
-
-        return parsed_items
-
-    def _parse_mathematical_content(self, command: str, output: str) -> List[Dict]:
-        """Parse mathematical content (formulas, theorems, etc.)"""
-        parsed_items = []
-
-        # Extract definitions
-        definition_pattern = r'Definition:\s*(.+?)(?=\n\n|\n[A-Z]|$)'
-        definitions = re.findall(definition_pattern, output, re.DOTALL)
-
-        for definition in definitions:
-            definition_text = definition.strip()
-            parsed_items.append({
-                "content": f"Mathematical definition:\n{definition_text}",
-                "type": "mathematical_definition",
-                "attributes": {
-                    "definition_text": definition_text
-                }
-            })
-
-        # Extract formulas and properties
-        formula_patterns = [
-            r'([^.]+?)\s*=\s*([^.\n]+)',  # Simple equations
-            r'([A-Za-z_]+(?:\([^)]+\))?)\s*:\s*([^.\n]+)'  # Named formulas
-        ]
-
-        for pattern in formula_patterns:
-            formulas = re.findall(pattern, output)
-            for left, right in formulas:
-                parsed_items.append({
-                    "content": f"Formula: {left.strip()} = {right.strip()}",
-                    "type": "mathematical_formula",
-                    "attributes": {
-                        "left_side": left.strip(),
-                        "right_side": right.strip()
-                    }
-                })
-
-        # Extract properties
-        property_pattern = r'(?:Property|Properties):\s*(.+?)(?=\n\n|\n[A-Z]|$)'
-        properties_match = re.search(property_pattern, output, re.DOTALL)
-
-        if properties_match:
-            properties_text = properties_match.group(1).strip()
-            property_items = re.split(r'\n\s*[a-z]\)\s*', properties_text)
-
-            for prop in property_items:
-                if prop.strip():
-                    parsed_items.append({
-                        "content": f"Mathematical property:\n{prop.strip()}",
-                        "type": "mathematical_property",
-                        "attributes": {
-                            "property_text": prop.strip()
-                        }
-                    })
-
-        return parsed_items
-
-    def _parse_entity_content(self, command: str, output: str) -> List[Dict]:
-        """Extract entities and their attributes"""
-        parsed_items = []
-
-        # Split into paragraphs for entity extraction
-        paragraphs = re.split(r'\n\n+', output)
-
-        for para in paragraphs:
-            # Look for entity descriptions
-            entity_match = re.search(r'^([A-Z][a-z]+(?: [a-z]+)*)', para)
-            if entity_match:
-                entity_name = entity_match.group(1)
-
-                # Extract attributes with specific patterns
-                attributes = {}
-
-                # Age information
-                age_match = re.search(r'(\d+) years old', para)
-                if age_match:
-                    attributes['age'] = int(age_match.group(1))
-
-                # Height information
-                height_match = re.search(r'(\d+(?:\.\d+)?) m(?:etres)? \((\d+(?:\.\d+)?) f(?:ee)?t\)', para)
-                if height_match:
-                    attributes['height_m'] = float(height_match.group(1))
-                    attributes['height_ft'] = float(height_match.group(2))
-
-                # Location information
-                location_match = re.search(r'in ([A-Z][a-z]+(?: [A-Z][a-z]+)*)', para)
-                if location_match:
-                    attributes['location'] = location_match.group(1)
-
-                # Date information
-                date_match = re.search(r'(?:in|on) (\d{4})', para)
-                if date_match:
-                    attributes['year'] = int(date_match.group(1))
-
-                # Create entity memory with explicit attributes
-                parsed_items.append({
-                    'content': f"Entity: {entity_name}\n" +
-                               "\n".join([f"{attr}: {value}" for attr, value in attributes.items()]),
-                    'type': 'entity',
-                    'attributes': attributes,
-                    'entity_name': entity_name
-                })
-
-        return parsed_items
-
-    # def add_command_to_memory(self, command: str, output: str, error: str = None, output_file: str = None):
-    #     """
-    #     Add shell command output to memory for future reference with enhanced parsing.
-
-    #     Args:
-    #         command: The shell command that was executed
-    #         output: Command output text
-    #         error: Command error text (if any)
-    #         output_file: Path to file where full output was saved (for large outputs)
-    #     """
-    #     # Skip empty outputs
-    #     if not output and not error:
-    #         return 0
-
-    #     # Parse the command output based on command type and content patterns
-    #     parsed_items = self.parse_command_output(command, output)
-
-    #     # Add each parsed item to memory with appropriate type and metadata
-    #     memories_added = 0
-
-    #     if parsed_items:
-    #         for item in parsed_items:
-    #             # Extract memory content and metadata from parsed item
-    #             content = item.get('content', '')
-    #             memory_type = item.get('type', 'general')
-    #             attributes = item.get('attributes', {})
-
-    #             # Add as a structured memory
-    #             added = self.memory_manager.add_memory(
-    #                 self.current_user_id,
-    #                 f"Information from {memory_type}: {command}",
-    #                 content,
-    #                 memory_type=memory_type,
-    #                 attributes=attributes
-    #             )
-    #             memories_added += added
-    #     else:
-    #         # Fallback: add as a general memory if parsing failed
-    #         memory_text = f"Shell command '{command}' was executed."
-
-    #         # Add output file reference if available
-    #         if output_file:
-    #             memory_text += f" Full output saved to: {output_file}"
-
-    #         # Add output preview
-    #         if output:
-    #             if len(output) > 300:
-    #                 summary = output[:300].strip() + "..."
-    #                 memory_text += f"\nOutput: {summary}"
-    #             else:
-    #                 memory_text += f"\nOutput: {output}"
-
-    #         # Add error if present
-    #         if error:
-    #             memory_text += f"\nError: {error}"
-
-    #         # Add as a general memory
-    #         added = self.memory_manager.add_memory(
-    #             self.current_user_id,
-    #             f"Information from command: {command}",
-    #             memory_text
-    #         )
-    #         memories_added += added
-
-    #     if memories_added > 0:
-    #         print(f"[Memory] Added {memories_added} memories from command: '{command}'")
-
-    #     return memories_added
-
 
     def parse_procedural_content(self, content: str, command: str = "") -> List[Dict]:
         """
@@ -2480,10 +2099,7 @@ class TinyLlamaChat:
 
         return examples
 
-
-    def retrieve_command_memories(self, query: str, command_context: Optional[str] = None,
-                             top_k: int = 5, recency_weight: float = 0.3,
-                             include_tabular: bool = True) -> str:
+    def retrieve_command_memories(self, query: str, command_context: Optional[str] = None, top_k: int = 5, recency_weight: float = 0.3, include_tabular: bool = True) -> str:
         """
         Enhanced retrieval specifically optimized for command outputs with better
         relevance scoring and support for tabular data.
@@ -2642,9 +2258,7 @@ class TinyLlamaChat:
         """Check if command context matches a command string."""
         return commands_match(context, command)
 
-    def _score_command_memories(self, results: List[Dict], query: str,
-                              command_context: Optional[str] = None,
-                              recency_weight: float = 0.3) -> List[Dict]:
+    def _score_command_memories(self, results: List[Dict], query: str, command_context: Optional[str] = None, recency_weight: float = 0.3) -> List[Dict]:
         """
         Enhanced scoring for command memories with recency bias.
 
@@ -2782,8 +2396,7 @@ class TinyLlamaChat:
         query_lower = query.lower()
         return any(term in query_lower for term in tabular_terms)
 
-    def _format_command_memories(self, results: List[Dict], query: str,
-                               command_context: Optional[str] = None) -> str:
+    def _format_command_memories(self, results: List[Dict], query: str, command_context: Optional[str] = None) -> str:
         """
         Format command memories for inclusion in the prompt.
 
@@ -2900,7 +2513,6 @@ class TinyLlamaChat:
 
         return False
 
-
     def _extract_command_context(self, query: str) -> Optional[str]:
         """Extract command context from a query."""
         return extract_command_context(query)
@@ -2944,8 +2556,6 @@ class TinyLlamaChat:
             except:
                 pass
 
-
-
     def get_multiline_input(self, prompt):
         """
         Get multiline input with full editing capabilities using prompt_toolkit.
@@ -2966,7 +2576,6 @@ class TinyLlamaChat:
             print("Falling back to simple input method.")
 
             # Fallback to previous implementation if prompt_toolkit is not available
-            print(prompt)
             print("(Enter your text, paste multiline content. Press Ctrl+D or submit an empty line to finish)")
 
 
@@ -3159,7 +2768,7 @@ def main():
         print("  !toggle-web - Toggle web knowledge enhancement on/off")
         print("  !web-stats - Show web search statistics")
         print("  !search-engine: [engine] - Set search engine (duckduckgo/google)")
-        print("\n")
+
         print("\nIf the model expresses uncertainty, you can ask it to speculate")
         print("by saying 'please continue anyway' or 'please speculate'")
 
