@@ -12,6 +12,7 @@ import tty
 import signal
 import argparse
 import select
+import tty
 
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -43,7 +44,6 @@ from pattern_matching_utils import (
 
 from batch_utils import tensor_batch_processing
 from web_knowledge_enhancer import WebKnowledgeEnhancer
-from keyboard_interrupt import KeyboardInterruptHandler
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -76,8 +76,6 @@ class TinyLlamaChat:
              ):
         self.model_name = model_name
         self.memory_dir = memory_dir
-
-        self.interrupt_handler = KeyboardInterruptHandler()
         self.stop_event = threading.Event()
 
         self.mcp_handler = MCPHandler(output_dir=output_dir, allow_shell_commands=True)
@@ -622,15 +620,18 @@ class TinyLlamaChat:
 
                 while remaining_tokens > 0:
                     try:
-                        if self.stop_event.is_set():
-                            print("\n[Generation stopped by user]")
+                        if self.stop_event.is_set(): # or self.interrupt_handler.check():
+                            print("\n[Generation stopped by interrupt signal]")
                             try:
-                                # Ensure all tensors are on the same device
+                                # Clean up
                                 if torch.cuda.is_available():
                                     torch.cuda.empty_cache()
+                                # End the streamer
+                                self.stop_event.clear()  # Reset the event
+                                streamer.end()
                             except Exception as e:
                                 print(f"Error during interrupt cleanup: {e}")
-                            break
+                            return
 
 
                         # Try speculative decoding
@@ -733,84 +734,68 @@ class TinyLlamaChat:
             except Exception as specific_e:
                 print(f"Error ending streamer: {specific_e}")
 
-    def _interrupt_handler(self, signum, frame):
-        """SIGINT handler - sets the stop event"""
-        self.stop_event.set()
-        print("\n[Generation interrupted by user (Ctrl+C)]")
-
-        # Make sure we handle cleanup properly
-        try:
-            # Try to clear CUDA cache to avoid device mismatch errors
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception as e:
-            print(f"Error during interrupt cleanup: {e}")
-
     def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None, use_web_search=True):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
-
-        self.stop_event.clear()  # Reset the event
-        signal.signal(signal.SIGINT, self._interrupt_handler)
-
-        # heatmap = TerminalHeatmap(self.tokenizer, use_background=False)
-        heatmap = EnhancedHeatmap(self.tokenizer, use_background=False, window_size=3)
-        token_confidences = []  # To store confidence scores for each token
-
-        # Reset confidence metrics
-        self.confidence_metrics.reset()
-
-        if messages and messages[-1]["role"] == "user":
-            user_input = messages[-1]["content"]
-            cleaned_input, user_commands = self.mcp_handler.extract_mcp_from_user_input(user_input)
-
-            if cleaned_input == "_COMMAND_ONLY_":
-                # This was just a shell command, don't generate a response
-                return ""
-
-            # Replace the original user input with cleaned version
-            if user_input != cleaned_input:
-                messages[-1]["content"] = cleaned_input
-
-            # Process any immediate user commands
-            if user_commands:
-                # Process any shell command outputs and add to memory
-                for cmd, details in user_commands.items():
-                    if details.get("action") == "shell_command":
-                        # Add the command output to memory
-                        self.add_command_to_memory(
-                            command=cmd,
-                            output=details.get("output", ""),
-                            error=details.get("error", ""),
-                            output_file=details.get("output_file")
-                        )
-
-                # Process file save commands
-                file_commands = {file: cmd for file, cmd in user_commands.items()
-                                if cmd.get("action") == "save_response"}
-                successful = [file for file, status in file_commands.items()]
-                if successful:
-                    files_info = ", ".join(successful)
-                    print(f"[User content saved to: {files_info}]")
-
-        # Create enhanced prompt with knowledge
-        enhanced_messages = self.create_prompt_with_knowledge(messages, use_web_search)
-
-        # Apply chat template
-        prompt = self.tokenizer.apply_chat_template(
-            enhanced_messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-
-        # Encode the prompt
-        try:
-            input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
-        except Exception as e:
-            print(f"Error encoding prompt: {e}")
-            return "Error preparing response. Please try again with a simpler query."
-
         # We only support streaming now, simplifies the code
         try:
+            # heatmap = TerminalHeatmap(self.tokenizer, use_background=False)
+            heatmap = EnhancedHeatmap(self.tokenizer, use_background=False, window_size=3)
+            token_confidences = []  # To store confidence scores for each token
+
+            # Reset confidence metrics
+            self.confidence_metrics.reset()
+
+            if messages and messages[-1]["role"] == "user":
+                user_input = messages[-1]["content"]
+                cleaned_input, user_commands = self.mcp_handler.extract_mcp_from_user_input(user_input)
+
+                if cleaned_input == "_COMMAND_ONLY_":
+                    # This was just a shell command, don't generate a response
+                    return ""
+
+                # Replace the original user input with cleaned version
+                if user_input != cleaned_input:
+                    messages[-1]["content"] = cleaned_input
+
+                # Process any immediate user commands
+                if user_commands:
+                    # Process any shell command outputs and add to memory
+                    for cmd, details in user_commands.items():
+                        if details.get("action") == "shell_command":
+                            # Add the command output to memory
+                            self.add_command_to_memory(
+                                command=cmd,
+                                output=details.get("output", ""),
+                                error=details.get("error", ""),
+                                output_file=details.get("output_file")
+                            )
+
+                    # Process file save commands
+                    file_commands = {file: cmd for file, cmd in user_commands.items()
+                                    if cmd.get("action") == "save_response"}
+                    successful = [file for file, status in file_commands.items()]
+                    if successful:
+                        files_info = ", ".join(successful)
+                        print(f"[User content saved to: {files_info}]")
+
+            # Create enhanced prompt with knowledge
+            enhanced_messages = self.create_prompt_with_knowledge(messages, use_web_search)
+
+            # Apply chat template
+            prompt = self.tokenizer.apply_chat_template(
+                enhanced_messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+
+            # Encode the prompt
+            try:
+                input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+            except Exception as e:
+                print(f"Error encoding prompt: {e}")
+                return "Error preparing response. Please try again with a simpler query."
+
+
             # Configure streamer
             streamer = TextIteratorStreamer(
                 self.tokenizer,
@@ -842,6 +827,10 @@ class TinyLlamaChat:
             thread.daemon = True
             thread.start()
 
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
+            tty.setraw(fd)
+
             # Initialize response
             complete_response = ""
             token_buffer = ""
@@ -861,7 +850,24 @@ class TinyLlamaChat:
             user_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
 
             try:
-                for token in streamer:
+                response_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+
+                while True:
+                    token = next(iter(streamer), None)
+
+                    if token is None:
+                        # No more tokens - generation complete
+                        break
+
+                    if select.select([sys.stdin], [], [], 0)[0]:
+                        c = sys.stdin.read(1)
+                        if c == '\x03':  # Ctrl+C
+                            self.stop_event.set()
+
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            break
+
                     tokens_received += 1
 
                     # Process token for MCP
@@ -983,6 +989,7 @@ class TinyLlamaChat:
 
                                 return self.mcp_handler.finalize_streaming(complete_response)
 
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                 # Handle any remaining tokens
                 if token_buffer:
                     print(token_buffer, end="", flush=True)
@@ -1024,15 +1031,6 @@ class TinyLlamaChat:
 
                 return complete_response
 
-            except KeyboardInterrupt:
-                # Make sure we properly handle CTRL+C
-                self.stop_event.set()
-                print("\n[Generation stopped by user (Ctrl+C)]")
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                # Give the thread a moment to clean up
-                time.sleep(0.5)
-                
             except Exception as e:
                 print(f"\nError during token streaming: {str(e)}")
                 if complete_response:
@@ -1046,7 +1044,6 @@ class TinyLlamaChat:
                 return "Error generating response. Please try again."
 
             self.last_token_confidences = token_confidences
-
 
         except Exception as e:
             print(f"\nStreaming setup failed: {e}")
@@ -1065,7 +1062,7 @@ class TinyLlamaChat:
                 self.confidence_metrics.add_token_score(dummy_logits, 0)
 
             self.resource_manager.clear_cache()
-            signal.signal(signal.SIGINT, signal.default_int_handler)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
     def ensure_metrics(self, response_length=None):
@@ -2509,6 +2506,7 @@ class TinyLlamaChat:
         """Release all resources properly."""
 
         try:
+            # self.uninstall_global_kb_handler()
             # Unload models
             if hasattr(self, 'draft_model') and self.draft_model is not None:
                 self.resource_manager.unload_model(self.draft_model)
@@ -2921,8 +2919,10 @@ def main():
                 # Add timestamp for model output
                 response_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
 
+                chat.stop_event.clear()  # Reset the event
+
                 # If no system command matched, generate response using the model
-                print(f"\n{response_time} Assistant: ", end='', flush=True)
+                print(f"\n{response_time} Assistant: \n", end='', flush=True)
 
                 # Generate response
                 response = chat.generate_response(
