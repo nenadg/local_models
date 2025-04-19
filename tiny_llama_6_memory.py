@@ -5,12 +5,11 @@ import argparse
 import time
 import sys
 import threading
-import signal
 import math
 import re
 import termios
 import tty
-
+import signal
 import argparse
 
 from typing import List, Dict, Any, Optional, Tuple
@@ -25,7 +24,6 @@ from history import setup_readline_history
 
 from resource_manager import ResourceManager
 
-from keyboard_interrupt import KeyboardInterruptHandler
 from mcp_handler import MCPHandler
 from enhanced_confidence_metrics import EnhancedConfidenceMetrics, TokenProbabilityCaptureProcessor
 from response_filter import ResponseFilter
@@ -77,8 +75,9 @@ class TinyLlamaChat:
              ):
         self.model_name = model_name
         self.memory_dir = memory_dir
-        self.interrupt_handler = KeyboardInterruptHandler()
+
         self.stop_event = threading.Event()
+
         self.mcp_handler = MCPHandler(output_dir=output_dir, allow_shell_commands=True)
         self.confidence_metrics = EnhancedConfidenceMetrics(sharpening_factor=sharpening_factor)
 
@@ -183,19 +182,6 @@ class TinyLlamaChat:
         self.knowledge_base = self.load_knowledge()
         self.conversation_history = []
         self.system_message = DEFAULT_SYSTEM_MESSAGE
-
-    def _interrupt_handler(self, signum, frame):
-        """SIGINT handler - sets the stop event"""
-        self.stop_event.set()
-        print("\n[Generation interrupted by user (Ctrl+C)]")
-
-        # Make sure we handle cleanup properly
-        try:
-            # Try to clear CUDA cache to avoid device mismatch errors
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception as e:
-            print(f"Error during interrupt cleanup: {e}")
 
     def create_draft_model(self):
         """Create a smaller version of the model by skipping layers"""
@@ -633,8 +619,6 @@ class TinyLlamaChat:
 
                 while remaining_tokens > 0:
                     try:
-
-                        # Check stop event
                         if self.stop_event.is_set():
                             print("\n[Generation stopped by user]")
                             try:
@@ -644,6 +628,7 @@ class TinyLlamaChat:
                             except Exception as e:
                                 print(f"Error during interrupt cleanup: {e}")
                             break
+
 
                         # Try speculative decoding
                         if self.draft_model is not None and turbo_mode:
@@ -743,11 +728,24 @@ class TinyLlamaChat:
             except Exception as specific_e:
                 print(f"Error ending streamer: {specific_e}")
 
+    def _interrupt_handler(self, signum, frame):
+        """SIGINT handler - sets the stop event"""
+        self.stop_event.set()
+        print("\n[Generation interrupted by user (Ctrl+C)]")
+
+        # Make sure we handle cleanup properly
+        try:
+            # Try to clear CUDA cache to avoid device mismatch errors
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"Error during interrupt cleanup: {e}")
+
+
     def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None, use_web_search=True):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
 
         self.stop_event.clear()  # Reset the event
-        # Install handler only in main thread
         signal.signal(signal.SIGINT, self._interrupt_handler)
 
         # heatmap = TerminalHeatmap(self.tokenizer, use_background=False)
@@ -1079,6 +1077,7 @@ class TinyLlamaChat:
 
             self.resource_manager.clear_cache()
             signal.signal(signal.SIGINT, signal.default_int_handler)
+
 
     def ensure_metrics(self, response_length=None):
         """
@@ -2784,6 +2783,10 @@ def main():
             # Get timestamp for user input
             current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
             user_input = chat.get_multiline_input(f"\n{current_time} You: ")
+
+            if user_input == "":
+                chat.stop_event.set()
+                continue
 
             # Handle special commands
             if user_input.lower() == 'exit':
