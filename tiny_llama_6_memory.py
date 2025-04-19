@@ -43,7 +43,7 @@ from pattern_matching_utils import (
 
 from batch_utils import tensor_batch_processing
 from web_knowledge_enhancer import WebKnowledgeEnhancer
-
+from keyboard_interrupt import KeyboardInterruptHandler
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -77,6 +77,7 @@ class TinyLlamaChat:
         self.model_name = model_name
         self.memory_dir = memory_dir
 
+        self.interrupt_handler = KeyboardInterruptHandler()
         self.stop_event = threading.Event()
 
         self.mcp_handler = MCPHandler(output_dir=output_dir, allow_shell_commands=True)
@@ -737,9 +738,13 @@ class TinyLlamaChat:
         self.stop_event.set()
         print("\n[Generation interrupted by user (Ctrl+C)]")
 
-        #raise KeyboardInterrupt("User requested stop")
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Make sure we handle cleanup properly
+        try:
+            # Try to clear CUDA cache to avoid device mismatch errors
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"Error during interrupt cleanup: {e}")
 
     def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None, use_web_search=True):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
@@ -1019,6 +1024,15 @@ class TinyLlamaChat:
 
                 return complete_response
 
+            except KeyboardInterrupt:
+                # Make sure we properly handle CTRL+C
+                self.stop_event.set()
+                print("\n[Generation stopped by user (Ctrl+C)]")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                # Give the thread a moment to clean up
+                time.sleep(0.5)
+                
             except Exception as e:
                 print(f"\nError during token streaming: {str(e)}")
                 if complete_response:
