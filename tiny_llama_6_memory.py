@@ -11,6 +11,7 @@ import termios
 import tty
 import signal
 import argparse
+import select
 
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -579,6 +580,7 @@ class TinyLlamaChat:
     def generate_speculative(self, input_ids, streamer, max_new_tokens, generation_config, turbo_mode):
         """Fixed implementation of speculative decoding with streaming and accurate metrics capture"""
 
+
         try:
             with torch.no_grad():
                 # Reset confidence metrics for a new generation
@@ -677,6 +679,8 @@ class TinyLlamaChat:
                         else:
                             # Exit to standard generation
                             break
+
+
                     except RuntimeError as e:
                         # Handle device mismatch errors specifically
                         if "expected all tensors to be on the same device" in str(e):
@@ -733,14 +737,9 @@ class TinyLlamaChat:
         self.stop_event.set()
         print("\n[Generation interrupted by user (Ctrl+C)]")
 
-        # Make sure we handle cleanup properly
-        try:
-            # Try to clear CUDA cache to avoid device mismatch errors
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception as e:
-            print(f"Error during interrupt cleanup: {e}")
-
+        #raise KeyboardInterrupt("User requested stop")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None, use_web_search=True):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
@@ -833,231 +832,207 @@ class TinyLlamaChat:
                 user_query = messages[-1]["content"]
                 generation_config = self.get_domain_specific_generation_config(user_query, generation_config)
 
+            # Start generation in background
+            thread = Thread(target=self.generate_speculative, args=(input_ids, streamer, max_new_tokens, generation_config, turbo_mode))
+            thread.daemon = True
+            thread.start()
+
+            # Initialize response
+            complete_response = ""
+            token_buffer = ""
+            mcp_buffer = ""    # For accumulating MCP commands
+
+            # Settings for token display
+            last_print_time = time.time()
+            force_display_time = 0.05  # 50ms max wait between displays
+            max_buffer_size = 16  # Reasonable buffer size
+            stop_sequences = ["<|user|>", "<|assistant|>"]
+
+            # Variables to track streaming state
+            tokens_received = 0
+            early_confidence_check_threshold = 10  # Check confidence after this many tokens
+            low_confidence_detected = False
+            fallback_message_streamed = False
+            user_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
+
             try:
-                # Start generation in background
-                thread = Thread(target=self.generate_speculative, args=(input_ids, streamer, max_new_tokens, generation_config, turbo_mode))
-                thread.daemon = True
-                thread.start()
+                for token in streamer:
+                    tokens_received += 1
 
-                # Initialize response
-                complete_response = ""
-                token_buffer = ""
-                mcp_buffer = ""    # For accumulating MCP commands
+                    # Process token for MCP
+                    display_token, mcp_buffer = self.mcp_handler.process_streaming_token(token, mcp_buffer)
 
-                # Settings for token display
-                last_print_time = time.time()
-                force_display_time = 0.05  # 50ms max wait between displays
-                max_buffer_size = 16  # Reasonable buffer size
-                stop_sequences = ["<|user|>", "<|assistant|>"]
+                    # Add token to response
+                    complete_response += token
 
-                # Variables to track streaming state
-                tokens_received = 0
-                early_confidence_check_threshold = 10  # Check confidence after this many tokens
-                low_confidence_detected = False
-                fallback_message_streamed = False
-                user_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
-
-                try:
-                    for token in streamer:
-                        # Process stop event more gracefully
-                        if self.stop_event.is_set():
-                            # Add current token to response, but stop getting more
-                            print(token, end="", flush=True)
-                            complete_response += token
-                            try:
-                                # Ensure all tensors are on the same device
-                                if torch.cuda.is_available():
-                                    torch.cuda.empty_cache()
-                            except Exception as e:
-                                print(f"Error during interrupt cleanup: {e}")
-                            break
-
-                        tokens_received += 1
-
-                        # Process token for MCP
-                        display_token, mcp_buffer = self.mcp_handler.process_streaming_token(token, mcp_buffer)
-
-                        # Add token to response
-                        complete_response += token
-
-                        # Get confidence for latest token
-                        if self.confidence_metrics.token_probabilities:
-                            latest_confidence = self.confidence_metrics.token_probabilities[-1]
+                    # Get confidence for latest token
+                    if self.confidence_metrics.token_probabilities:
+                        latest_confidence = self.confidence_metrics.token_probabilities[-1]
+                        token_confidences.append(latest_confidence)
+                    elif self.confidence_metrics.original_token_probabilities:
+                        # Fallback to original probabilities if sharpened not available
+                        latest_idx = len(self.confidence_metrics.original_token_probabilities) - 1
+                        if latest_idx >= 0:
+                            latest_confidence = self.confidence_metrics.original_token_probabilities[latest_idx]
                             token_confidences.append(latest_confidence)
-                        elif self.confidence_metrics.original_token_probabilities:
-                            # Fallback to original probabilities if sharpened not available
-                            latest_idx = len(self.confidence_metrics.original_token_probabilities) - 1
-                            if latest_idx >= 0:
-                                latest_confidence = self.confidence_metrics.original_token_probabilities[latest_idx]
-                                token_confidences.append(latest_confidence)
-                            else:
-                                # Default if no confidence available
-                                latest_confidence = 0.8
-                                token_confidences.append(latest_confidence)
                         else:
                             # Default if no confidence available
                             latest_confidence = 0.8
                             token_confidences.append(latest_confidence)
+                    else:
+                        # Default if no confidence available
+                        latest_confidence = 0.8
+                        token_confidences.append(latest_confidence)
 
-                        # Check confidence early enough to stop generation if needed
-                        # But only if we have a response filter and after receiving some tokens
-                        if (response_filter is not None and
-                            not low_confidence_detected and
-                            tokens_received >= early_confidence_check_threshold):
+                    # Check confidence early enough to stop generation if needed
+                    # But only if we have a response filter and after receiving some tokens
+                    if (response_filter is not None and not low_confidence_detected and tokens_received >= early_confidence_check_threshold):
 
-                            # Get current metrics
-                            current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=self.memory_manager.sharpening_enabled)
+                        # Get current metrics
+                        current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=self.memory_manager.sharpening_enabled)
 
-                            # Should we show fallback instead of continuing?
-                            if response_filter.should_stream_fallback(current_metrics, user_query):
-                                # Set flag to avoid checking again
-                                low_confidence_detected = True
+                        # Should we show fallback instead of continuing?
+                        if response_filter.should_stream_fallback(current_metrics, user_query):
+                            # Set flag to avoid checking again
+                            low_confidence_detected = True
 
-                                # Set the stop event to interrupt generation
-                                self.stop_event.set()
+                            # Set the stop event to interrupt generation
+                            self.stop_event.set()
 
-                                # Get fallback message
-                                fallback = response_filter.get_streamable_fallback(user_query)
+                            # Get fallback message
+                            fallback = response_filter.get_streamable_fallback(user_query)
 
-                                # Stream the fallback message with variable delays to mimic LLM output
-                                # Break into words for more natural streaming
-                                fallback_words = fallback.split()
+                            # Stream the fallback message with variable delays to mimic LLM output
+                            # Break into words for more natural streaming
+                            fallback_words = fallback.split()
 
-                                for i, word in enumerate(fallback_words):
-                                    # Print the word
-                                    print(word, end="", flush=True)
+                            for i, word in enumerate(fallback_words):
+                                # Print the word
+                                print(word, end="", flush=True)
 
-                                    # Add space after word (except for last word)
-                                    if i < len(fallback_words) - 1:
-                                        print(" ", end="", flush=True)
+                                # Add space after word (except for last word)
+                                if i < len(fallback_words) - 1:
+                                    print(" ", end="", flush=True)
 
-                                    # Variable delays between words
-                                    # Occasional longer pauses at punctuation or every few words
-                                    if i > 0 and word[-1] in ".,:;?!":
-                                        time.sleep(0.3)  # Longer pause after punctuation
-                                    elif i % 3 == 0:
-                                        time.sleep(0.15)  # Medium pause every few words
-                                    else:
-                                        time.sleep(0.07)  # Regular pause between words
-
-                                # Mark fallback as streamed
-                                fallback_message_streamed = True
-
-                                # Update complete response with fallback
-                                complete_response = fallback
-                                break
-
-                        # Only add displayable tokens to the buffer
-                        if display_token and not fallback_message_streamed:
-                            if show_confidence:
-                                colored_token = heatmap.colorize_streaming_token(
-                                    display_token, latest_confidence)
-                                token_buffer += colored_token
-                            else:
-                                # Normal display without colorization
-                                token_buffer += display_token
-
-                        # Check timing
-                        current_time = time.time()
-                        time_since_print = current_time - last_print_time
-
-                        # Print conditions
-                        if (len(token_buffer) >= max_buffer_size or time_since_print >= force_display_time) and token_buffer:
-                            print(token_buffer, end="", flush=True)
-                            token_buffer = ""
-                            last_print_time = current_time
-
-                        # Check for stop sequences
-                        if len(token_buffer) > 5:
-                            for stop_seq in stop_sequences:
-                                if stop_seq in token_buffer:
-                                    token_buffer = token_buffer.split(stop_seq)[0]
-                                    if token_buffer:
-                                        print(token_buffer, end="", flush=True)
-                                    complete_response = complete_response.split(stop_seq)[0]
-
-                                    # ENSURE WE HAVE CONFIDENCE METRICS
-                                    if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
-                                        for i in range(5):
-                                            dummy_logits = torch.zeros(self.tokenizer.vocab_size, device=self.device)
-                                            # Generate varied values from 0.5 to 0.9
-                                            prob_value = 0.5 + (i * 0.1)
-                                            max_index = i % self.tokenizer.vocab_size
-
-                                            # Create a probability distribution with the max at our chosen token
-                                            dummy_logits.fill_(0.1 / self.tokenizer.vocab_size)  # Low baseline
-                                            dummy_logits[max_index] = prob_value  # Higher probability for this token
-
-                                            # Convert to logits
-                                            dummy_logits = torch.log(dummy_logits + 1e-10)
-
-                                            self.confidence_metrics.add_token_score(dummy_logits, max_index)
-
-                                    return self.mcp_handler.finalize_streaming(complete_response)
-
-                    # Handle any remaining tokens
-                    if token_buffer:
-                        print(token_buffer, end="", flush=True)
-
-                    # ALWAYS ENSURE WE HAVE CONFIDENCE METRICS BEFORE RETURNING
-                    if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
-                        response_length = len(complete_response.split())
-                        num_tokens = max(5, min(response_length, 10))
-
-                        for i in range(num_tokens):
-                            dummy_logits = torch.zeros(self.tokenizer.vocab_size)
-                            # Use different confidence values based on response quality
-                            confidence_val = 8.0 + (i % 3)  # Vary between 8-10
-                            dummy_logits[i % 100] = confidence_val
-                            self.confidence_metrics.add_token_score(dummy_logits, i % 100)
-
-                    # Get domain information if available
-                    domain = None
-                    settings = None
-                    if hasattr(self, 'question_classifier') and messages[-1]["role"] == "user":
-                        user_query = messages[-1]["content"]
-                        settings = self.question_classifier.get_domain_settings(user_query)
-                        domain = settings['domain']
-
-                    # Apply post-processing to clean up the response
-                    complete_response = self.post_process_response(complete_response, user_query, domain)
-
-                    # Finalize MCP processing
-                    complete_response = self.mcp_handler.finalize_streaming(complete_response)
-
-                    if len(user_commands) > 0:
-                        for filename, cmd in user_commands.items():
-                            if cmd.get("action") == "save_response":
-                                success = self.mcp_handler.save_response_to_file(complete_response, filename)
-                                if success:
-                                    print(f"[Response saved to: {filename}]")
+                                # Variable delays between words
+                                # Occasional longer pauses at punctuation or every few words
+                                if i > 0 and word[-1] in ".,:;?!":
+                                    time.sleep(0.3)  # Longer pause after punctuation
+                                elif i % 3 == 0:
+                                    time.sleep(0.15)  # Medium pause every few words
                                 else:
-                                    print(f"[Failed to save response to: {filename}]")
+                                    time.sleep(0.07)  # Regular pause between words
 
-                    return complete_response
+                            # Mark fallback as streamed
+                            fallback_message_streamed = True
 
-                except Exception as e:
-                    print(f"\nError during token streaming: {str(e)}")
-                    if complete_response:
-                        # Even with errors, make sure we have metrics
-                        if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
-                            dummy_logits = torch.zeros(self.tokenizer.vocab_size)
-                            dummy_logits[0] = 5.0  # Medium confidence for error cases
-                            self.confidence_metrics.add_token_score(dummy_logits, 0)
+                            # Update complete response with fallback
+                            complete_response = fallback
+                            break
 
-                        return self.mcp_handler.finalize_streaming(complete_response)
-                    return "Error generating response. Please try again."
+                    # Only add displayable tokens to the buffer
+                    if display_token and not fallback_message_streamed:
+                        if show_confidence:
+                            colored_token = heatmap.colorize_streaming_token(
+                                display_token, latest_confidence)
+                            token_buffer += colored_token
+                        else:
+                            # Normal display without colorization
+                            token_buffer += display_token
 
-                self.last_token_confidences = token_confidences
+                    # Check timing
+                    current_time = time.time()
+                    time_since_print = current_time - last_print_time
 
-            except KeyboardInterrupt:
-                # Make sure we properly handle CTRL+C
-                self.stop_event.set()
-                print("\n[Generation stopped by user (Ctrl+C)]")
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                # Give the thread a moment to clean up
-                time.sleep(0.5)
+                    # Print conditions
+                    if (len(token_buffer) >= max_buffer_size or time_since_print >= force_display_time) and token_buffer:
+                        print(token_buffer, end="", flush=True)
+                        token_buffer = ""
+                        last_print_time = current_time
+
+                    # Check for stop sequences
+                    if len(token_buffer) > 5:
+                        for stop_seq in stop_sequences:
+                            if stop_seq in token_buffer:
+                                token_buffer = token_buffer.split(stop_seq)[0]
+                                if token_buffer:
+                                    print(token_buffer, end="", flush=True)
+                                complete_response = complete_response.split(stop_seq)[0]
+
+                                # ENSURE WE HAVE CONFIDENCE METRICS
+                                if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
+                                    for i in range(5):
+                                        dummy_logits = torch.zeros(self.tokenizer.vocab_size, device=self.device)
+                                        # Generate varied values from 0.5 to 0.9
+                                        prob_value = 0.5 + (i * 0.1)
+                                        max_index = i % self.tokenizer.vocab_size
+
+                                        # Create a probability distribution with the max at our chosen token
+                                        dummy_logits.fill_(0.1 / self.tokenizer.vocab_size)  # Low baseline
+                                        dummy_logits[max_index] = prob_value  # Higher probability for this token
+
+                                        # Convert to logits
+                                        dummy_logits = torch.log(dummy_logits + 1e-10)
+
+                                        self.confidence_metrics.add_token_score(dummy_logits, max_index)
+
+                                return self.mcp_handler.finalize_streaming(complete_response)
+
+                # Handle any remaining tokens
+                if token_buffer:
+                    print(token_buffer, end="", flush=True)
+
+                # ALWAYS ENSURE WE HAVE CONFIDENCE METRICS BEFORE RETURNING
+                if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
+                    response_length = len(complete_response.split())
+                    num_tokens = max(5, min(response_length, 10))
+
+                    for i in range(num_tokens):
+                        dummy_logits = torch.zeros(self.tokenizer.vocab_size)
+                        # Use different confidence values based on response quality
+                        confidence_val = 8.0 + (i % 3)  # Vary between 8-10
+                        dummy_logits[i % 100] = confidence_val
+                        self.confidence_metrics.add_token_score(dummy_logits, i % 100)
+
+                # Get domain information if available
+                domain = None
+                settings = None
+                if hasattr(self, 'question_classifier') and messages[-1]["role"] == "user":
+                    user_query = messages[-1]["content"]
+                    settings = self.question_classifier.get_domain_settings(user_query)
+                    domain = settings['domain']
+
+                # Apply post-processing to clean up the response
+                complete_response = self.post_process_response(complete_response, user_query, domain)
+
+                # Finalize MCP processing
+                complete_response = self.mcp_handler.finalize_streaming(complete_response)
+
+                if len(user_commands) > 0:
+                    for filename, cmd in user_commands.items():
+                        if cmd.get("action") == "save_response":
+                            success = self.mcp_handler.save_response_to_file(complete_response, filename)
+                            if success:
+                                print(f"[Response saved to: {filename}]")
+                            else:
+                                print(f"[Failed to save response to: {filename}]")
+
+                return complete_response
+
+            except Exception as e:
+                print(f"\nError during token streaming: {str(e)}")
+                if complete_response:
+                    # Even with errors, make sure we have metrics
+                    if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
+                        dummy_logits = torch.zeros(self.tokenizer.vocab_size)
+                        dummy_logits[0] = 5.0  # Medium confidence for error cases
+                        self.confidence_metrics.add_token_score(dummy_logits, 0)
+
+                    return self.mcp_handler.finalize_streaming(complete_response)
+                return "Error generating response. Please try again."
+
+            self.last_token_confidences = token_confidences
+
 
         except Exception as e:
             print(f"\nStreaming setup failed: {e}")
