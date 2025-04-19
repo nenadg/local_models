@@ -1,12 +1,12 @@
-import torch
+import sys
 import os
+import re
+import math
+import torch
+import time
 import json
 import argparse
-import time
-import sys
 import threading
-import math
-import re
 import termios
 import tty
 import signal
@@ -872,6 +872,34 @@ class TinyLlamaChat:
 
                     # Process token for MCP
                     display_token, mcp_buffer = self.mcp_handler.process_streaming_token(token, mcp_buffer)
+
+                    # Process token for display with proper newline handling
+                    if display_token:
+                        # if '\r' in display_token:
+                        #     # Split on newlines and handle each segment
+                        #     segments = display_token.split('\r')
+                        #     for i, segment in enumerate(segments):
+                        #         if i > 0:
+                        #             # For each newline, print a carriage return first
+                        #             sys.stdout.write('\r')
+                        #             sys.stdout.flush()
+
+                        # Check if token contains newline
+                        if '\n' in display_token:
+                            # Split on newlines and handle each segment
+                            segments = display_token.split('\n')
+                            for i, segment in enumerate(segments):
+                                if i > 0:
+                                    sys.stdout.write('\r')
+                                    sys.stdout.flush()
+
+                        if '\t' in display_token:
+                            # Split on newlines and handle each segment
+                            segments = display_token.split('\t')
+                            for i, segment in enumerate(segments):
+                                if i > 0:
+                                    sys.stdout.write('\t')
+                                    sys.stdout.flush()
 
                     # Add token to response
                     complete_response += token
@@ -2531,6 +2559,10 @@ class TinyLlamaChat:
             if hasattr(self, 'resource_manager'):
                 self.resource_manager.cleanup()
 
+            if torch.cuda.is_available():
+                print("Releasing cuda cache.")
+                torch.cuda.empty_cache()
+
             print("Resources cleaned up successfully")
 
         except Exception as e:
@@ -2563,8 +2595,6 @@ class TinyLlamaChat:
 
             # Fallback to previous implementation if prompt_toolkit is not available
             print("(Enter your text, paste multiline content. Press Ctrl+D or submit an empty line to finish)")
-
-
 
             try:
                 lines = []
