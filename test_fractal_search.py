@@ -55,8 +55,8 @@ def test_fractal_search_effectiveness():
         query_embedding = memory_manager.generate_embedding(query)
 
         # Perform base and fractal searches
-        base_results = store.search(query_embedding, top_k=5, multi_level_search=False)
-        fractal_results = store.search(query_embedding, top_k=5, multi_level_search=True)
+        base_results = store.enhanced_fractal_search(query_embedding, top_k=5, multi_level_search=False)
+        fractal_results = store.enhanced_fractal_search(query_embedding, top_k=5, multi_level_search=True)
 
         print("Base Search Results:")
         for r in base_results:

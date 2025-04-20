@@ -1256,10 +1256,18 @@ class TinyLlamaChat:
 
     def add_conversation_to_memory(self, query, response):
         """Add the current exchange to memory if auto-memorize is enabled"""
-        memories_added = self.memory_manager.add_memory(
+        # memories_added = self.memory_manager.add_memory(
+        #     self.current_user_id,
+        #     query,
+        #     response
+        # )
+        # if memories_added > 0:
+        #     print(f"[Memory] Added {memories_added} new memories")
+        memories_added = self.memory_manager.add_memory_with_sharpening(
             self.current_user_id,
             query,
-            response
+            response,
+            pre_sharpen=self.memory_manager.sharpening_enabled  # Only pre-sharpen if sharpening is enabled
         )
         if memories_added > 0:
             print(f"[Memory] Added {memories_added} new memories")
@@ -2107,10 +2115,17 @@ class TinyLlamaChat:
 
         # First pass: Get candidate memories with standard search
         # Get more results than needed for re-ranking
-        candidate_results = store.search(
+        # candidate_results = store.search(
+        #     query_embedding,
+        #     top_k=top_k*3,
+        #     min_similarity=0.2
+        # )
+
+        candidate_results = store.enhanced_fractal_search(
             query_embedding,
-            top_k=top_k*3,
-            min_similarity=0.2
+            top_k=10,
+            multi_level_search=True,
+            level_weights=[1.0, 0.7, 0.5, 0.3]
         )
 
         # Process based on command context if provided
@@ -2215,10 +2230,16 @@ class TinyLlamaChat:
             tabular_embedding = self.memory_manager.generate_embedding(tabular_query)
 
             # Search for tabular data memories
-            semantic_results = store.search(
-                tabular_embedding,
-                top_k=top_k*2,
-                min_similarity=0.2
+            # semantic_results = store.search(
+            #     tabular_embedding,
+            #     top_k=top_k*2,
+            #     min_similarity=0.2
+            # )
+            semantic_results = store.enhanced_fractal_search(
+                query_embedding,
+                top_k=10,
+                multi_level_search=True,
+                level_weights=[1.0, 0.7, 0.5, 0.3]
             )
 
             # Filter for tabular data and add to results
@@ -2756,6 +2777,8 @@ def main():
         print("  !toggle-web - Toggle web knowledge enhancement on/off")
         print("  !web-stats - Show web search statistics")
         print("  !search-engine: [engine] - Set search engine (duckduckgo/google)")
+        print("  !fractal-diagnostics - prints fractal embedding diagnostics")
+        print("  !visualize-fractal - visual fractal embeddings")
 
         print("\nIf the model expresses uncertainty, you can ask it to speculate")
         print("by saying 'please continue anyway' or 'please speculate'")
@@ -2907,6 +2930,22 @@ def main():
                         print(f"Unsupported search engine: {engine}. Please use 'duckduckgo' or 'google'")
                 else:
                     print("Web knowledge enhancement is not enabled")
+                continue
+
+            elif user_input.lower() == '!fractal-diagnostics':
+                store = chat.memory_manager._get_user_store(chat.current_user_id)
+                if hasattr(store, 'print_fractal_embedding_diagnostics'):
+                    store.print_fractal_embedding_diagnostics()
+                else:
+                    print("Fractal diagnostics not available.")
+                continue
+
+            elif user_input.lower() == '!visualize-fractal':
+                store = chat.memory_manager._get_user_store(chat.current_user_id)
+                if hasattr(store, 'visualize_fractal_embeddings'):
+                    store.visualize_fractal_embeddings()
+                else:
+                    print("Fractal visualization not available.")
                 continue
 
             # Add user message to conversation

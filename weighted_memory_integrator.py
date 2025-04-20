@@ -150,13 +150,24 @@ class WeightedMemoryIntegrator:
         query_embedding = self.memory_manager.generate_embedding(query)
 
         # Search with appropriate parameters
-        results = store.search(
-            query_embedding,
-            top_k=retrieve_count*2,  # Get more results for better filtering
-            min_similarity=0.25,
-            apply_sharpening=apply_sharpening,
-            sharpening_factor=sharpening_factor
-        )
+        if hasattr(store, 'enhanced_fractal_search'):
+            results = store.enhanced_fractal_search(
+                query_embedding,
+                top_k=retrieve_count*2,
+                min_similarity=0.25,
+                apply_sharpening=apply_sharpening,
+                sharpening_factor=sharpening_factor,
+                multi_level_search=True
+            )
+        else:
+            # Fallback to standard search
+            results = store.search(
+                query_embedding,
+                top_k=retrieve_count*2,
+                min_similarity=0.25,
+                apply_sharpening=apply_sharpening,
+                sharpening_factor=sharpening_factor
+            )
 
         # Format the results into memory text
         memory_text = self._format_memory_results(results, retrieve_count)
@@ -416,12 +427,31 @@ class WeightedMemoryIntegrator:
         query_embedding = self.memory_manager.generate_embedding(translation_query)
 
         # Search with a low threshold to find all potential matches
-        results = store.search(
-            query_embedding,
-            top_k=20,  # Get a good number of potential matches
-            min_similarity=0.2,  # Low threshold to catch more matches
-            apply_sharpening=False  # Don't apply sharpening for this administrative task
-        )
+        # results = store.search(
+        #     query_embedding,
+        #     top_k=20,  # Get a good number of potential matches
+        #     min_similarity=0.2,  # Low threshold to catch more matches
+        #     apply_sharpening=False  # Don't apply sharpening for this administrative task
+        # )
+
+        if hasattr(store, 'enhanced_fractal_search'):
+            results = store.enhanced_fractal_search(
+                query_embedding,
+                top_k=20,
+                min_similarity=0.2,
+                apply_sharpening=apply_sharpening,
+                sharpening_factor=sharpening_factor,
+                multi_level_search=True
+            )
+        else:
+            # Fallback to standard search
+            results = store.search(
+                query_embedding,
+                top_k=20,
+                min_similarity=0.2,
+                apply_sharpening=apply_sharpening,
+                sharpening_factor=sharpening_factor
+            )
 
         # Find indices of memories to remove
         indices_to_remove = []

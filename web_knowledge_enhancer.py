@@ -1163,12 +1163,28 @@ class WebKnowledgeEnhancer:
 
             # Conduct a broader, multi-level fractal search with lower threshold to find anything related
             print("[Web] Executing multi-level fractal search")
-            search_results = store.search(
-                query_embedding,
-                top_k=5,
-                min_similarity=0.60,  # Lower threshold to find more potential matches
-                multi_level_search=True
-            )
+            # search_results = store.search(
+            #     query_embedding,
+            #     top_k=5,
+            #     min_similarity=0.60,  # Lower threshold to find more potential matches
+            #     multi_level_search=True
+            # )
+
+            if hasattr(store, 'enhanced_fractal_search'):
+                search_results = store.enhanced_fractal_search(
+                    query_embedding,
+                    top_k=5,
+                    min_similarity=0.60, # Lower threshold to find more potential matches
+                    multi_level_search=True
+                )
+            else:
+                # Fallback to standard search
+                search_results = store.search(
+                    query_embedding,
+                    top_k=5,
+                    min_similarity=0.60,
+                    multi_level_search=True
+                )
 
             print(f"[Web] Fractal search returned {len(search_results)} results")
 

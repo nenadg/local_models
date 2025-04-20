@@ -9,18 +9,24 @@
 │                                                  │
 │ ┌────────────────┐    ┌─────────────────────┐    │
 │ │   LLM Models   │    │  MCPHandler         │    │
-│ │   and Tokenizer│    │  (File/Shell output)│    │
-│ └────────────────┘    └─────────────────────┘    │
+│ │ + Speculative  │    │  (File/Shell output)│    │
+│ │   Decoding     │    └─────────────────────┘    │
+│ └────────────────┘                               │
 │                                                  │
 │ ┌────────────────┐    ┌─────────────────────┐    │
-│ │ ResponseFilter │    │ ConfidenceMetrics   │    │
-│ │ (Hallucination)│    │ (Token probabilities)│   │
-│ └────────────────┘    └─────────────────────┘    │
+│ │ ResponseFilter │    │ EnhancedConfidence  │    │
+│ │ (Hallucination)│    │ Metrics (Token      │    │
+│ └────────────────┘    │ probabilities)      │    │
+│                       └─────────────────────┘    │
 │                                                  │
 │ ┌────────────────┐    ┌─────────────────────┐    │
-│ │ TerminalHeatmap│    │ QuestionClassifier  │    │
+│ │ EnhancedHeatmap│    │ QuestionClassifier  │    │
 │ │ (Visualization)│    │ (Domain detection)  │    │
 │ └────────────────┘    └─────────────────────┘    │
+│                                                  │
+│ ┌────────────────────────────────────────────┐   │
+│ │ ResourceManager (CUDA memory optimization) │   │
+│ └────────────────────────────────────────────┘   │
 │                                                  │
 └──────────────────────────────────────────────────┘
             │
@@ -30,13 +36,20 @@
 │                Memory System                     │
 │                                                  │
 │ ┌────────────────┐    ┌─────────────────────┐    │
-│ │ MemoryManager  │    │ IndexedVectorStore  │    │
-│ │ (Management)   │    │ (FAISS backend)     │    │
-│ └────────────────┘    └─────────────────────┘    │
+│ │ MemoryManager  │    │ VectorStore         │    │
+│ │ (Management)   │    │ (FAISS + Fractal    │    │
+│ └────────────────┘    │  Embeddings)        │    │
+│                       └─────────────────────┘    │
 │                                                  │
 │ ┌────────────────┐    ┌─────────────────────┐    │
-│ │ SharpenedVector│    │ WeightedMemory      │    │
-│ │ (Sharpening)   │    │ (Domain integration)│    │
+│ │ WeightedMemory │    │ WebKnowledgeEnhancer│    │
+│ │ Integrator     │    │ (Internet search    │    │
+│ │ (Domain-aware) │    │  augmentation)      │    │
 │ └────────────────┘    └─────────────────────┘    │
+│                                                  │
+│ ┌────────────────────────────────────────────┐   │
+│ │ Procedural Knowledge & Command Memory      │   │
+│ │ (Specialized information extraction)       │   │
+│ └────────────────────────────────────────────┘   │
 │                                                  │
 └──────────────────────────────────────────────────┘
