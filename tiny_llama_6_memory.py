@@ -107,7 +107,7 @@ class TinyLlamaChat:
         )
 
         # Initialize from semantic reasoning finetune function
-        finetuned_model_path = "./finetuned_tinyllama_reasoning"
+        finetuned_model_path = "./finetuned_tinyllama_reasoning_2"
 
         if os.path.exists(finetuned_model_path):
             try:
@@ -2790,6 +2790,7 @@ def main():
         print("  !search-engine: [engine] - Set search engine (duckduckgo/google)")
         print("  !fractal-diagnostics - prints fractal embedding diagnostics")
         print("  !visualize-fractal - visual fractal embeddings")
+        print("  !compare-queries: [query1] | [query2] - Compare the semantic relationship between two queries")
 
         print("\nIf the model expresses uncertainty, you can ask it to speculate")
         print("by saying 'please continue anyway' or 'please speculate'")
@@ -2957,6 +2958,25 @@ def main():
                     store.visualize_fractal_embeddings()
                 else:
                     print("Fractal visualization not available.")
+                continue
+
+            elif user_input.lower().startswith('!compare-queries:'):
+                try:
+                    # Extract the two queries
+                    _, query_part = user_input.split(':', 1)
+                    query1, query2 = query_part.split('|')
+                    query1 = query1.strip()
+                    query2 = query2.strip()
+
+                    # Call the semantic reasoning function
+                    if hasattr(chat, 'test_semantic_relationship'):
+                        relationship = chat.test_semantic_relationship(query1, query2)
+                        print(f"\nSemantic relationship between the queries: {relationship}")
+                    else:
+                        print("\nSemantic reasoning capability not available. Run the finetuning first.")
+                except Exception as e:
+                    print(f"\nError comparing queries: {e}")
+                    print("Usage: !compare-queries: first query | second query")
                 continue
 
             # Add user message to conversation
