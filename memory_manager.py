@@ -1099,33 +1099,29 @@ class VectorStore:
         self.cleanup()
 
     def sharpen_embeddings(self, embeddings: np.ndarray, sharpening_factor: float = 0.3,
-                          min_cluster_size: int = 3) -> np.ndarray:
+                      min_cluster_size: int = 3) -> np.ndarray:
         """
         Sharpen embeddings by pushing them closer to their cluster centroids.
         Similar to how image sharpening enhances edges between regions.
-
-        Args:
-            embeddings: Array of embedding vectors
-            sharpening_factor: How strongly to push vectors toward centroids (0-1)
-            min_cluster_size: Minimum size for a cluster to be considered
-
-        Returns:
-            Sharpened embedding vectors
         """
         if len(embeddings) < min_cluster_size * 2:
             # Not enough vectors to perform meaningful clustering
             return embeddings
 
-        # Compute similarity matrix
+        # Compute similarity matrix - ensure all positive or zero values
         similarity_matrix = np.zeros((len(embeddings), len(embeddings)))
         for i in range(len(embeddings)):
             for j in range(len(embeddings)):
                 # Compute cosine similarity
                 similarity_matrix[i, j] = np.dot(embeddings[i], embeddings[j]) / (
                     np.linalg.norm(embeddings[i]) * np.linalg.norm(embeddings[j]))
+                # Ensure non-negative values (though cosine similarity should be in [-1,1])
+                similarity_matrix[i, j] = max(0.0, similarity_matrix[i, j])
 
         # Convert similarities to distances (1 - similarity)
         distances = 1 - similarity_matrix
+        # Ensure distances are non-negative
+        distances = np.maximum(0, distances)
 
         # Try to cluster embeddings using DBSCAN
         try:
