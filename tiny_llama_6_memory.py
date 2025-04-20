@@ -1,12 +1,12 @@
-import sys
-import os
-import re
-import math
 import torch
-import time
+import os
 import json
 import argparse
+import time
+import sys
 import threading
+import math
+import re
 import termios
 import tty
 import signal
@@ -44,7 +44,6 @@ from pattern_matching_utils import (
 
 from batch_utils import tensor_batch_processing
 from web_knowledge_enhancer import WebKnowledgeEnhancer
-from tty_streamer_handler import TTYStreamHandler
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -737,8 +736,9 @@ class TinyLlamaChat:
 
     def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None, use_web_search=True):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
+        # We only support streaming now, simplifies the code
         try:
-            # Initialize heatmap for confidence coloring if requested
+            # heatmap = TerminalHeatmap(self.tokenizer, use_background=False)
             heatmap = EnhancedHeatmap(self.tokenizer, use_background=False, window_size=3)
             token_confidences = []  # To store confidence scores for each token
 
@@ -759,7 +759,7 @@ class TinyLlamaChat:
 
                 # Process any immediate user commands
                 if user_commands:
-                    # Process shell command outputs and add to memory
+                    # Process any shell command outputs and add to memory
                     for cmd, details in user_commands.items():
                         if details.get("action") == "shell_command":
                             # Add the command output to memory
@@ -795,6 +795,7 @@ class TinyLlamaChat:
                 print(f"Error encoding prompt: {e}")
                 return "Error preparing response. Please try again with a simpler query."
 
+
             # Configure streamer
             streamer = TextIteratorStreamer(
                 self.tokenizer,
@@ -826,17 +827,21 @@ class TinyLlamaChat:
             thread.daemon = True
             thread.start()
 
-            # Set up the TTY handler for stream handling
-            token_colorizer = None
-            if show_confidence:
-                token_colorizer = lambda token, confidence: heatmap.colorize_streaming_token(token, confidence)
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
+            # tty.setraw(fd)
+            tty.setcbreak(fd)
 
-            tty_handler = TTYStreamHandler(
-                colorizer=lambda token, confidence: heatmap.colorize_streaming_token(token, confidence) if show_confidence else token,
-                buffer_size=16,
-                flush_interval=0.05,
-                stop_sequences=["<|user|>", "<|assistant|>"]
-            )
+            # Initialize response
+            complete_response = ""
+            token_buffer = ""
+            mcp_buffer = ""    # For accumulating MCP commands
+
+            # Settings for token display
+            last_print_time = time.time()
+            force_display_time = 0.05  # 50ms max wait between displays
+            max_buffer_size = 16  # Reasonable buffer size
+            stop_sequences = ["<|user|>", "<|assistant|>"]
 
             # Variables to track streaming state
             tokens_received = 0
@@ -844,12 +849,6 @@ class TinyLlamaChat:
             low_confidence_detected = False
             fallback_message_streamed = False
             user_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
-            mcp_buffer = ""  # For accumulating MCP commands
-
-            response_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-
-            # Set terminal to raw mode
-            tty.setraw(tty_handler.fd)
 
             try:
                 while True:
@@ -859,36 +858,49 @@ class TinyLlamaChat:
                         # No more tokens - generation complete
                         break
 
-                    # Check for Ctrl+C interrupt
-                    if tty_handler.check_interrupt():
-                        self.stop_event.set()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                        break
+                    if select.select([sys.stdin], [], [], 0)[0]:
+                        c = sys.stdin.read(1)
+                        if c == '\x03':  # Ctrl+C
+                            self.stop_event.set()
+
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            break
 
                     tokens_received += 1
 
                     # Process token for MCP
                     display_token, mcp_buffer = self.mcp_handler.process_streaming_token(token, mcp_buffer)
 
+       
+                    # Add token to response
+                    complete_response += token
+
                     # Get confidence for latest token
-                    latest_confidence = 0.8  # Default
                     if self.confidence_metrics.token_probabilities:
                         latest_confidence = self.confidence_metrics.token_probabilities[-1]
+                        token_confidences.append(latest_confidence)
                     elif self.confidence_metrics.original_token_probabilities:
+                        # Fallback to original probabilities if sharpened not available
                         latest_idx = len(self.confidence_metrics.original_token_probabilities) - 1
                         if latest_idx >= 0:
                             latest_confidence = self.confidence_metrics.original_token_probabilities[latest_idx]
-
-                    token_confidences.append(latest_confidence)
+                            token_confidences.append(latest_confidence)
+                        else:
+                            # Default if no confidence available
+                            latest_confidence = 0.8
+                            token_confidences.append(latest_confidence)
+                    else:
+                        # Default if no confidence available
+                        latest_confidence = 0.8
+                        token_confidences.append(latest_confidence)
 
                     # Check confidence early enough to stop generation if needed
-                    if (response_filter is not None and not low_confidence_detected and
-                        tokens_received >= early_confidence_check_threshold):
+                    # But only if we have a response filter and after receiving some tokens
+                    if (response_filter is not None and not low_confidence_detected and tokens_received >= early_confidence_check_threshold):
 
                         # Get current metrics
-                        current_metrics = self.confidence_metrics.get_metrics(
-                            apply_sharpening=self.memory_manager.sharpening_enabled)
+                        current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=self.memory_manager.sharpening_enabled)
 
                         # Should we show fallback instead of continuing?
                         if response_filter.should_stream_fallback(current_metrics, user_query):
@@ -901,15 +913,20 @@ class TinyLlamaChat:
                             # Get fallback message
                             fallback = response_filter.get_streamable_fallback(user_query)
 
-                            # Stream the fallback message
+                            # Stream the fallback message with variable delays to mimic LLM output
+                            # Break into words for more natural streaming
                             fallback_words = fallback.split()
-                            for i, word in enumerate(fallback_words):
-                                # Print with small delays for realism
-                                tty_handler.process_token(word)
-                                if i < len(fallback_words) - 1:
-                                    tty_handler.process_token(" ")
 
-                                # Variable delays for realism
+                            for i, word in enumerate(fallback_words):
+                                # Print the word
+                                print(word, end="", flush=True)
+
+                                # Add space after word (except for last word)
+                                if i < len(fallback_words) - 1:
+                                    print(" ", end="", flush=True)
+
+                                # Variable delays between words
+                                # Occasional longer pauses at punctuation or every few words
                                 if i > 0 and word[-1] in ".,:;?!":
                                     time.sleep(0.3)  # Longer pause after punctuation
                                 elif i % 3 == 0:
@@ -919,36 +936,114 @@ class TinyLlamaChat:
 
                             # Mark fallback as streamed
                             fallback_message_streamed = True
+
+                            # Update complete response with fallback
                             complete_response = fallback
                             break
 
-                    # Process the token for display if it should be displayed
+                    # Only add displayable tokens to the buffer
                     if display_token and not fallback_message_streamed:
-                        if not tty_handler.process_token(display_token, latest_confidence):
-                            # Handler detected a stop sequence
-                            break
+                        if show_confidence:
+                            colored_token = heatmap.colorize_streaming_token(
+                                display_token, latest_confidence)
+                            token_buffer += colored_token
+                        else:
+                            # Normal display without colorization
+                            token_buffer += display_token
 
-                # Finalize the output
-                complete_response = tty_handler.finalize()
+                    # Check timing
+                    current_time = time.time()
+                    time_since_print = current_time - last_print_time
+
+                    # Print conditions
+                    if (len(token_buffer) >= max_buffer_size or time_since_print >= force_display_time) and token_buffer:
+                        print(token_buffer, end="", flush=True)
+                        token_buffer = ""
+                        last_print_time = current_time
+
+                    # Check for stop sequences
+                    if len(token_buffer) > 5:
+                        for stop_seq in stop_sequences:
+                            if stop_seq in token_buffer:
+                                token_buffer = token_buffer.split(stop_seq)[0]
+                                if token_buffer:
+                                    print(token_buffer, end="", flush=True)
+                                complete_response = complete_response.split(stop_seq)[0]
+
+                                # ENSURE WE HAVE CONFIDENCE METRICS
+                                if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
+                                    for i in range(5):
+                                        dummy_logits = torch.zeros(self.tokenizer.vocab_size, device=self.device)
+                                        # Generate varied values from 0.5 to 0.9
+                                        prob_value = 0.5 + (i * 0.1)
+                                        max_index = i % self.tokenizer.vocab_size
+
+                                        # Create a probability distribution with the max at our chosen token
+                                        dummy_logits.fill_(0.1 / self.tokenizer.vocab_size)  # Low baseline
+                                        dummy_logits[max_index] = prob_value  # Higher probability for this token
+
+                                        # Convert to logits
+                                        dummy_logits = torch.log(dummy_logits + 1e-10)
+
+                                        self.confidence_metrics.add_token_score(dummy_logits, max_index)
+
+                                return self.mcp_handler.finalize_streaming(complete_response)
+
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                # Handle any remaining tokens
+                if token_buffer:
+                    print(token_buffer, end="", flush=True)
+
+                # ALWAYS ENSURE WE HAVE CONFIDENCE METRICS BEFORE RETURNING
+                if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
+                    response_length = len(complete_response.split())
+                    num_tokens = max(5, min(response_length, 10))
+
+                    for i in range(num_tokens):
+                        dummy_logits = torch.zeros(self.tokenizer.vocab_size)
+                        # Use different confidence values based on response quality
+                        confidence_val = 8.0 + (i % 3)  # Vary between 8-10
+                        dummy_logits[i % 100] = confidence_val
+                        self.confidence_metrics.add_token_score(dummy_logits, i % 100)
+
+                # Get domain information if available
+                domain = None
+                settings = None
+                if hasattr(self, 'question_classifier') and messages[-1]["role"] == "user":
+                    user_query = messages[-1]["content"]
+                    settings = self.question_classifier.get_domain_settings(user_query)
+                    domain = settings['domain']
+
+                # Apply post-processing to clean up the response
+                complete_response = self.post_process_response(complete_response, user_query, domain)
 
                 # Finalize MCP processing
                 complete_response = self.mcp_handler.finalize_streaming(complete_response)
 
-            finally:
-                # Restore terminal settings
-                termios.tcsetattr(tty_handler.fd, termios.TCSADRAIN, tty_handler.old_settings)
+                if len(user_commands) > 0:
+                    for filename, cmd in user_commands.items():
+                        if cmd.get("action") == "save_response":
+                            success = self.mcp_handler.save_response_to_file(complete_response, filename)
+                            if success:
+                                print(f"[Response saved to: {filename}]")
+                            else:
+                                print(f"[Failed to save response to: {filename}]")
 
-            # Handle any file save commands
-            if len(user_commands) > 0:
-                for filename, cmd in user_commands.items():
-                    if cmd.get("action") == "save_response":
-                        success = self.mcp_handler.save_response_to_file(complete_response, filename)
-                        if success:
-                            print(f"[Response saved to: {filename}]")
-                        else:
-                            print(f"[Failed to save response to: {filename}]")
+                return complete_response
 
-            return complete_response
+            except Exception as e:
+                print(f"\nError during token streaming: {str(e)}")
+                if complete_response:
+                    # Even with errors, make sure we have metrics
+                    if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
+                        dummy_logits = torch.zeros(self.tokenizer.vocab_size)
+                        dummy_logits[0] = 5.0  # Medium confidence for error cases
+                        self.confidence_metrics.add_token_score(dummy_logits, 0)
+
+                    return self.mcp_handler.finalize_streaming(complete_response)
+                return "Error generating response. Please try again."
+
+            self.last_token_confidences = token_confidences
 
         except Exception as e:
             print(f"\nStreaming setup failed: {e}")
@@ -967,6 +1062,7 @@ class TinyLlamaChat:
                 self.confidence_metrics.add_token_score(dummy_logits, 0)
 
             self.resource_manager.clear_cache()
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
     def ensure_metrics(self, response_length=None):
