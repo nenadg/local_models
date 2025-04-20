@@ -180,5 +180,5 @@ flat_learn/
 memory_test/
 visualizations/
 save/
-finetuned_tinyllama_reasoning/
+finetuned_tinyllama_reasoning*
 fractal_embeddings_visualization.png

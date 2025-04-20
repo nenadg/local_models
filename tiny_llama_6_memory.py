@@ -45,6 +45,8 @@ from pattern_matching_utils import (
 from batch_utils import tensor_batch_processing
 from web_knowledge_enhancer import WebKnowledgeEnhancer
 
+from semantic_reasoning_enhancer import integrate_semantic_reasoning
+
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
     "role": "system",
@@ -104,6 +106,15 @@ class TinyLlamaChat:
             question_classifier=self.question_classifier
         )
 
+        # Initialize from semantic reasoning finetune function
+        finetuned_model_path = "./finetuned_tinyllama_reasoning"
+
+        if os.path.exists(finetuned_model_path):
+            try:
+                integrate_semantic_reasoning(self, finetuned_model_path)
+            except:
+                print(f"Finetuned model not loaded, it doesn't exist in {finetuned_model_path}")
+
         # Initialize the web knowledge enhancer
         self.enable_web_knowledge = enable_web_knowledge
         if enable_web_knowledge:
@@ -129,7 +140,7 @@ class TinyLlamaChat:
             self.device = device
         elif torch.cuda.is_available():
             self.device = "cuda"
-            print("Using NVIDIA GPU for acceleration")
+            print("Using GPU for acceleration")
             if hasattr(torch.backends, "cuda"):
                 if hasattr(torch.backends.cuda, "matmul"):
                     torch.backends.cuda.matmul.allow_tf32 = True
