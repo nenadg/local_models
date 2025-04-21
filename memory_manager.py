@@ -759,46 +759,33 @@ class VectorStore:
     
     def _apply_sharpening(self, results: List[Dict[str, Any]], sharpening_factor: float) -> List[Dict[str, Any]]:
         """
-        Apply sharpening to search results to improve relevance.
-        
+        Apply sharpening to search results to improve relevance using the unified SharpeningUtils.
+
         Args:
             results: Search results to sharpen
             sharpening_factor: Factor to control sharpening strength
-            
+
         Returns:
             Sharpened results
         """
+        from sharpening_utils import SharpeningUtils
+
         for result in results:
             # Store the original similarity for comparison
             similarity = result['similarity']
             result['original_similarity'] = similarity
-            
-            # Check if this is a correction (should be prioritized)
+
+            # Check if this is a correction or high priority
             is_correction = result.get('metadata', {}).get('is_correction', False)
-            
-            # Apply different sharpening based on similarity ranges and correction status
-            if is_correction:
-                # Always boost corrections significantly
-                boost_factor = 0.3 + (sharpening_factor * 0.2)
-                sharpened_similarity = similarity + boost_factor
-            elif similarity > 0.7:  # Very high similarity
-                # Logarithmic boost (diminishing returns for very high similarities)
-                boost = np.log1p(similarity) * sharpening_factor * 0.3
-                sharpened_similarity = similarity + boost
-            elif similarity > 0.5:  # Medium-high similarity
-                # Linear boost
-                boost = (similarity - 0.5) * sharpening_factor * 0.5
-                sharpened_similarity = similarity + boost
-            elif similarity > 0.35:  # Medium similarity
-                # Neutral zone - minimal change
-                sharpened_similarity = similarity
-            else:  # Low similarity
-                # Decrease low similarities more aggressively with higher sharpening factors
-                reduction = (0.35 - similarity) * sharpening_factor * 0.6
-                sharpened_similarity = similarity - reduction
-            
-            # Store updated similarity (clamped to valid range)
-            result['similarity'] = min(1.0, max(0.0, sharpened_similarity))
+            is_high_priority = result.get('metadata', {}).get('priority', 0) > 5
+
+            # Apply sharpening using the unified utility
+            result['similarity'] = SharpeningUtils.sharpen_similarity(
+                similarity=similarity,
+                sharpening_factor=sharpening_factor,
+                is_correction=is_correction,
+                is_high_priority=is_high_priority
+            )
         
         return results
     
@@ -1430,7 +1417,7 @@ class MemoryManager:
     ):
         """
         Initialize the memory manager.
-        
+
         Args:
             model_name: Name of the embedding model to use
             memory_dir: Directory for storing memory files
@@ -1438,10 +1425,12 @@ class MemoryManager:
             auto_memorize: Whether to automatically memorize conversations
             sharpening_enabled: Whether to enable vector space sharpening
             sharpening_factor: Factor to control sharpening strength
+            fractal_enabled: Whether to enable fractal embeddings
+            max_fractal_levels: Maximum number of fractal levels
         """
         self.memory_dir = memory_dir
         os.makedirs(memory_dir, exist_ok=True)
-        
+
         self.user_stores = {}
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.auto_memorize = auto_memorize
@@ -1463,31 +1452,78 @@ class MemoryManager:
             self.tokenizer = None
             self.model = None
             self.embedding_dim = 384  # Common dimension
-        
+
         # Schedule for periodic maintenance
         self.last_consolidation = datetime.now()
         self.consolidation_interval = 60 * 60  # 1 hour in seconds
+
+        # Initialize default user store to ensure it's ready at startup
+        try:
+            default_user = "default_user"
+            default_store = self._get_user_store(default_user)
+            # Force index creation
+            if not hasattr(default_store, 'index') or default_store.index is None:
+                default_store._create_index(self.embedding_dim)
+            print(f"Default vector store initialized for user: {default_user}")
+        except Exception as e:
+            print(f"Warning: Failed to initialize default vector store: {e}")
+            # This shouldn't halt initialization, so we just log the warning
+
     
     def _get_user_store(self, user_id: str) -> VectorStore:
         """
-        Get or create a vector store for a user.
-        
+        Get or create a vector store for a user, ensuring it's fully initialized.
+
         Args:
             user_id: User identifier
-            
+
         Returns:
-            Vector store for the user
+            Initialized vector store for the user
         """
-        if user_id not in self.user_stores:
-            store_path = os.path.join(self.memory_dir, f"{user_id}_store")
-            self.user_stores[user_id] = VectorStore(
-                storage_path=store_path,
+        try:
+            # Check if store exists for this user
+            if user_id not in self.user_stores:
+                # Create path for store
+                store_path = os.path.join(self.memory_dir, f"{user_id}_store")
+
+                # Create a new store
+                self.user_stores[user_id] = VectorStore(
+                    storage_path=store_path,
+                    embedding_function=self.generate_embedding,
+                    embedding_dim=self.embedding_dim,
+                    fractal_enabled=self.fractal_enabled,
+                    max_fractal_levels=self.max_fractal_levels
+                )
+
+                # Ensure the store has an initialized index
+                if not hasattr(self.user_stores[user_id], 'index') or self.user_stores[user_id].index is None:
+                    print(f"Initializing index for user {user_id}")
+                    self.user_stores[user_id]._create_index(self.embedding_dim)
+
+            # Final validation check - if store somehow still doesn't have an index, create one
+            if not hasattr(self.user_stores[user_id], 'index') or self.user_stores[user_id].index is None:
+                print(f"Ensuring index for user {user_id}")
+                self.user_stores[user_id]._create_index(self.embedding_dim)
+
+            return self.user_stores[user_id]
+
+        except Exception as e:
+            # Log the error
+            print(f"Error getting vector store for user {user_id}: {e}")
+
+            # Create a minimal emergency store that won't cause null pointer exceptions
+            emergency_store = VectorStore(
+                storage_path=os.path.join(self.memory_dir, f"{user_id}_emergency"),
                 embedding_function=self.generate_embedding,
-                embedding_dim=self.embedding_dim,
-                fractal_enabled=self.fractal_enabled,
-                max_fractal_levels=self.max_fractal_levels
+                embedding_dim=self.embedding_dim
             )
-        return self.user_stores[user_id]
+
+            # Force index creation for the emergency store
+            emergency_store._create_index(self.embedding_dim)
+
+            # Log and return the emergency store
+            print(f"Created emergency vector store for user {user_id}")
+            return emergency_store
 
 
     def toggle_auto_memorize(self) -> bool:
@@ -1615,35 +1651,41 @@ class MemoryManager:
                 pass
 
     def add_memory(self, 
-                  user_id: str, 
-                  query: str, 
+                  user_id: str,
+                  query: str,
                   response: str,
-                  memory_type: str = "general", 
-                  attributes: Dict = None) -> int:
+                  memory_type: str = "general",
+                  attributes: Dict = None,
+                  pre_sharpen: bool = None) -> int:
         """
-        Add a new memory with enhanced metadata tagging.
-        
+        Add a new memory with enhanced metadata tagging and optional embedding pre-sharpening.
+
         Args:
             user_id: User identifier
             query: Query text
             response: Response text
             memory_type: Type of memory
             attributes: Additional attributes
-            
+            pre_sharpen: Whether to apply clustering-based pre-sharpening (defaults to self.sharpening_enabled)
+
         Returns:
             Number of memories added
         """
         if not self.auto_memorize:
             return 0
-            
+
         # Check if maintenance is due
         self._check_maintenance(user_id)
-        
+
+        # Default pre_sharpen to sharpening_enabled if not specified
+        if pre_sharpen is None:
+            pre_sharpen = self.sharpening_enabled
+
         attributes = attributes or {}
-        
+
         # Extract key information
         key_info = self.extract_key_information(query, response)
-        
+
         # Detect corrections
         is_correction = False
         correction_indicators = [
@@ -1651,25 +1693,25 @@ class MemoryManager:
             "that's not", "but that's", "but that is", "actually",
             "in fact", "not correct"
         ]
-        
+
         query_lower = query.lower()
         if any(indicator in query_lower for indicator in correction_indicators):
             is_correction = True
             memory_type = "correction"
-        
+
         # Store each key piece of information
         memories_added = 0
         for info in key_info:
             embedding = self.generate_embedding(info)
-            
+
             # Create enhanced metadata
             if memory_type == "correction" or is_correction:
                 # Extract key terms from the correction
                 terms = set(query_lower.split())
-                stop_words = {'a', 'an', 'the', 'but', 'and', 'or', 'is', 'are', 'was', 'were', 
+                stop_words = {'a', 'an', 'the', 'but', 'and', 'or', 'is', 'are', 'was', 'were',
                              'to', 'for', 'in', 'on', 'at', 'by'}
                 keywords = ' '.join([term for term in terms if term not in stop_words and len(term) > 2])
-                
+
                 metadata = {
                     'source_query': query,
                     'source_response': response[:100] + "..." if len(response) > 100 else response,
@@ -1689,10 +1731,22 @@ class MemoryManager:
                     'priority': 1,  # Normal priority
                     'attributes': attributes
                 }
-            
-            # Add to the store
+
+            # Add to the store with optional pre-sharpening
             store = self._get_user_store(user_id)
-            added = store.add(text=info, embedding=embedding, metadata=metadata)
+
+            # Check if add_with_sharpening is available and we want to use pre-sharpening
+            if pre_sharpen and hasattr(store, 'add_with_sharpening'):
+                added = store.add_with_sharpening(
+                    text=info,
+                    embedding=embedding,
+                    metadata=metadata,
+                    pre_sharpen=True,
+                    sharpen_factor=self.sharpening_factor
+                )
+            else:
+                # Fall back to regular add method
+                added = store.add(text=info, embedding=embedding, metadata=metadata)
             
             if added:
                 memories_added += 1
@@ -1785,101 +1839,7 @@ class MemoryManager:
                 
         return memory_text
 
-    def add_memory_with_sharpening(self,
-                  user_id: str,
-                  query: str,
-                  response: str,
-                  memory_type: str = "general",
-                  attributes: Dict = None,
-                  pre_sharpen: bool = False) -> int:
-        """
-        Add a new memory with enhanced metadata tagging and optional embedding pre-sharpening.
 
-        Args:
-            user_id: User identifier
-            query: Query text
-            response: Response text
-            memory_type: Type of memory
-            attributes: Additional attributes
-            pre_sharpen: Whether to apply clustering-based pre-sharpening
-
-        Returns:
-            Number of memories added
-        """
-        if not self.auto_memorize:
-            return 0
-
-        # Check if maintenance is due
-        self._check_maintenance(user_id)
-
-        attributes = attributes or {}
-
-        # Extract key information
-        key_info = self.extract_key_information(query, response)
-
-        # Detect corrections
-        is_correction = False
-        correction_indicators = [
-            "incorrect", "wrong", "not true", "false", "mistake",
-            "that's not", "but that's", "but that is", "actually",
-            "in fact", "not correct"
-        ]
-
-        query_lower = query.lower()
-        if any(indicator in query_lower for indicator in correction_indicators):
-            is_correction = True
-            memory_type = "correction"
-
-        # Store each key piece of information
-        memories_added = 0
-        for info in key_info:
-            embedding = self.generate_embedding(info)
-
-            # Create enhanced metadata
-            if memory_type == "correction" or is_correction:
-                # Extract key terms from the correction
-                terms = set(query_lower.split())
-                stop_words = {'a', 'an', 'the', 'but', 'and', 'or', 'is', 'are', 'was', 'were',
-                             'to', 'for', 'in', 'on', 'at', 'by'}
-                keywords = ' '.join([term for term in terms if term not in stop_words and len(term) > 2])
-
-                metadata = {
-                    'source_query': query,
-                    'source_response': response[:100] + "..." if len(response) > 100 else response,
-                    'timestamp': datetime.now().isoformat(),
-                    'type': memory_type,
-                    'is_correction': True,
-                    'correction_keywords': keywords,
-                    'priority': 10,  # Higher priority for corrections
-                    'attributes': attributes
-                }
-            else:
-                metadata = {
-                    'source_query': query,
-                    'source_response': response[:100] + "..." if len(response) > 100 else response,
-                    'timestamp': datetime.now().isoformat(),
-                    'type': memory_type,
-                    'priority': 1,  # Normal priority
-                    'attributes': attributes
-                }
-
-            # Add to the store with optional pre-sharpening
-            store = self._get_user_store(user_id)
-            if pre_sharpen and hasattr(store, 'add_with_sharpening'):
-                added = store.add_with_sharpening(
-                    text=info,
-                    embedding=embedding,
-                    metadata=metadata,
-                    pre_sharpen=True,
-                    sharpen_factor=self.sharpening_factor
-                )
-            else:
-                added = store.add(text=info, embedding=embedding, metadata=metadata)
-
-            if added:
-                memories_added += 1
-
-        return memories_added
 
     def initialize_knowledge_system(self):
         """Initialize the knowledge management system."""

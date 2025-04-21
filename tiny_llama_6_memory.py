@@ -289,7 +289,7 @@ class TinyLlamaChat:
         # Use the weighted memory integrator for domain-aware memory retrieval
         if current_query:
             # Detect if this is a command-related query
-            command_context = self._extract_command_context(current_query)
+            command_context = extract_command_context(current_query)
 
             # Get domain information if available
             domain = None
@@ -306,7 +306,6 @@ class TinyLlamaChat:
             web_enhancement = None
             if use_web_search and hasattr(self, 'enable_web_knowledge') and self.enable_web_knowledge and hasattr(self, 'web_enhancer'):
                 web_enhancement = self.enhance_with_web_knowledge(current_query, confidence_data, domain, messages)
-
 
             # Ensure recent memories are included by forcing a higher k value for recent queries
             recency_boost = True
@@ -894,7 +893,7 @@ class TinyLlamaChat:
                     # Process token for MCP
                     display_token, mcp_buffer = self.mcp_handler.process_streaming_token(token, mcp_buffer)
 
-       
+
                     # Add token to response
                     complete_response += token
 
@@ -1084,7 +1083,7 @@ class TinyLlamaChat:
                 self.confidence_metrics.add_token_score(dummy_logits, 0)
 
             self.resource_manager.clear_cache()
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            # termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
     def ensure_metrics(self, response_length=None):
@@ -1278,18 +1277,11 @@ class TinyLlamaChat:
 
     def add_conversation_to_memory(self, query, response):
         """Add the current exchange to memory if auto-memorize is enabled"""
-        # memories_added = self.memory_manager.add_memory(
-        #     self.current_user_id,
-        #     query,
-        #     response
-        # )
-        # if memories_added > 0:
-        #     print(f"[Memory] Added {memories_added} new memories")
-        memories_added = self.memory_manager.add_memory_with_sharpening(
+        memories_added = self.memory_manager.add_memory(
             self.current_user_id,
             query,
             response,
-            pre_sharpen=self.memory_manager.sharpening_enabled  # Only pre-sharpen if sharpening is enabled
+            pre_sharpen=self.memory_manager.sharpening_enabled  # Use pre-sharpening if enabled
         )
         if memories_added > 0:
             print(f"[Memory] Added {memories_added} new memories")
@@ -1382,7 +1374,7 @@ class TinyLlamaChat:
         # Extract the expression from the query
         expression = None
         if hasattr(self, 'memory_integrator'):
-            expression = self.memory_integrator._extract_arithmetic_expression(query)
+            expression = extract_arithmetic_expression(query)
 
         if not expression:
             # Try a simple regex fallback
@@ -1502,13 +1494,9 @@ class TinyLlamaChat:
             command_type = "general_command"
 
         # Detect if output is likely tabular
-        is_tabular = self._is_tabular_data(output)
+        is_tabular = is_tabular_data(output)
 
         return command_type, is_tabular
-
-    def _is_tabular_data(self, output: str) -> bool:
-        """Detect if the output is likely in a tabular format."""
-        return is_tabular_data(output)
 
     def _index_tabular_data(self, command: str, output: str, command_type: str) -> int:
         """
@@ -1533,7 +1521,7 @@ class TinyLlamaChat:
         data_rows = lines[1:]
 
         # Try to identify columns based on whitespace patterns
-        columns = self._extract_columns_from_header(header_row)
+        columns = extract_columns_from_header(header_row)
 
         # Create a structured memory for the entire table
         table_memory_text = f"Table from command '{command}':\n{output}"
@@ -1552,7 +1540,8 @@ class TinyLlamaChat:
             f"Tabular data from command: {command}",
             table_memory_text,
             memory_type="tabular_data",
-            attributes=table_metadata
+            attributes=table_metadata,
+            pre_sharpen=self.memory_manager.sharpening_enabled
         )
         total_memories += memories_added
 
@@ -1616,7 +1605,8 @@ class TinyLlamaChat:
                             "usage_percent": usage,
                             "total_size": size,
                             "timestamp": datetime.now().isoformat()
-                        }
+                        },
+                        pre_sharpen=self.memory_manager.sharpening_enabled
                     )
                     total_memories += 1
 
@@ -1624,10 +1614,6 @@ class TinyLlamaChat:
             print(f"[Memory] Added {total_memories} tabular data memories from command: '{command}'")
 
         return total_memories
-
-    def _extract_columns_from_header(self, header_row: str) -> list:
-        """Extract column names from a header row."""
-        return extract_columns_from_header(header_row)
 
     def _extract_row_data(self, row: str, columns: list, header_row: str) -> dict:
         """
@@ -1735,7 +1721,8 @@ class TinyLlamaChat:
                             "chunk_index": i,
                             "total_chunks": len(chunks),
                             "timestamp": datetime.now().isoformat()
-                        }
+                        },
+                        pre_sharpen=self.memory_manager.sharpening_enabled
                     )
                     total_memories += memories_added
             else:
@@ -1757,7 +1744,8 @@ class TinyLlamaChat:
                     "command": command,
                     "command_type": command_type,
                     "timestamp": datetime.now().isoformat()
-                }
+                },
+                pre_sharpen=self.memory_manager.sharpening_enabled
             )
             total_memories += memories_added
 
@@ -1773,7 +1761,8 @@ class TinyLlamaChat:
                 "output_file": output_file,
                 "output_length": len(output) if output else 0,
                 "timestamp": datetime.now().isoformat()
-            }
+            },
+            pre_sharpen=self.memory_manager.sharpening_enabled
         )
         total_memories += memories_added
 
@@ -1926,7 +1915,7 @@ class TinyLlamaChat:
             mapping_dict = {}
             for source, target, note in mappings:
                 source = source.strip().lower()
-                category = self._extract_mapping_category(source, content)
+                category = extract_mapping_category(source, content)
 
                 if category not in mapping_dict:
                     mapping_dict[category] = []
@@ -1944,7 +1933,7 @@ class TinyLlamaChat:
                     "category": category,
                     "entries": items,
                     "source_command": command,
-                    "example_pairs": self._extract_example_pairs(content)
+                    "example_pairs": extract_example_pairs(content)
                 })
 
         # Look for numbered/bulleted step-by-step instructions
@@ -1973,7 +1962,12 @@ class TinyLlamaChat:
         """
         # First use vector search to find potentially relevant memories
         query_embedding = self.memory_manager.generate_embedding(query)
-        results = self.memory_manager._get_user_store(self.current_user_id).search(
+        store = self.memory_manager._get_user_store(self.current_user_id)
+
+        if not store or not hasattr(store, 'index') or store.index is None:
+            return [];
+
+        results = store.search(
             query_embedding, top_k=15, min_similarity=0.2
         )
 
@@ -2059,61 +2053,6 @@ class TinyLlamaChat:
 
         return "\n".join(sections)
 
-    def _extract_mapping_category(self, source_item: str, full_content: str) -> str:
-        """Extract category for a mapping entry based on content patterns"""
-        lowercase_content = full_content.lower()
-
-        # Check section headers near this item
-        lines = full_content.split('\n')
-        for i, line in enumerate(lines):
-            if source_item in line.lower():
-                # Look at up to 10 lines before this one for a header
-                for j in range(max(0, i-10), i):
-                    if re.match(r'^#\s+(.+)', lines[j]):
-                        header = re.match(r'^#\s+(.+)', lines[j]).group(1)
-                        # Clean up the header
-                        header = re.sub(r'consonants|vowels|characters|mapping', '', header, flags=re.I)
-                        return header.strip()
-
-        # Check common categories
-        if re.match(r'^[aeiou]', source_item):
-            return "vowels"
-        elif len(source_item) == 1:
-            return "single characters"
-        elif "consonant" in lowercase_content and source_item[0] in lowercase_content:
-            for line in lowercase_content.split('\n'):
-                if f"{source_item[0]} consonants" in line:
-                    return f"{source_item[0].upper()} consonants"
-
-        # Default to character type
-        if len(source_item) == 1:
-            return "single characters"
-        elif len(source_item) == 2 and source_item[1] in "aeiou":
-            return f"{source_item[0].upper()} consonants"
-        else:
-            return "combinations"
-
-    def _extract_example_pairs(self, content: str) -> List[Tuple[str, str]]:
-        """Extract example input/output pairs from content"""
-        examples = []
-
-        # Look for example section
-        example_section_match = re.search(r'(?:example|examples|word examples)[:\s]+(.*?)(?=(?:^#)|$)',
-                                        content, re.I | re.DOTALL | re.MULTILINE)
-
-        if example_section_match:
-            example_text = example_section_match.group(1)
-            # Extract pairs in format: "source → target"
-            pairs = re.findall(r'"([^"]+)"\s*(?:→|->)\s*"([^"]+)"', example_text)
-            if pairs:
-                examples.extend(pairs)
-            else:
-                # Try alternate format: source → target
-                alt_pairs = re.findall(r'(\w+)\s*(?:→|->)\s*([^\s(]+)', example_text)
-                examples.extend(alt_pairs)
-
-        return examples
-
     def retrieve_command_memories(self, query: str, command_context: Optional[str] = None, top_k: int = 5, recency_weight: float = 0.3, include_tabular: bool = True) -> str:
         """
         Enhanced retrieval specifically optimized for command outputs with better
@@ -2153,10 +2092,10 @@ class TinyLlamaChat:
         # Process based on command context if provided
         if command_context:
             # Extract command type from context
-            command_type = self._extract_command_type_from_context(command_context)
+            command_type = extract_command_type(command_context)
 
             # Get tabular data if requested
-            if include_tabular and self._is_tabular_command(command_context):
+            if include_tabular and is_tabular_command(command_context):
                 tabular_results = self._retrieve_tabular_data(query, command_context, top_k)
                 # Combine with standard results
                 candidate_results.extend(tabular_results)
@@ -2175,14 +2114,6 @@ class TinyLlamaChat:
         # Format the results
         return self._format_command_memories(top_results, query, command_context)
 
-    def _extract_command_type_from_context(self, command_context: str) -> str:
-        """Extract command type from context string."""
-        return extract_command_type(command_context)
-
-    def _is_tabular_command(self, command_context: str) -> bool:
-        """Check if a command typically produces tabular output."""
-        return is_tabular_command(command_context)
-
     def _retrieve_tabular_data(self, query: str, command_context: str, top_k: int) -> List[Dict]:
         """
         Specialized retrieval for tabular data with column/row awareness.
@@ -2199,8 +2130,8 @@ class TinyLlamaChat:
         results = []
 
         # Try to extract column/row references from the query
-        column_references = self._extract_column_references(query)
-        row_references = self._extract_row_references(query)
+        column_references = extract_column_references(query)
+        row_references = extract_row_references(query)
 
         # If we have specific column/row references, prioritize those memories
         if column_references or row_references:
@@ -2216,7 +2147,7 @@ class TinyLlamaChat:
 
                 # Check command match if context provided
                 if command_context and 'command' in metadata:
-                    if not self._commands_match(command_context, metadata['command']):
+                    if not commands_match(command_context, metadata['command']):
                         continue
 
                 # Check column references
@@ -2274,18 +2205,6 @@ class TinyLlamaChat:
 
         return results
 
-    def _extract_column_references(self, query: str) -> List[str]:
-        """Extract column name references from a query."""
-        return extract_column_references(query)
-
-    def _extract_row_references(self, query: str) -> List[int]:
-        """Extract row number references from a query."""
-        return extract_row_references(query)
-
-    def _commands_match(self, context: str, command: str) -> bool:
-        """Check if command context matches a command string."""
-        return commands_match(context, command)
-
     def _score_command_memories(self, results: List[Dict], query: str, command_context: Optional[str] = None, recency_weight: float = 0.3) -> List[Dict]:
         """
         Enhanced scoring for command memories with recency bias.
@@ -2333,7 +2252,7 @@ class TinyLlamaChat:
             # Calculate command match score
             if command_context and 'command' in metadata:
                 stored_command = metadata['command']
-                if self._commands_match(command_context, stored_command):
+                if commands_match(command_context, stored_command):
                     command_match_score = 1.0
                 else:
                     command_match_score = 0.2
@@ -2540,10 +2459,6 @@ class TinyLlamaChat:
             return True
 
         return False
-
-    def _extract_command_context(self, query: str) -> Optional[str]:
-        """Extract command context from a query."""
-        return extract_command_context(query)
 
     def cleanup(self):
         """Release all resources properly."""
@@ -2807,7 +2722,7 @@ def main():
                         help="Confidence threshold below which to trigger web search")
     parser.add_argument("--test-fractal", action="store_true", default=False,
                     help="Run fractal embedding diagnostics")
-    
+
     args = parser.parse_args()
 
 
@@ -3023,12 +2938,36 @@ def main():
                 continue
 
             elif user_input.lower() == '!memory-stats':
-                store = chat._get_user_store(chat.current_user_id)
-                stats = store.get_stats()
-                print("\nMemory System Statistics:")
-                print(f"Total memories: {stats['total_documents']}")
-                print(f"Auto-memorize: {'Enabled' if stats['auto_memorize'] else 'Disabled'}")
-                print(f"Last consolidation: {stats['last_consolidation']}")
+                try:
+                    # Get vector store stats
+                    store = chat.memory_manager._get_user_store(chat.current_user_id)
+                    store_stats = store.get_stats() if store else {"total_documents": 0, "active_documents": 0}
+
+                    # Get memory manager state
+                    auto_memorize = chat.memory_manager.auto_memorize if hasattr(chat.memory_manager, 'auto_memorize') else False
+
+                    print("\nMemory System Statistics:")
+                    print(f"Total memories: {store_stats.get('total_documents', 0)}")
+                    print(f"Active memories: {store_stats.get('active_documents', 0)}")
+                    print(f"Auto-memorize: {'Enabled' if auto_memorize else 'Disabled'}")
+
+                    # Add additional statistics from the store if available
+                    if hasattr(store, 'get_stats') and callable(store.get_stats):
+                        try:
+                            # Include more stats if they're available and informative
+                            if 'index_dimension' in store_stats:
+                                print(f"Embedding dimension: {store_stats.get('index_dimension', 384)}")
+                            if 'deleted_documents' in store_stats:
+                                print(f"Deleted memories: {store_stats.get('deleted_documents', 0)}")
+                            # Show when the last store update happened
+                            if 'last_updated' in store_stats:
+                                print(f"Last updated: {store_stats.get('last_updated', 'never')}")
+                        except Exception:
+                            # Ignore errors in additional stats
+                            pass
+
+                except Exception as e:
+                    print(f"Unexpected error when getting memory stats: {str(e)}")
                 continue
 
             elif user_input.lower() == '!toggle-web':

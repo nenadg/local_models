@@ -399,89 +399,28 @@ class WebKnowledgeEnhancer:
         except Exception as e:
             print(f"[Web] Error fetching content from {url}: {e}")
             return None
-    
-    def generate_embedding(self, text: str) -> np.ndarray:
-        """
-        Generate embedding vector for text.
-        
-        Args:
-            text: Text to embed
-            
-        Returns:
-            Embedding vector
-        """
-        if self.embedding_function:
-            # Use provided embedding function
-            return self.embedding_function(text)
-        elif self.memory_manager and hasattr(self.memory_manager, 'generate_embedding'):
-            # Use memory manager's embedding function
-            return self.memory_manager.generate_embedding(text)
-        else:
-            # Fallback to random embedding (should be replaced in production)
-            print("[Web] Warning: No embedding function available, using random embeddings")
-            return np.random.random(384)  # Common embedding dimension
-    
-    def compare_vectors(self, query_vector: np.ndarray, result_vectors: List[Tuple[np.ndarray, Dict]]) -> List[Dict]:
-        """
-        Compare query vector with result vectors and score by relevance.
-        
-        Args:
-            query_vector: Vector representation of the query
-            result_vectors: List of (vector, metadata) tuples
-            
-        Returns:
-            List of results with similarity scores
-        """
-        scored_results = []
-        
-        # Normalize query vector
-        query_vector_norm = query_vector / np.linalg.norm(query_vector)
-        
-        for vec, metadata in result_vectors:
-            # Normalize result vector
-            vec_norm = vec / np.linalg.norm(vec)
-            
-            # Calculate cosine similarity
-            similarity = np.dot(query_vector_norm, vec_norm)
-            
-            # Apply sharpening if enabled
-            if self.vector_sharpening_factor > 0:
-                # Enhanced similarity with sharpening
-                if similarity > 0.7:
-                    # Boost high similarities
-                    similarity = similarity + (similarity - 0.7) * self.vector_sharpening_factor
-                elif similarity < 0.3:
-                    # Penalize low similarities
-                    similarity = similarity - (0.3 - similarity) * self.vector_sharpening_factor
-                    
-                # Ensure valid range
-                similarity = max(0.0, min(1.0, similarity))
-            
-            # Add to results with similarity score
-            result = metadata.copy()
-            result['similarity'] = float(similarity)
-            scored_results.append(result)
-        
-        # Sort by similarity score
-        scored_results.sort(key=lambda x: x['similarity'], reverse=True)
-        
-        return scored_results
-    
+
     def compare_vectors_enhanced(
         self,
         query_vector: np.ndarray,
         result_vectors: List[Tuple[np.ndarray, Dict]],
+        keyword_vector: Optional[np.ndarray] = None,
+        query_weight: float = 0.7,
+        keyword_weight: float = 0.3,
         entities: List[str] = None,
         min_threshold: float = 0.4,
         diversity_factor: float = 0.1
     ) -> List[Dict]:
         """
-        Enhanced vector comparison with entity-boosting, diversity promotion,
-        and improved similarity calculation.
+        Enhanced vector comparison with dual verification, entity-boosting,
+        diversity promotion, and improved similarity calculation.
 
         Args:
-            query_vector: Vector representation of the query
+            query_vector: Vector representation of the original query
             result_vectors: List of (vector, metadata) tuples
+            keyword_vector: Optional vector representation of keywords/SEO terms
+            query_weight: Weight for original query similarity (0-1)
+            keyword_weight: Weight for keyword similarity (0-1)
             entities: List of extracted entities from the query
             min_threshold: Minimum similarity threshold
             diversity_factor: How much to penalize similar results (0-1)
@@ -501,12 +440,34 @@ class WebKnowledgeEnhancer:
         # Normalize query vector
         query_vector_norm = query_vector / np.linalg.norm(query_vector)
 
+        # Normalize keyword vector if provided
+        keyword_vector_norm = None
+        if keyword_vector is not None:
+            keyword_vector_norm = keyword_vector / np.linalg.norm(keyword_vector)
+            # Adjust weights to ensure they sum to 1.0
+            total_weight = query_weight + keyword_weight
+            query_weight = query_weight / total_weight
+            keyword_weight = keyword_weight / total_weight
+
         for vec, metadata in result_vectors:
             # Normalize result vector
             vec_norm = vec / np.linalg.norm(vec)
 
-            # Calculate cosine similarity
-            similarity = np.dot(query_vector_norm, vec_norm)
+            # Calculate similarity - use dual verification if keyword vector is provided
+            if keyword_vector_norm is not None:
+                # Calculate both similarities
+                query_similarity = np.dot(query_vector_norm, vec_norm)
+                keyword_similarity = np.dot(keyword_vector_norm, vec_norm)
+
+                # Weighted combined similarity
+                similarity = (query_weight * query_similarity) + (keyword_weight * keyword_similarity)
+
+                # Store individual similarities for reference
+                metadata['query_similarity'] = float(query_similarity)
+                metadata['keyword_similarity'] = float(keyword_similarity)
+            else:
+                # Standard single vector similarity
+                similarity = np.dot(query_vector_norm, vec_norm)
 
             # Skip if below threshold
             if similarity < min_threshold:
@@ -617,24 +578,22 @@ class WebKnowledgeEnhancer:
                         process_urls: bool = False,
                         messages: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
-        Enhanced version of the response enhancement function with improved
-        query processing and result filtering.
+        Enhance response generation with web knowledge when confidence is low.
 
         Args:
             query: User query
-            confidence_data: Model confidence metrics
+            confidence_data: Confidence metrics from the model
             domain: Optional domain classification
             process_urls: Whether to fetch full content from URLs
             messages: Optional conversation history
 
         Returns:
-            Dictionary with enhancement data
+            Web enhancement data
         """
-        # Check if enhancement is needed
-        if not self.should_enhance_with_web_knowledge(query, confidence_data, domain):
+        if not self.memory_manager:
             return {
                 'enhanced': False,
-                'reason': 'confidence_sufficient',
+                'reason': 'web_knowledge_disabled',
                 'web_results': []
             }
 
@@ -646,10 +605,10 @@ class WebKnowledgeEnhancer:
         seo_friendly_query = self._strip_preambles_strictly(seo_friendly_query)
 
         # Generate embedding for original query
-        query_vector = self.generate_embedding(query)
+        query_vector = self.memory_manager.generate_embedding(query)
 
         # Generate embedding for seo_friendly_query
-        keyword_vector = self.generate_embedding(seo_friendly_query)
+        keyword_vector = self.memory_manager.generate_embedding(seo_friendly_query)
 
         # Make sure entities are included in the search
         if entities and not any(entity.lower() in seo_friendly_query.lower() for entity in entities):
@@ -697,15 +656,18 @@ class WebKnowledgeEnhancer:
             text_to_embed = f"{result['title']} {result['snippet']}"
 
             # Generate embedding
-            embedding = self.generate_embedding(text_to_embed)
+            embedding = self.memory_manager.generate_embedding(text_to_embed)
 
             # Add to result vectors
             result_vectors.append((embedding, result))
 
-        # Use enhanced vector comparison
+        # Use enhanced vector comparison with dual verification
         scored_results = self.compare_vectors_enhanced(
-            query_vector,
-            result_vectors,
+            query_vector=query_vector,
+            result_vectors=result_vectors,
+            keyword_vector=keyword_vector,  # Pass the keyword vector for dual verification
+            query_weight=0.7,
+            keyword_weight=0.3,
             entities=entities,
             min_threshold=0.35,
             diversity_factor=0.15
@@ -725,7 +687,7 @@ class WebKnowledgeEnhancer:
         }
 
         # Add knowledge extraction before returning
-        if filtered_results and hasattr(self, 'knowledge_extractor') and self.knowledge_extractor is not None:
+        if filtered_results and self.knowledge_extractor is not None:
             try:
                 # Extract knowledge from web results
                 texts = [result.get('snippet', '') for result in filtered_results]
@@ -742,73 +704,6 @@ class WebKnowledgeEnhancer:
                 print(f"Error extracting knowledge from web results: {e}")
 
         return enhancement_data
-
-    def compare_vectors_with_dual_verification(
-        self,
-        query_vector: np.ndarray,
-        keyword_vector: np.ndarray,
-        result_vectors: List[Tuple[np.ndarray, Dict]],
-        query_weight: float = 0.7,
-        keyword_weight: float = 0.3,
-        min_threshold: float = 0.3
-    ) -> List[Dict]:
-        """
-        Compare result vectors against both query and keywords vectors.
-
-        Args:
-            query_vector: Vector representation of the original query
-            keyword_vector: Vector representation of the keywords
-            result_vectors: List of (vector, metadata) tuples
-            query_weight: Weight for query similarity (0-1)
-            keyword_weight: Weight for keyword similarity (0-1)
-            min_threshold: Minimum similarity threshold
-
-        Returns:
-            List of results with combined similarity scores
-        """
-        scored_results = []
-
-        # Normalize vectors
-        query_vector_norm = query_vector / np.linalg.norm(query_vector)
-        keyword_vector_norm = keyword_vector / np.linalg.norm(keyword_vector)
-
-        for vec, metadata in result_vectors:
-            # Normalize result vector
-            vec_norm = vec / np.linalg.norm(vec)
-
-            # Calculate similarities
-            query_similarity = np.dot(query_vector_norm, vec_norm)
-            keyword_similarity = np.dot(keyword_vector_norm, vec_norm)
-
-            # Calculate weighted combined similarity
-            combined_similarity = (query_weight * query_similarity) + (keyword_weight * keyword_similarity)
-
-            # Apply sharpening if enabled
-            if self.vector_sharpening_factor > 0:
-                # Enhanced similarity with sharpening
-                if combined_similarity > 0.7:
-                    # Boost high similarities
-                    combined_similarity = combined_similarity + (combined_similarity - 0.7) * self.vector_sharpening_factor
-                elif combined_similarity < 0.3:
-                    # Penalize low similarities
-                    combined_similarity = combined_similarity - (0.3 - combined_similarity) * self.vector_sharpening_factor
-
-                # Ensure valid range
-                combined_similarity = max(0.0, min(1.0, combined_similarity))
-
-            # Only include results above minimum threshold
-            if combined_similarity >= min_threshold:
-                # Add to results with similarity score
-                result = metadata.copy()
-                result['similarity'] = float(combined_similarity)
-                result['query_similarity'] = float(query_similarity)
-                result['keyword_similarity'] = float(keyword_similarity)
-                scored_results.append(result)
-
-        # Sort by similarity score
-        scored_results.sort(key=lambda x: x['similarity'], reverse=True)
-
-        return scored_results
     
     def format_web_results_for_context(self, enhancement_data: Dict[str, Any], max_results: int = 5) -> str:
         """
@@ -945,7 +840,8 @@ class WebKnowledgeEnhancer:
                         'url': result.get('url', ''),
                         'similarity': result.get('similarity', 0.0),
                         'web_timestamp': time.time()
-                    }
+                    },
+                    pre_sharpen=self.memory_manager.sharpening_enabled
                 )
                 
                 added_count += memories_added
@@ -1187,8 +1083,19 @@ class WebKnowledgeEnhancer:
             # Create fractal-enabled store if not already using one
             store = self.memory_manager._get_user_store(current_user_id)
 
+            # Defensive check: ensure store and index are initialized
+            if not store or not hasattr(store, 'index') or store.index is None:
+                print("[Web] Vector store not properly initialized")
+                return None
+
+            # Additional verification of fractal capability
             if not hasattr(store, 'fractal_enabled') or not store.fractal_enabled:
                 print("[Web] Fractal embeddings not enabled in vector store")
+                return None
+
+            # Check if the store has any documents
+            if not hasattr(store, 'documents') or len(store.documents) == 0:
+                print("[Web] Store has no documents to search")
                 return None
 
             # Generate embedding for query
@@ -1198,32 +1105,30 @@ class WebKnowledgeEnhancer:
             print(f"[Web] Fractal search enabled: {getattr(store, 'fractal_enabled', False)}")
             print(f"[Web] Store total documents: {len(getattr(store, 'documents', []))}")
 
-            # Conduct a broader, multi-level fractal search with lower threshold to find anything related
-            print("[Web] Executing multi-level fractal search")
-            # search_results = store.search(
-            #     query_embedding,
-            #     top_k=5,
-            #     min_similarity=0.60,  # Lower threshold to find more potential matches
-            #     multi_level_search=True
-            # )
+            try:
+                # Conduct a broader, multi-level fractal search with lower threshold to find anything related
+                print("[Web] Executing multi-level fractal search")
 
-            if hasattr(store, 'enhanced_fractal_search'):
-                search_results = store.enhanced_fractal_search(
-                    query_embedding,
-                    top_k=5,
-                    min_similarity=0.60, # Lower threshold to find more potential matches
-                    multi_level_search=True
-                )
-            else:
-                # Fallback to standard search
-                search_results = store.search(
-                    query_embedding,
-                    top_k=5,
-                    min_similarity=0.60,
-                    multi_level_search=True
-                )
+                # Try enhanced fractal search first
+                if hasattr(store, 'enhanced_fractal_search'):
+                    search_results = store.enhanced_fractal_search(
+                        query_embedding,
+                        top_k=5,
+                        min_similarity=0.60, # Lower threshold to find more potential matches
+                        multi_level_search=True
+                    )
+                else:
+                    # Fallback to standard search
+                    search_results = store.search(
+                        query_embedding,
+                        top_k=5,
+                        min_similarity=0.60
+                    )
 
-            print(f"[Web] Fractal search returned {len(search_results)} results")
+                print(f"[Web] Fractal search returned {len(search_results)} results")
+            except Exception as search_error:
+                print(f"[Web] Error during fractal search: {search_error}")
+                return None
 
             # Process results
             for result in search_results:

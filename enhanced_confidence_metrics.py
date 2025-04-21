@@ -95,54 +95,22 @@ class EnhancedConfidenceMetrics:
 
     def _sharpen_token_metrics(self, probability: float, entropy: float) -> tuple:
         """
-        Apply sharpening to token metrics, with improved algorithm for better results.
+        Apply sharpening to token metrics using the unified SharpeningUtils.
 
         Args:
             probability: Original token probability
             entropy: Original entropy value
+
         Returns:
             Tuple of (sharpened_probability, sharpened_entropy)
         """
-        # IMPROVED: More precise probability sharpening based on ranges
-        if probability > 0.75:
-            # For very high confidence, small boosting with diminishing returns
-            boost = min(0.15, (probability - 0.75) * self.sharpening_factor * 0.5)
-            sharpened_prob = min(0.99, probability + boost)
-        elif probability > 0.5:
-            # For medium-high confidence, moderate boost
-            boost = (probability - 0.5) * self.sharpening_factor * 0.4
-            sharpened_prob = probability + boost
-        elif probability > 0.3:
-            # For medium confidence, slight reduction
-            reduction = (0.5 - probability) * self.sharpening_factor * 0.2
-            sharpened_prob = probability - reduction
-        else:
-            # For low confidence, stronger reduction
-            reduction = (0.3 - probability) * self.sharpening_factor * 0.8
-            sharpened_prob = max(0.01, probability - reduction)
+        from sharpening_utils import SharpeningUtils
 
-        # IMPROVED: More nuanced entropy sharpening with reference points
-        reference_low = 1.0   # Low entropy (good)
-        reference_high = 3.0  # High entropy (bad)
-
-        if entropy < reference_low:
-            # Good (low) entropy - make it even better (lower) with diminishing returns
-            factor = 1.0 - (self.sharpening_factor * 0.3 * (reference_low - entropy) / reference_low)
-            sharpened_entropy = entropy * factor
-        elif entropy < reference_high:
-            # Medium entropy - interpolate between references
-            position = (entropy - reference_low) / (reference_high - reference_low)
-            # Less sharpening in the middle range
-            adjustment = self.sharpening_factor * 0.2 * (0.5 - abs(position - 0.5))
-            sharpened_entropy = entropy * (1.0 + adjustment)
-        else:
-            # Bad (high) entropy - make it worse (higher) with more aggressive factor for very poor entropy
-            excess = entropy - reference_high
-            scaling = 1.0 + (self.sharpening_factor * 0.4 * min(1.0, excess / 2.0))
-            sharpened_entropy = reference_high + (excess * scaling)
-
-        return sharpened_prob, sharpened_entropy
-
+        return SharpeningUtils.sharpen_token_metrics(
+            probability=probability,
+            entropy=entropy,
+            sharpening_factor=self.sharpening_factor
+        )
 
     def sharpen_values(self, values: List[float], threshold: float, higher_is_better: bool = True) -> List[float]:
         """

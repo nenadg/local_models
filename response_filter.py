@@ -86,7 +86,7 @@ class ResponseFilter:
 
     def sharpen_metrics(self, metrics: Dict[str, float]) -> Dict[str, float]:
         """
-        Apply sharpening to confidence metrics.
+        Apply sharpening to confidence metrics using the unified SharpeningUtils.
 
         Args:
             metrics: Dictionary of confidence metrics
@@ -94,37 +94,12 @@ class ResponseFilter:
         Returns:
             Dictionary with sharpened metrics
         """
-        # Create a copy to avoid modifying the original
-        sharpened = metrics.copy()
+        from sharpening_utils import SharpeningUtils
 
-        # Sharpen confidence score
-        if 'confidence' in metrics:
-            # Apply non-linear sharpening to confidence
-            conf = metrics['confidence']
-            # Favor high confidence, penalize low confidence
-            if conf > 0.6:
-                # Boost high confidence
-                sharpened['confidence'] = min(1.0, conf + (conf - 0.6) * (self.sharpening_factor - 1.0))
-            else:
-                # Reduce low confidence
-                sharpened['confidence'] = conf * (0.7 + (conf * 0.3))
-
-        # For entropy and perplexity (where lower is better), apply inverse sharpening
-        if 'entropy' in metrics:
-            # Get normalized entropy (0-1 range where 0 is best)
-            norm_entropy = min(1.0, metrics['entropy'] / self.entropy_threshold)
-            # Apply sharpening
-            sharpened_norm = norm_entropy ** self.sharpening_factor
-            # Convert back to original scale
-            sharpened['entropy'] = sharpened_norm * self.entropy_threshold
-
-        if 'perplexity' in metrics:
-            # Similar approach for perplexity
-            norm_perp = min(1.0, metrics['perplexity'] / self.perplexity_threshold)
-            sharpened_norm = norm_perp ** self.sharpening_factor
-            sharpened['perplexity'] = sharpened_norm * self.perplexity_threshold
-
-        return sharpened
+        return SharpeningUtils.sharpen_metrics(
+            metrics=metrics,
+            sharpening_factor=self.sharpening_factor
+        )
 
     def should_filter(self, metrics: Dict[str, float], query: Optional[str] = None) -> Tuple[bool, str]:
         """

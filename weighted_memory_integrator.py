@@ -43,18 +43,26 @@ class WeightedMemoryIntegrator:
         # Determine domain-specific settings
         settings = self._get_settings(query)
 
-        # Get memories with domain-specific settings
-        memory_text = self._retrieve_memories(user_id, query, settings)
+        try:
+            # Get memories with domain-specific settings
+            memory_text = self._retrieve_memories(user_id, query, settings)
 
-        # Apply domain-specific post-processing if needed
-        if settings['post_process'] and settings['domain'] in self.post_processors:
-            memory_text = self.post_processors[settings['domain']](query, memory_text)
+            # Apply domain-specific post-processing if needed
+            if settings['post_process'] and settings['domain'] in self.post_processors:
+                memory_text = self.post_processors[settings['domain']](query, memory_text)
 
-        # Return both the memory text and the settings used
-        return {
-            'memory_text': memory_text,
-            'settings': settings
-        }
+            # Return both the memory text and the settings used
+            return {
+                'memory_text': memory_text,
+                'settings': settings
+            }
+        except Exception as e:
+            # Log the error and return empty memory with settings
+            print(f"Error retrieving memories: {e}")
+            return {
+                'memory_text': "",
+                'settings': settings
+            }
 
     def _get_settings(self, query: str) -> Dict[str, Any]:
         """Get domain-specific settings based on query classification"""
@@ -146,6 +154,10 @@ class WeightedMemoryIntegrator:
         # Get the store directly
         store = self.memory_manager._get_user_store(user_id)
 
+        if not store or not hasattr(store, 'index') or store.index is None:
+            print("Memory store not fully initialized yet, returning empty results")
+            return ""
+
         # Generate embedding for the query
         query_embedding = self.memory_manager.generate_embedding(query)
 
@@ -193,7 +205,7 @@ class WeightedMemoryIntegrator:
 
         if domain == 'arithmetic':
             # Try to parse the arithmetic expression
-            expression = self._extract_arithmetic_expression(query)
+            expression = extract_arithmetic_expression(query)
             if expression:
                 try:
                     # Safely evaluate the expression
@@ -247,7 +259,7 @@ class WeightedMemoryIntegrator:
             translation_reminder = "IMPORTANT NOTE:\n- Be careful with translations, especially for uncommon languages. If unsure, indicate your uncertainty.\n\n"
 
             # Clean up memory text
-            cleaned_memory = self._clean_duplicate_memories(memory_text)
+            cleaned_memory = clean_duplicate_memories(memory_text)
 
             if cleaned_memory:
                 return translation_reminder + cleaned_memory
@@ -255,11 +267,7 @@ class WeightedMemoryIntegrator:
                 return translation_reminder
 
         # For other domains, just clean up duplicates
-        return self._clean_duplicate_memories(memory_text)
-
-    def _extract_arithmetic_expression(self, query: str) -> Optional[str]:
-        """Extract an arithmetic expression from a query."""
-        return extract_arithmetic_expression(query)
+        return clean_duplicate_memories(memory_text)
 
     def _post_process_arithmetic(self, query: str, memory_text: str) -> str:
         """
@@ -273,7 +281,7 @@ class WeightedMemoryIntegrator:
             Post-processed memory text
         """
         # This is similar to _inject_domain_knowledge but focused on verification
-        expression = self._extract_arithmetic_expression(query)
+        expression = extract_arithmetic_expression(query)
         if not expression:
             return memory_text
 
@@ -565,7 +573,3 @@ class WeightedMemoryIntegrator:
                 cleaned_lines.append(line)
 
         return '\n'.join(cleaned_lines)
-
-    def _clean_duplicate_memories(self, memory_text: str) -> str:
-        """Remove duplicate memories from text."""
-        return clean_duplicate_memories(memory_text)
