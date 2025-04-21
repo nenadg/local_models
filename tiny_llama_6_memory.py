@@ -138,7 +138,7 @@ class TinyLlamaChat:
 
         if self.knowledge_system_enabled:
             self._initialize_knowledge_integration()
-            
+
         os.makedirs(memory_dir, exist_ok=True)
 
         current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
@@ -756,6 +756,9 @@ class TinyLlamaChat:
     def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None, use_web_search=True):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
         # We only support streaming now, simplifies the code
+
+        fallback_message_streamed = False
+
         try:
             # heatmap = TerminalHeatmap(self.tokenizer, use_background=False)
             heatmap = EnhancedHeatmap(self.tokenizer, use_background=False, window_size=3)
@@ -866,7 +869,7 @@ class TinyLlamaChat:
             tokens_received = 0
             early_confidence_check_threshold = 10  # Check confidence after this many tokens
             low_confidence_detected = False
-            fallback_message_streamed = False
+
             user_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
 
             try:
@@ -2255,7 +2258,7 @@ class TinyLlamaChat:
             #     min_similarity=0.2
             # )
             semantic_results = store.enhanced_fractal_search(
-                query_embedding,
+                tabular_embedding,
                 top_k=10,
                 multi_level_search=True,
                 level_weights=[1.0, 0.7, 0.5, 0.3]
