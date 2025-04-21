@@ -13,6 +13,8 @@ from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 
+from knowledge_extractor import KnowledgeExtractor
+
 class WebKnowledgeEnhancer:
     """
     Enhances LLM knowledge by retrieving and processing web search results,
@@ -49,6 +51,10 @@ class WebKnowledgeEnhancer:
         self.max_results = max_results
         self.search_engine = search_engine
         self.embedding_function = embedding_function
+        self.knowledge_extractor = KnowledgeExtractor(
+            embedding_function=self.memory_manager.generate_embedding if self.memory_manager else None,
+            enable_fractal_validation=True
+        )
         
         # Default user agents to rotate
         self.user_agents = user_agents or [
@@ -603,6 +609,7 @@ class WebKnowledgeEnhancer:
         else:
             return scored_results
 
+
     def enhance_response(self, 
                         query: str,
                         confidence_data: Dict[str, float],
@@ -707,7 +714,7 @@ class WebKnowledgeEnhancer:
         # Filter results by minimum similarity
         filtered_results = scored_results[:self.max_results]
 
-        return {
+        enhancement_data = {
             'enhanced': True,
             'reason': 'low_confidence',
             'query_vector': query_vector,
@@ -716,6 +723,25 @@ class WebKnowledgeEnhancer:
             'filtered_count': len(filtered_results),
             'entities': entities
         }
+
+        # Add knowledge extraction before returning
+        if filtered_results and hasattr(self, 'knowledge_extractor') and self.knowledge_extractor is not None:
+            try:
+                # Extract knowledge from web results
+                texts = [result.get('snippet', '') for result in filtered_results]
+                sources = [result.get('url', '') for result in filtered_results]
+                extracted_knowledge = self.knowledge_extractor.extract_knowledge(
+                    "\n".join(texts),
+                    source="web_search:" + query[:50],  # Truncate long queries
+                    domain="web_search"
+                )
+
+                # Add extracted knowledge to results
+                enhancement_data['extracted_knowledge'] = extracted_knowledge
+            except Exception as e:
+                print(f"Error extracting knowledge from web results: {e}")
+
+        return enhancement_data
 
     def compare_vectors_with_dual_verification(
         self,
@@ -928,7 +954,18 @@ class WebKnowledgeEnhancer:
         
         if added_count > 0:
             print(f"[Web] Added {added_count} web knowledge items to memory")
-            
+
+        extracted_knowledge = enhancement_data.get('extracted_knowledge', [])
+        if extracted_knowledge and hasattr(self.chat, 'current_domain_id') and self.chat.current_domain_id:
+            try:
+                domain = self.chat.memory_manager.get_domain(self.chat.current_domain_id)
+                if domain:
+                    # Add to domain
+                    added_to_domain = domain.add_knowledge(extracted_knowledge)
+                    print(f"[Knowledge] Added {added_to_domain} items to domain {self.chat.current_domain_id}")
+            except Exception as e:
+                print(f"Error adding knowledge to domain: {e}")
+                
         return added_count
     
     def get_stats(self) -> Dict[str, Any]:

@@ -115,6 +115,11 @@ class TinyLlamaChat:
             except:
                 print(f"Finetuned model not loaded, it doesn't exist in {finetuned_model_path}")
 
+        self.knowledge_system_enabled = self.memory_manager.initialize_knowledge_system()
+        self.current_domain_id = None  # Currently active domain ID
+
+
+
         # Initialize the web knowledge enhancer
         self.enable_web_knowledge = enable_web_knowledge
         if enable_web_knowledge:
@@ -131,6 +136,9 @@ class TinyLlamaChat:
 
         self.current_user_id = "default_user"
 
+        if self.knowledge_system_enabled:
+            self._initialize_knowledge_integration()
+            
         os.makedirs(memory_dir, exist_ok=True)
 
         current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
@@ -2657,6 +2665,108 @@ class TinyLlamaChat:
             print(f"\nError during input: {e}")
             return ""
 
+    def load_knowledge_domain(self, domain_id: str) -> bool:
+        """Load a knowledge domain and set it as active."""
+        if not self.knowledge_system_enabled:
+            print("Knowledge management system not available")
+            return False
+
+        domain = self.memory_manager.get_domain(domain_id)
+        if domain:
+            self.current_domain_id = domain_id
+            return True
+        return False
+
+    def create_knowledge_domain(self, name: str, description: str = "") -> Optional[str]:
+        """Create a new knowledge domain."""
+        if not self.knowledge_system_enabled:
+            print("Knowledge management system not available")
+            return None
+
+        domain_id = self.memory_manager.create_domain(name, description)
+        if domain_id:
+            # Set as current domain
+            self.current_domain_id = domain_id
+        return domain_id
+
+    def extract_knowledge_from_text(self, text: str, source: str = None) -> List[Dict[str, Any]]:
+        """Extract knowledge from text."""
+        if not self.knowledge_system_enabled:
+            print("Knowledge management system not available")
+            return []
+
+        # Check if we have a knowledge extractor
+        if not hasattr(self.web_enhancer, 'knowledge_extractor') or not self.web_enhancer.knowledge_extractor:
+            try:
+                from knowledge_extractor import KnowledgeExtractor
+                self.web_enhancer.knowledge_extractor = KnowledgeExtractor(
+                    embedding_function=self.memory_manager.generate_embedding,
+                    enable_fractal_validation=self.memory_manager.fractal_enabled
+                )
+            except ImportError:
+                print("KnowledgeExtractor not available")
+                return []
+
+        # Extract knowledge
+        domain = self.current_domain_id or "general"
+        return self.web_enhancer.knowledge_extractor.extract_knowledge(text, source, domain)
+
+    def add_knowledge_to_domain(self, knowledge_items: List[Dict[str, Any]], domain_id: str = None) -> int:
+        """Add knowledge items to a domain."""
+        if not self.knowledge_system_enabled:
+            print("Knowledge management system not available")
+            return 0
+
+        # Use current domain if not specified
+        domain_id = domain_id or self.current_domain_id
+        if not domain_id:
+            print("No domain specified and no current domain")
+            return 0
+
+        # Get domain
+        domain = self.memory_manager.get_domain(domain_id)
+        if not domain:
+            print(f"Domain {domain_id} not found")
+            return 0
+
+        # Add knowledge
+        return domain.add_knowledge(knowledge_items)
+
+    def _initialize_knowledge_integration(self):
+        """Connect all knowledge components together."""
+        if not self.knowledge_system_enabled:
+            return
+
+        # Connect web enhancer to knowledge system
+        if self.web_enhancer:
+            # Give web enhancer access to current domain
+            self.web_enhancer.get_current_domain = lambda: (
+                self.memory_manager.get_domain(self.current_domain_id)
+                if self.current_domain_id else None
+            )
+
+            # Give web enhancer a reference to the knowledge validator
+            if hasattr(self.memory_manager, 'knowledge_validator'):
+                self.web_enhancer.knowledge_validator = self.memory_manager.knowledge_validator
+
+        # Set up knowledge extraction from web results
+        self._ensure_knowledge_extractor()
+
+        print("Knowledge integration initialized")
+
+    def _ensure_knowledge_extractor(self):
+        """Ensure a knowledge extractor is available."""
+        if not hasattr(self, 'knowledge_extractor'):
+            try:
+                from knowledge_extractor import KnowledgeExtractor
+                self.knowledge_extractor = KnowledgeExtractor(
+                    embedding_function=self.memory_manager.generate_embedding,
+                    enable_fractal_validation=self.memory_manager.fractal_enabled
+                )
+            except ImportError:
+                print("KnowledgeExtractor not available")
+                self.knowledge_extractor = None
+
 def main():
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
     parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
@@ -2791,6 +2901,10 @@ def main():
         print("  !fractal-diagnostics - prints fractal embedding diagnostics")
         print("  !visualize-fractal - visual fractal embeddings")
         print("  !compare-queries: [query1] | [query2] - Compare the semantic relationship between two queries")
+        print("  !create-domain: [name] | [description] - Create a new knowledge domain")
+        print("  !load-domain: [domain_id] - Load and activate a knowledge domain")
+        print("  !list-domains - List all available knowledge domains")
+        print("  !extract-knowledge: [text] - Extract structured knowledge from text")
 
         print("\nIf the model expresses uncertainty, you can ask it to speculate")
         print("by saying 'please continue anyway' or 'please speculate'")
@@ -2977,6 +3091,58 @@ def main():
                 except Exception as e:
                     print(f"\nError comparing queries: {e}")
                     print("Usage: !compare-queries: first query | second query")
+                continue
+
+            elif user_input.lower().startswith('!create-domain:'):
+                domain_info = user_input[14:].strip()
+                parts = domain_info.split('|')
+                name = parts[0].strip()
+                description = parts[1].strip() if len(parts) > 1 else ""
+                domain_id = chat.create_knowledge_domain(name, description)
+                if domain_id:
+                    print(f"Created domain: {name} (ID: {domain_id})")
+                else:
+                    print("Failed to create domain")
+                continue
+
+            elif user_input.lower().startswith('!load-domain:'):
+                domain_id = user_input[13:].strip()
+                success = chat.load_knowledge_domain(domain_id)
+                if success:
+                    print(f"Loaded domain: {domain_id}")
+                else:
+                    print(f"Failed to load domain: {domain_id}")
+                continue
+
+            elif user_input.lower().startswith('!list-domains'):
+                if hasattr(chat.memory_manager, 'knowledge_registry'):
+                    domains = chat.memory_manager.knowledge_registry.list_domains()
+                    print("\nAvailable Knowledge Domains:")
+                    for domain in domains:
+                        print(f"- {domain['name']} (ID: {domain['domain_id']})")
+                        print(f"  Description: {domain['description']}")
+                        print(f"  Items: {domain['stats'].get('total_items', 0)}")
+                else:
+                    print("Knowledge registry not available")
+                continue
+
+            elif user_input.lower().startswith('!extract-knowledge:'):
+                text = user_input[18:].strip()
+                if not text:
+                    print("Please provide text to extract knowledge from")
+                else:
+                    knowledge_items = chat.extract_knowledge_from_text(text, "user_input")
+                    print(f"Extracted {len(knowledge_items)} knowledge items:")
+                    for i, item in enumerate(knowledge_items[:5]):  # Show first 5
+                        print(f"{i+1}. Type: {item['type']}")
+                        print(f"   Content: {item['content']}")
+                        print(f"   Confidence: {item['metadata']['confidence']}")
+
+                    if chat.current_domain_id:
+                        add_to_domain = input(f"Add to current domain '{chat.current_domain_id}'? (y/n): ")
+                        if add_to_domain.lower() == 'y':
+                            count = chat.add_knowledge_to_domain(knowledge_items)
+                            print(f"Added {count} knowledge items to domain {chat.current_domain_id}")
                 continue
 
             # Add user message to conversation

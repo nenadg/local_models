@@ -289,6 +289,14 @@ class ResponseFilter:
 
         # If we get here, we need to filter the response
 
+        # Check for unusual repetition patterns
+        repetition_check = self._check_for_repetition(response)
+        if repetition_check.get('excessive_repetition', False):
+            # Use a stronger filtering threshold for repetitive content
+            if metrics['confidence'] < self.confidence_threshold * 1.2:
+                should_filter = True
+                reason = "repetitive_content"
+
         # Extract any MCP commands if needed
         mcp_commands = []
         if preserve_mcp:
@@ -330,6 +338,36 @@ class ResponseFilter:
             return fallback + "\n\n" + "\n".join(mcp_commands)
 
         return fallback
+
+
+    def _check_for_repetition(self, text: str) -> Dict[str, Any]:
+        """Check for unusual repetition patterns in text."""
+        # Split into lines or items
+        lines = text.split('\n')
+
+        # Count repeats of the same content
+        content_counts = {}
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Remove numbering like "1. ", "2. "
+            clean_line = re.sub(r'^\d+\.\s+', '', line)
+            if clean_line in content_counts:
+                content_counts[clean_line] += 1
+            else:
+                content_counts[clean_line] = 1
+
+        # Check for excessive repetition
+        max_repeats = max(content_counts.values()) if content_counts else 0
+        excessive_repetition = max_repeats > 3
+
+        return {
+            'excessive_repetition': excessive_repetition,
+            'max_repeats': max_repeats,
+            'repeat_items': [item for item, count in content_counts.items() if count > 1]
+        }
 
     def set_thresholds(
         self,

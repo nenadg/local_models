@@ -1210,6 +1210,36 @@ class VectorStore:
             # Call the regular add method with potentially sharpened embedding
             return self.add(text, embedding, metadata)
 
+    def get_domain_partition(self, domain_id: str):
+        """Get a domain-specific partition of the vector store."""
+        if not domain_id:
+            return self
+
+        # Create a filtered view of this vector store
+        domain_indices = []
+        for i, metadata in enumerate(self.metadata):
+            if metadata.get('domain_id') == domain_id:
+                domain_indices.append(i)
+
+        return self._create_domain_view(domain_indices)
+
+    def _create_domain_view(self, indices: List[int]):
+        """Create a filtered view of the vector store."""
+        from copy import deepcopy
+
+        # Create a new instance with the same parameters
+        view = deepcopy(self)
+
+        # Filter documents and metadata
+        view.documents = [self.documents[i] for i in indices]
+        view.metadata = [self.metadata[i] for i in indices]
+
+        # We don't modify the actual index since that would be expensive
+        # Instead, we'll filter results during search
+        view._domain_filter_indices = set(indices)
+
+        return view
+
     def diagnostics_fractal_embeddings(self, sample_size=10):
         """
         Diagnostic method to verify fractal embedding generation.
@@ -1850,3 +1880,42 @@ class MemoryManager:
                 memories_added += 1
 
         return memories_added
+
+    def initialize_knowledge_system(self):
+        """Initialize the knowledge management system."""
+        try:
+            # Import the knowledge registry
+            from knowledge_registry import KnowledgeRegistry
+
+            # Create registry
+            self.knowledge_registry = KnowledgeRegistry(
+                base_directory=os.path.join(self.memory_dir, "knowledge_domains"),
+                embedding_function=self.generate_embedding,
+                embedding_dim=self.embedding_dim,
+                enable_fractal=self.fractal_enabled,
+                max_fractal_levels=self.max_fractal_levels
+            )
+
+            # Create validator
+            from knowledge_validator import KnowledgeValidator
+            self.knowledge_validator = KnowledgeValidator(
+                embedding_function=self.generate_embedding,
+                enable_fractal_validation=self.fractal_enabled
+            )
+
+            return True
+        except ImportError:
+            print("Knowledge management system not available")
+            return False
+
+    def get_domain(self, domain_id: str):
+        """Get a knowledge domain by ID."""
+        if hasattr(self, 'knowledge_registry'):
+            return self.knowledge_registry.get_domain(domain_id)
+        return None
+
+    def create_domain(self, name: str, description: str = ""):
+        """Create a new knowledge domain."""
+        if hasattr(self, 'knowledge_registry'):
+            return self.knowledge_registry.create_domain(name, description)
+        return None
