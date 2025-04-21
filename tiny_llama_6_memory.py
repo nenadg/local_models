@@ -46,6 +46,7 @@ from batch_utils import tensor_batch_processing
 from web_knowledge_enhancer import WebKnowledgeEnhancer
 
 from semantic_reasoning_enhancer import integrate_semantic_reasoning
+from rolling_window_manager import RollingWindowManager
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -118,8 +119,6 @@ class TinyLlamaChat:
         self.knowledge_system_enabled = self.memory_manager.initialize_knowledge_system()
         self.current_domain_id = None  # Currently active domain ID
 
-
-
         # Initialize the web knowledge enhancer
         self.enable_web_knowledge = enable_web_knowledge
         if enable_web_knowledge:
@@ -169,6 +168,17 @@ class TinyLlamaChat:
         # Load model and tokenizer
         print(f"Loading target model: {model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+
+        # Initialize the window manager with our tokenizer
+        self.window_manager = RollingWindowManager(
+            tokenizer=self.tokenizer,
+            max_window_size=2048,  # Default context window size
+            memory_manager=self.memory_manager,
+            safety_margin=50  # Provide some buffer
+        )
+
+        print("Context window management initialized")
+
 
         # Set pad_token if not already set and different from eos_token
         # FIXES: The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's attention_mask to obtain reliable results
@@ -802,9 +812,20 @@ class TinyLlamaChat:
             # Create enhanced prompt with knowledge
             enhanced_messages = self.create_prompt_with_knowledge(messages, use_web_search)
 
+            # Use the window manager to optimize messages to fit token limits
+            optimized_messages = self.window_manager.optimize_messages(enhanced_messages, max_new_tokens)
+
+            # Log token counts to help with debugging
+            original_tokens = self.window_manager.calculate_tokens(enhanced_messages)
+            optimized_tokens = self.window_manager.calculate_tokens(optimized_messages)
+
+            if original_tokens != optimized_tokens:
+                print(f"Context window optimized: {original_tokens} → {optimized_tokens} tokens " +
+                      f"(saved {original_tokens - optimized_tokens} tokens)")
+
             # Apply chat template
             prompt = self.tokenizer.apply_chat_template(
-                enhanced_messages,
+                optimized_messages,
                 tokenize=False,
                 add_generation_prompt=True
             )
