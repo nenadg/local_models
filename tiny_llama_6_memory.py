@@ -46,7 +46,7 @@ from batch_utils import tensor_batch_processing
 from web_knowledge_enhancer import WebKnowledgeEnhancer
 
 from semantic_reasoning_enhancer import integrate_semantic_reasoning
-from rolling_window_manager import RollingWindowManager
+from continuation_manager import ContinuationTrackingWindowManager
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -170,14 +170,15 @@ class TinyLlamaChat:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 
         # Initialize the window manager with our tokenizer
-        self.window_manager = RollingWindowManager(
+        self.window_manager = ContinuationTrackingWindowManager(
             tokenizer=self.tokenizer,
-            max_window_size=2048,  # Default context window size
+            max_window_size=2048,
             memory_manager=self.memory_manager,
-            safety_margin=50  # Provide some buffer
+            safety_margin=50,
+            continuation_buffer_size=200  # Store the last 200 tokens for continuation
         )
 
-        print("Context window management initialized")
+        print("Context window and continuation tracking initialized")
 
 
         # Set pad_token if not already set and different from eos_token
@@ -290,6 +291,22 @@ class TinyLlamaChat:
 
     def create_prompt_with_knowledge(self, messages, use_web_search=True):
         """Create a prompt that incorporates relevant knowledge with domain-aware weighting"""
+        if len(messages) > 0 and messages[-1]["role"] == "user":
+            user_query = messages[-1]["content"]
+
+            # Detect if this is a continuation request
+            if self.window_manager.detect_continuation_request(user_query):
+                print("Detected continuation request, enhancing prompt...")
+
+                # Prepare enhanced continuation prompt
+                enhanced_query = self.window_manager.prepare_continuation_prompt(
+                    query=user_query,
+                    user_id=self.current_user_id
+                )
+
+                # Update the user message with enhanced query
+                messages[-1]["content"] = enhanced_query
+
         # Extract the user's current query
         current_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
 
@@ -1029,6 +1046,13 @@ class TinyLlamaChat:
 
                                         self.confidence_metrics.add_token_score(dummy_logits, max_index)
 
+                                # Track the generated response for continuation
+                                if hasattr(self, 'window_manager') and hasattr(self.window_manager, 'track_generated_response'):
+                                    self.window_manager.track_generated_response(
+                                        response=complete_response,
+                                        user_id=self.current_user_id
+                                    )
+                                    
                                 return self.mcp_handler.finalize_streaming(complete_response)
 
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -1070,6 +1094,13 @@ class TinyLlamaChat:
                                 print(f"[Response saved to: {filename}]")
                             else:
                                 print(f"[Failed to save response to: {filename}]")
+
+                # Track the generated response for continuation
+                if hasattr(self, 'window_manager') and hasattr(self.window_manager, 'track_generated_response'):
+                    self.window_manager.track_generated_response(
+                        response=complete_response,
+                        user_id=self.current_user_id
+                    )
 
                 return complete_response
 
