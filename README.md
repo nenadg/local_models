@@ -41,10 +41,8 @@ source local_models_venv/bin/activate
 ### 3. Install dependencies
 
 ```bash
-pip install torch transformers faiss-cpu numpy scikit-learn accelerate peft datasets spacy textpipeliner matplotlib nltk rake-nltk
+pip install torch transformers faiss-cpu numpy scikit-learn accelerate peft datasets spacy textpipeliner matplotlib nltk rake-nltk prompt_toolkit
 ```
-
-(for keyword exctraction tests - `pip install spacy textpipeliner matplotlib nltk rake-nltk`)
 
 If you have CUDA, install the GPU version of FAISS for better performance:
 
@@ -55,7 +53,7 @@ pip install faiss-gpu
 For language (url search query building):
 
 ```bash
-python -m spacy download en_core_web_sm
+python -m spacy download en_core_web_sm bs4
 ```
 
 (for keyword exctraction tests `python -m spacy download en_core_sci_lg`)
@@ -235,5 +233,13 @@ HSA_OVERRIDE_GFX_VERSION=10.3.0 python local_ai.py --temperature 0.1 --max-token
 For ROCm you have to install
 
 ```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.0
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.1
 ```
+
+In case bitsandbytes complain get this:
+
+```bash
+pip install --no-deps --force-reinstall 'https://github.com/bitsandbytes-foundation/bitsandbytes/releases/download/continuous-release_multi-backend-refactor/bitsandbytes-0.44.1.dev0-py3-none-manylinux_2_24_x86_64.whl'
+```
+
+(source: https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1202)

@@ -286,6 +286,21 @@ class ContinuationTrackingWindowManager:
             self.continuation_context[user_id] = {}
         self.continuation_context[user_id]["target_length"] = target_length
 
+    def _count_words(self, text: str) -> int:
+        """
+        Count the number of words in a text.
+
+        Args:
+            text: The text to count words in
+
+        Returns:
+            The word count
+        """
+        # Use a simple word counting approach
+        # Split by whitespace and filter out empty strings
+        words = [word for word in text.split() if word.strip()]
+        return len(words)
+        
     def track_generated_response(self, response: str, user_id: str = "default_user", target_length: int = None):
         """
         Track a generated response for potential continuation.

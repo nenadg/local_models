@@ -75,10 +75,17 @@ class TinyLlamaChat:
              sharpening_factor=0.3,
              enable_web_knowledge=True,
              fractal_enabled=True,
-             max_fractal_levels=3
+             max_fractal_levels=3,
+             do_sample=False,
+             top_p=1, # initial top_p = 1.0
+             top_k=50   # initial top_k = 50
              ):
         self.model_name = model_name
         self.memory_dir = memory_dir
+        self.do_sample = do_sample
+        self.top_p = top_p
+        self.top_k = top_k
+
         self.stop_event = threading.Event()
 
         self.mcp_handler = MCPHandler(output_dir=output_dir, allow_shell_commands=True)
@@ -189,7 +196,7 @@ class TinyLlamaChat:
         #     self.generation_attention_mask = torch.ones((1, 1))
 
         # Main model loading
-        loading_options = {
+        self.loading_options = {
             "torch_dtype": self.torch_dtype,
             "device_map": "auto" if self.device != "cpu" else None,
             "low_cpu_mem_usage": True,
@@ -197,7 +204,7 @@ class TinyLlamaChat:
 
         # Load model
         print("Loading model...")
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, **loading_options)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, **self.loading_options)
         self.model = self.resource_manager.register_model(self.model)
 
         # Create draft model from target model by reducing layers
@@ -565,7 +572,7 @@ class TinyLlamaChat:
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     max_new_tokens=num_draft_tokens,
-                    do_sample=False,  # set to True for non greedy decoding for draft
+                    do_sample=self.do_sample,  # set to True for non greedy decoding for draft
                     use_cache=True,
                     return_dict_in_generate=True,
                     output_scores=True,
@@ -913,10 +920,10 @@ class TinyLlamaChat:
             # Generation configuration
             generation_config = {
                 "max_new_tokens": max_new_tokens,
-                "do_sample": temperature >= 0.1, # use only if do_sample=false
+                #"do_sample": temperature >= 0.1, # use only if do_sample=false
                 "temperature": temperature if temperature > 0.1 else 1.0,
-                "top_k": 50,
-                "top_p": 0.95, # use only if do_sample=False
+                #"top_k":  50,
+                #"top_p": 0.95, # use only if do_sample=False
                 "repetition_penalty": 1.0,
                 "num_beams": 1,
                 "pad_token_id": self.tokenizer.eos_token_id,
@@ -927,6 +934,18 @@ class TinyLlamaChat:
             if messages and messages[-1]["role"] == "user":
                 user_query = messages[-1]["content"]
                 generation_config = self.get_domain_specific_generation_config(user_query, generation_config)
+
+            if (self.do_sample):
+                generation_config['do_sample'] = True
+                generation_config['top_k'] = self.top_k
+                generation_config['top_p'] = self.top_p
+            else:
+                generation_config['do_sample'] = False
+                if 'top_k' in generation_config:
+                    del generation_config['top_k']
+
+                if 'top_p' in generation_config:
+                    del generation_config['top_p']
 
             # Start generation in background
             thread = Thread(target=self.generate_speculative, args=(input_ids, streamer, max_new_tokens, generation_config, turbo_mode))
@@ -2878,23 +2897,27 @@ def main():
     parser.add_argument("--confidence_threshold", type=float, default=0.7,
                       help="Filter confidence")
     parser.add_argument("--heatmap", action="store_true", default=False,
-                   help="Show confidence heatmap visualization")
+                      help="Show confidence heatmap visualization")
     parser.add_argument("--no-memory", action="store_true",
-                  help="Disable automatic memory features")
+                      help="Disable automatic memory features")
     parser.add_argument("--all-metrics", action="store_true", default=False,
-                  help="Show all detailed metrics instead of just truthiness")
+                      help="Show all detailed metrics instead of just truthiness")
     parser.add_argument("--enable-sharpening", action="store_true", default=True,
                       help="Enable vector space and confidence sharpening")
     parser.add_argument("--sharpening-factor", type=float, default=0.3,
                       help="Sharpening factor for vector embeddings (0.0-1.0)")
     parser.add_argument("--web-knowledge", action="store_true", default=True,
-                    help="Enable web search for knowledge enhancement")
+                      help="Enable web search for knowledge enhancement")
     parser.add_argument("--search-engine", type=str, default="duckduckgo", choices=["duckduckgo", "google"],
-                        help="Search engine to use for web knowledge")
+                      help="Search engine to use for web knowledge")
     parser.add_argument("--web-confidence", type=float, default=0.65,
-                        help="Confidence threshold below which to trigger web search")
+                      help="Confidence threshold below which to trigger web search")
     parser.add_argument("--test-fractal", action="store_true", default=False,
-                    help="Run fractal embedding diagnostics")
+                      help="Run fractal embedding diagnostics")
+    parser.add_argument("--do-sample", action="store_true", help="Enable sampling-based generation")
+    parser.add_argument("--top-p", type=float, default=1.0, help="Top-p (nucleus) sampling parameter")
+    parser.add_argument("--top-k", type=int, default=0, help="Top-k sampling parameter")
+
 
     args = parser.parse_args()
 
@@ -2915,7 +2938,10 @@ def main():
         sharpening_factor=args.sharpening_factor,
         enable_web_knowledge=args.web_knowledge,
         fractal_enabled=True,
-        max_fractal_levels=3
+        max_fractal_levels=3,
+        do_sample=args.do_sample,
+        top_p=args.top_p,
+        top_k=args.top_k
     )
 
     try:
@@ -2959,7 +2985,7 @@ def main():
         if chat.device != "cpu":
             try:
                 import bitsandbytes as bnb
-                loading_options["load_in_8bit"] = True  # or load_in_4bit=True for even better performance
+                chat.loading_options["load_in_4bit"] = True  # or load_in_4bit=True for even better performance
                 print("Using 8-bit quantization for better performance")
             except ImportError:
                 print("bitsandbytes not installed, using full precision")
