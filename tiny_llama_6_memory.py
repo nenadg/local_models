@@ -289,14 +289,43 @@ class TinyLlamaChat:
         # Save updated knowledge
         self.save_knowledge()
 
-    def create_prompt_with_knowledge(self, messages, use_web_search=True):
-        """Create a prompt that incorporates relevant knowledge with domain-aware weighting"""
-        if len(messages) > 0 and messages[-1]["role"] == "user":
+    def enhance_query_for_continuation(self, messages):
+        """
+        Enhance the user query if it's a continuation request.
+        Add this at the beginning of create_prompt_with_knowledge.
+        """
+        # Check if this is a continuation request
+        if hasattr(self, 'window_manager') and len(messages) > 0 and messages[-1]["role"] == "user":
             user_query = messages[-1]["content"]
 
             # Detect if this is a continuation request
             if self.window_manager.detect_continuation_request(user_query):
                 print("Detected continuation request, enhancing prompt...")
+
+                # Get user's vector store for fractal integration
+                user_store = self.memory_manager._get_user_store(self.current_user_id)
+
+                # Enhance continuation context with web knowledge if available
+                if hasattr(self, 'web_enhancer') and self.web_enhancer and user_query:
+                    # Get current continuation context
+                    cont_context = self.window_manager.continuation_context.get(
+                        self.current_user_id, {}
+                    )
+
+                    # Add content type detection if not present
+                    if "content_type" not in cont_context and "text" in cont_context:
+                        cont_context["content_type"] = self.window_manager._detect_content_type(
+                            cont_context["text"]
+                        )
+
+                    # Enhance with web knowledge
+                    enhanced_context = self.web_enhancer.enhance_continuation_context(
+                        user_query, cont_context
+                    )
+
+                    # Update the continuation context
+                    self.window_manager.continuation_context[self.current_user_id] = enhanced_context
+
 
                 # Prepare enhanced continuation prompt
                 enhanced_query = self.window_manager.prepare_continuation_prompt(
@@ -305,7 +334,18 @@ class TinyLlamaChat:
                 )
 
                 # Update the user message with enhanced query
-                messages[-1]["content"] = enhanced_query
+                if enhanced_query != user_query:
+                    messages[-1]["content"] = enhanced_query
+                    print("Enhanced continuation prompt created")
+                else:
+                    print("No continuation context available")
+
+        return messages
+
+    def create_prompt_with_knowledge(self, messages, use_web_search=True):
+        """Create a prompt that incorporates relevant knowledge with domain-aware weighting"""
+        # First check if this is a continuation request and enhance if needed
+        messages = self.enhance_query_for_continuation(messages)
 
         # Extract the user's current query
         current_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
@@ -797,6 +837,13 @@ class TinyLlamaChat:
                 user_input = messages[-1]["content"]
                 cleaned_input, user_commands = self.mcp_handler.extract_mcp_from_user_input(user_input)
 
+                # Extract target length and set it in window manager
+                user_query = messages[-1]["content"]
+                # Extract target length from user query if specified (e.g., "write a 500 word essay")
+                target_length = self.window_manager.extract_target_length(user_query)
+                # Store the target in the window manager for later use
+                self.window_manager.set_target_length(self.current_user_id, target_length)
+
                 if cleaned_input == "_COMMAND_ONLY_":
                     # This was just a shell command, don't generate a response
                     return ""
@@ -860,7 +907,7 @@ class TinyLlamaChat:
                 self.tokenizer,
                 skip_prompt=True,
                 skip_special_tokens=True,
-                stride=8  # Reasonable stride for batching
+                stride=16  # Reasonable stride for batching
             )
 
             # Generation configuration
@@ -935,6 +982,67 @@ class TinyLlamaChat:
                     # Add token to response
                     complete_response += token
 
+                    detected_repetition = False
+                    if hasattr(self, 'window_manager'):
+                        detected_repetition = self.window_manager.track_repetition_patterns(
+                            complete_response, self.current_user_id
+                        )
+
+                    # If repetition detected and web enhancer is available, get correction suggestion
+                    if detected_repetition and hasattr(self, 'web_enhancer') and self.web_enhancer:
+                        try:
+                            print("\n[Repetitive pattern detected, getting correction suggestions...]")
+
+                            # Get a fresh perspective from the web
+                            correction_query = f"{complete_response[-150:]}"
+                            web_results = self.web_enhancer.search_web(correction_query, num_results=1)
+
+                            if web_results:
+                                # Store correction suggestion for next continuation
+                                if self.current_user_id not in self.window_manager.continuation_context:
+                                    self.window_manager.continuation_context[self.current_user_id] = {}
+
+                                self.window_manager.continuation_context[self.current_user_id]["correction_suggestion"] = web_results[0].get('snippet', '')
+
+                                # Add note about available correction
+                                complete_response += "\n\n// Note: Repetitive pattern detected. Use 'fix code' to get correction suggestions."
+                        except Exception as e:
+                            print(f"Error getting correction suggestions: {e}")
+
+                    # Check for repetitive patterns
+                    # repetition_detected = False
+                    # pattern_length = 200 # characters per pattern
+                    # min_repetitions = 5
+
+
+                    # # Only check after accumulating enough tokens
+                    # if len(complete_response) > pattern_length * min_repetitions:
+                    #     # Get last chunk to check
+                    #     check_chunk = complete_response[-pattern_length * min_repetitions:]
+
+                    #     # Look for repeating patterns
+                    #     for i in range(5, pattern_length + 1):
+                    #         pattern = check_chunk[-i:]
+                    #         if check_chunk[-i*2:-i] == pattern or check_chunk[-i*3:-i*2] == pattern:
+                    #             repetition_detected = True
+                    #             print(f"\n[Generation halted: repetitive pattern detected]")
+                    #             self.stop_event.set()
+                    #             break
+
+                    # If repetition detected, optionally apply enhancements
+                    # if repetition_detected and hasattr(self, 'web_enhancer') and self.web_enhancer:
+                    #     try:
+                    #         # Get a fresh perspective from the web
+                    #         correction_query = f"fix javascript code repetition: {complete_response[-100:]}"
+                    #         web_results = self.web_enhancer.search_web(correction_query, num_results=1)
+
+                    #         if web_results:
+                    #             # Add a note about the correction
+                    #             correction_note = f"\n// Note: Fixed repetition with pattern correction."
+                    #             complete_response += correction_note
+                    #     except Exception as e:
+                    #         print(f"Error applying correction: {e}")
+
                     # Get confidence for latest token
                     if self.confidence_metrics.token_probabilities:
                         latest_confidence = self.confidence_metrics.token_probabilities[-1]
@@ -953,6 +1061,19 @@ class TinyLlamaChat:
                         # Default if no confidence available
                         latest_confidence = 0.8
                         token_confidences.append(latest_confidence)
+
+                    if hasattr(self, 'window_manager') and hasattr(self.window_manager, 'is_generation_complete'):
+                        if self.window_manager.is_generation_complete(self.current_user_id, complete_response):
+                            # End generation and clean up
+                            print("\n[Generation complete: target length reached]")
+                            self.stop_event.set()  # Signal to stop generation
+
+                            # Ensure response is properly terminated at a sentence boundary
+                            if hasattr(self.window_manager, '_find_safe_termination_point'):
+                                termination_point = self.window_manager._find_safe_termination_point(complete_response)
+                                complete_response = complete_response[:termination_point]
+
+                            break
 
                     # Check confidence early enough to stop generation if needed
                     # But only if we have a response filter and after receiving some tokens
@@ -1050,9 +1171,9 @@ class TinyLlamaChat:
                                 if hasattr(self, 'window_manager') and hasattr(self.window_manager, 'track_generated_response'):
                                     self.window_manager.track_generated_response(
                                         response=complete_response,
-                                        user_id=self.current_user_id
-                                    )
-                                    
+                                        user_id=self.current_user_id,
+                                        target_length=target_length)
+
                                 return self.mcp_handler.finalize_streaming(complete_response)
 
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -1099,8 +1220,8 @@ class TinyLlamaChat:
                 if hasattr(self, 'window_manager') and hasattr(self.window_manager, 'track_generated_response'):
                     self.window_manager.track_generated_response(
                         response=complete_response,
-                        user_id=self.current_user_id
-                    )
+                        user_id=self.current_user_id,
+                        target_length=target_length)
 
                 return complete_response
 
@@ -2836,6 +2957,13 @@ def main():
 
         # Warm up the model with a short prompt
         if chat.device != "cpu":
+            try:
+                import bitsandbytes as bnb
+                loading_options["load_in_8bit"] = True  # or load_in_4bit=True for even better performance
+                print("Using 8-bit quantization for better performance")
+            except ImportError:
+                print("bitsandbytes not installed, using full precision")
+
             print("Warming up model for maximum throughput...")
             _ = chat.generate_response(
                 [{"role": "user", "content": "Say some nice greeting."}],

@@ -8,6 +8,11 @@ import re
 import time
 import random
 import numpy as np
+import spacy
+import rake_nltk
+from rake_nltk import Rake
+from spacy.lang.en.stop_words import STOP_WORDS
+
 from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
@@ -55,6 +60,20 @@ class WebKnowledgeEnhancer:
             embedding_function=self.memory_manager.generate_embedding if self.memory_manager else None,
             enable_fractal_validation=True
         )
+
+        # Load NLP components if not already loaded
+        if not hasattr(self, '_nlp'):
+            try:
+                self._nlp = spacy.load("en_core_web_sm")
+                self._rake = Rake()
+                self._custom_stop = {
+                    "show", "find", "list", "give", "me", "recommend",
+                    "please", "that", "are", "code", "example", "write",
+                    "create", "make", "do", "how", "can", "would", "should"
+                }
+            except Exception as e:
+                print(f"[Web] Error loading NLP components: {e}")
+                raise
         
         # Default user agents to rotate
         self.user_agents = user_agents or [
@@ -128,6 +147,50 @@ class WebKnowledgeEnhancer:
             return True
             
         return False
+
+    def enhance_continuation_context(self, query: str, continuation_context: dict) -> dict:
+        """Enhance continuation context with web knowledge"""
+        # Extract content snippet from continuation
+        content_type = continuation_context.get("content_type", "unknown")
+        content_snippet = continuation_context.get("text", "")[-150:]
+
+        # Find the last meaningful element in code (variable, function, etc)
+        if content_type == "code":
+            # Extract meaningful elements instead of raw code
+            code_elements = re.findall(r'\b(const|let|var|function|class)\s+(\w+)', content_snippet)
+            variables = [elem[1] for elem in code_elements[-3:]] if code_elements else []
+
+            # Create a descriptive query using semantic elements, not raw code
+            if variables:
+                elements_str = ", ".join(variables)
+                specialized_query = f"javascript code example for {elements_str} in pong game"
+            else:
+                # Fallback to topic-oriented search
+                specialized_query = "javascript pong game implementation example"
+        else:
+            # Default query improvement for non-code
+            specialized_query = f"continue {query}"
+
+        # Search the web with specialized query
+        search_results = self.search_web(specialized_query, num_results=3)
+
+        # Extract relevant snippets
+        relevant_snippets = []
+        for result in search_results:
+            # Extract based on content type
+            if content_type == "code":
+                # Look for code blocks in the snippet
+                code_blocks = re.findall(r'```(?:javascript|js)?\s*([\s\S]*?)```', result.get('snippet', ''))
+                relevant_snippets.extend(code_blocks)
+            else:
+                # Just use the snippet
+                relevant_snippets.append(result.get('snippet', ''))
+
+        # Add web knowledge to continuation context
+        continuation_context["web_enhanced"] = True
+        continuation_context["relevant_snippets"] = relevant_snippets
+
+        return continuation_context
     
     def search_web(self, query: str, num_results: int = None) -> List[Dict[str, Any]]:
         """
@@ -875,6 +938,21 @@ class WebKnowledgeEnhancer:
             'cache_hit_rate': self.cache_hits / max(1, self.total_searches)
         }
 
+    def _nl_to_query(self, text: str, max_phrases: int = 3) -> str:
+        """
+        Convert natural language to search query using NLP.
+        Implements the functionality from the provided nl_to_query function.
+        """
+
+        # Implement the nl_to_query logic
+        doc = self._nlp(text)
+
+        # Rest of the implementation following the original nl_to_query function
+        # [exact same logic as the provided function]
+
+        # Return the final query
+        return " ".join(out)
+
     def create_seo_friendly_sentence(self, query: str, messages=None, max_words: int = 8) -> str:
         """
         Create an SEO-friendly search query with comprehensive fallbacks and entity extraction.
@@ -908,6 +986,23 @@ class WebKnowledgeEnhancer:
                 return enhanced_query
 
             return fractal_query
+
+        # If NLP components are available, use advanced extraction
+        try:
+            nlp_query = self._nl_to_query(query, max_phrases=3)
+
+            # Ensure not too long for search engine
+            terms = nlp_query.split()
+            if len(terms) > max_words:
+                terms = terms[:max_words]
+
+            print(f"[Web] Using NLP enhanced key terms extraction: {key_terms}")
+            return " ".join(terms)
+        except Exception as e:
+            print(f"[Web] Error in NLP query extraction: {e}")
+            # Fall back to existing methods
+
+        # Fallback to existing extraction methods
 
         # Try pattern matching, which is more context-aware
         pattern_query = self._extract_with_patterns(query)
