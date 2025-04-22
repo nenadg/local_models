@@ -339,9 +339,13 @@ class ContinuationTrackingWindowManager:
 
         # Extract appropriate context based on content type
         if content_type == "code":
-            last_context = self._extract_code_context(continuation_ctx["text"], vector_store)
-            # Use code-specific continuation prompt
-            return self._create_code_continuation_prompt(query, last_context)
+            last_context = self._extract_code_context(continuation_ctx["text"])
+            # Use code-specific continuation prompt - completely clean for simple continuations
+            is_simple = any(word in query.lower() for word in ["go on", "continue", "next", "more"])
+            if is_simple:
+                return f"[CODE BLOCK START]\n{last_context}\n[CODE BLOCK END]"
+            else:
+                return self._create_code_continuation_prompt(query, last_context)
         else:
             # Use existing prose handling
             last_context = self._extract_last_context(continuation_ctx["text"])
@@ -386,16 +390,6 @@ class ContinuationTrackingWindowManager:
                 print(f"Error enhancing code context: {e}")
 
         return "\n".join(last_lines)
-
-    def _create_code_continuation_prompt(self, query: str, code_context: str) -> str:
-        """Create a code-specific continuation prompt"""
-        return f"""
-    {query}
-
-    Continue the code from EXACTLY this point, preserving variable names and code structure:
-    Complete any unfinished statements or expressions and maintain consistency with the existing code.
-    Continue writing from the EXACT point where the code was cut off.
-    """
 
     def detect_continuation_request(self, query: str) -> bool:
         """
@@ -462,30 +456,21 @@ class ContinuationTrackingWindowManager:
         else:
             return self._create_prose_continuation_prompt(query, last_context)
 
-    def _create_code_continuation_prompt(self, query: str, last_context: str) -> str:
-        """
-        Create a continuation prompt for code.
-
-        Args:
-            query: Original user query
-            last_context: Last context to continue from
-
-        Returns:
-            Enhanced code continuation prompt
-        """
-        # Clean up the code context
-        clean_context = self._clean_code_context(last_context)
-
-        # Create code-specific prompt
+    def _create_code_continuation_prompt(self, query: str, code_context: str) -> str:
+        """Create a cleaner code-specific continuation prompt"""
+        # Simple continuations should have zero instructions
+        if any(phrase in query.lower() for phrase in ["go on", "continue", "keep going", "next", "more"]):
+            return f"""
+    [CODE BLOCK START]
+    {code_context}
+    [CODE BLOCK END]
+    """
+        # Only for specific questions add minimal guidance
         return f"""
-{query}
-
-[CODE BLOCK START]
-{clean_context}
-[CODE BLOCK END]
-
-Continue the code from EXACTLY where it ended in the code block above. Do not repeat any of the code shown - start writing from the exact point where it was cut off. Complete any unfinished statements, functions, or expressions.
-"""
+    [CODE BLOCK START]
+    {code_context}
+    [CODE BLOCK END]
+    """
 
     def _create_poetry_continuation_prompt(self, query: str, last_context: str) -> str:
         """

@@ -149,29 +149,51 @@ class WebKnowledgeEnhancer:
         return False
 
     def enhance_continuation_context(self, query: str, continuation_context: dict) -> dict:
-        """Enhance continuation context with web knowledge"""
-        # Extract content snippet from continuation
+        """Enhance continuation context with web knowledge only when beneficial"""
+        # Skip web search for simple continuations as already implemented
+        if any(phrase in query.lower() for phrase in ["go on", "continue", "keep going", "next", "more"]):
+            continuation_context["web_enhanced"] = False
+            continuation_context["web_search_skipped"] = True
+            print("[Web] Skipping search for simple continuation with existing context")
+            return continuation_context
+
+        # For complex continuations or continuations without context, proceed with web search
         content_type = continuation_context.get("content_type", "unknown")
         content_snippet = continuation_context.get("text", "")[-150:]
 
-        # Find the last meaningful element in code (variable, function, etc)
+        # For code continuations, clean the snippet before extraction
         if content_type == "code":
-            # Extract meaningful elements instead of raw code
-            code_elements = re.findall(r'\b(const|let|var|function|class)\s+(\w+)', content_snippet)
-            variables = [elem[1] for elem in code_elements[-3:]] if code_elements else []
+            # Clean up code snippet to extract only meaningful identifiers
+            # Remove special characters that would mess up the search
+            clean_snippet = re.sub(r'[^\w\s]', ' ', content_snippet)
 
-            # Create a descriptive query using semantic elements, not raw code
-            if variables:
-                elements_str = ", ".join(variables)
-                specialized_query = f"javascript code example for {elements_str} in pong game"
+            # Extract meaningful identifiers (variables, functions, classes)
+            identifiers = re.findall(r'\b([a-zA-Z]\w+)\b', clean_snippet)
+
+            # Remove common keywords and very short identifiers
+            keywords = {'const', 'let', 'var', 'function', 'class', 'for', 'while', 'if', 'else', 'return'}
+            meaningful_ids = [id for id in identifiers if id not in keywords and len(id) > 2]
+
+            # Focus on the last few unique identifiers
+            unique_ids = []
+            seen = set()
+            for id in reversed(meaningful_ids):
+                if id not in seen and len(unique_ids) < 3:
+                    unique_ids.append(id)
+                    seen.add(id)
+
+            # Create a more semantic query
+            if unique_ids:
+                topic = "canvas" if "canvas" in content_snippet else "javascript"
+                specialized_query = f"{topic} code {' '.join(unique_ids)}"
             else:
-                # Fallback to topic-oriented search
-                specialized_query = "javascript pong game implementation example"
+                # Fallback to topic detection
+                topic = "canvas animation" if "canvas" in content_snippet else "javascript"
+                specialized_query = f"{topic} code example"
         else:
-            # Default query improvement for non-code
-            specialized_query = f"continue {query}"
+            specialized_query = f"continue writing {query}"
 
-        # Search the web with specialized query
+        # Proceed with search using specialized query
         search_results = self.search_web(specialized_query, num_results=3)
 
         # Extract relevant snippets
@@ -939,19 +961,71 @@ class WebKnowledgeEnhancer:
         }
 
     def _nl_to_query(self, text: str, max_phrases: int = 3) -> str:
-        """
-        Convert natural language to search query using NLP.
-        Implements the functionality from the provided nl_to_query function.
-        """
+        """Convert natural language to search query using NLP."""
+        # Initialize output lists
+        time_ents = []
+        loc_ents = []
+        phrases = []
+        tokens = []
 
-        # Implement the nl_to_query logic
-        doc = self._nlp(text)
+        try:
+            doc = self._nlp(text)
 
-        # Rest of the implementation following the original nl_to_query function
-        # [exact same logic as the provided function]
+            # Extract entities
+            for ent in doc.ents:
+                val = ent.text.lower()
+                if ent.label_ in ("TIME", "DATE"):
+                    if ent.start > 0 and doc[ent.start-1].lemma_.lower() == "open":
+                        val = f"open {val}"
+                    time_ents.append(val)
+                elif ent.label_ in ("GPE", "LOC"):
+                    loc_ents.append(val)
 
-        # Return the final query
-        return " ".join(out)
+            # De-duplicate
+            time_ents = list(dict.fromkeys(time_ents))
+            loc_ents = list(dict.fromkeys(loc_ents))
+
+            # RAKE phrases
+            self._rake.extract_keywords_from_text(text)
+            raw_phrases = self._rake.get_ranked_phrases()[:max_phrases]
+
+            for p in raw_phrases:
+                lp = p.lower()
+                if any(w in self._custom_stop for w in lp.split()):
+                    continue
+                if any(ent in lp for ent in time_ents + loc_ents):
+                    continue
+                phrases.append(lp)
+
+            # Build lemma filters
+            phrase_lemmas = {tok.lemma_.lower() for ph in phrases for tok in self._nlp(ph)}
+            entity_lemmas = {tok.lemma_.lower() for ent in time_ents + loc_ents for tok in self._nlp(ent)}
+
+            # Extract tokens
+            seen = set()
+            for tok in doc:
+                tl = tok.lemma_.lower()
+                if (tok.pos_ in ("NOUN", "PROPN", "ADJ") and
+                    tl not in self._nlp.Defaults.stop_words and
+                    tl not in self._custom_stop and
+                    tl not in phrase_lemmas and
+                    tl not in entity_lemmas and
+                    tl not in seen):
+                    tokens.append(tl)
+                    seen.add(tl)
+
+            # Assemble in order
+            ordered = time_ents + loc_ents + phrases + tokens
+
+            # Quote multi-word terms
+            result = [f'"{t}"' if " " in t else t for t in ordered]
+
+            return " ".join(result)
+
+        except Exception as e:
+            print(f"[Web] Detailed error in NLP query extraction: {str(e)}")
+            # Return a simpler query as fallback
+            return " ".join([t for t in text.lower().split() if t not in self._custom_stop][:max_phrases])
 
     def create_seo_friendly_sentence(self, query: str, messages=None, max_words: int = 8) -> str:
         """
@@ -996,7 +1070,7 @@ class WebKnowledgeEnhancer:
             if len(terms) > max_words:
                 terms = terms[:max_words]
 
-            print(f"[Web] Using NLP enhanced key terms extraction: {key_terms}")
+            print(f"[Web] Using NLP enhanced key terms extraction: {terms}")
             return " ".join(terms)
         except Exception as e:
             print(f"[Web] Error in NLP query extraction: {e}")
