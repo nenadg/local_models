@@ -29,7 +29,7 @@ from resource_manager import ResourceManager
 from mcp_handler import MCPHandler
 from enhanced_confidence_metrics import EnhancedConfidenceMetrics, TokenProbabilityCaptureProcessor
 from response_filter import ResponseFilter
-from memory_manager import MemoryManager, VectorStore
+from unified_memory import UnifiedMemoryManager
 
 from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
 from question_classifier import QuestionClassifier
@@ -95,15 +95,18 @@ class TinyLlamaChat:
         self.resource_manager = ResourceManager(device=device)
 
         # Initialize memory manager
-        self.memory_manager = MemoryManager(
-            memory_dir=memory_dir,
-            device=device,
-            auto_memorize=auto_memorize,
-            sharpening_enabled=enable_sharpening,
-            sharpening_factor=sharpening_factor,
-            fractal_enabled=fractal_enabled,  # Enable fractal embeddings
-            max_fractal_levels=max_fractal_levels   # Number of fractal levels
+        self.memory_manager = UnifiedMemoryManager(
+            storage_path=memory_dir,
+            embedding_function=None,  # Will set this after model is loaded
+            embedding_dim=384,  # Set this to your model's embedding dimension
+            use_fractal=fractal_enabled,
+            max_fractal_levels=max_fractal_levels,
+            auto_save=True
         )
+
+        self.auto_memorize = auto_memorize
+        self.sharpening_factor = sharpening_factor
+        self.sharpening_enabled = enable_sharpening
 
         # Initialize the question classifier
         self.question_classifier = QuestionClassifier()
@@ -207,6 +210,8 @@ class TinyLlamaChat:
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **self.loading_options)
         self.model = self.resource_manager.register_model(self.model)
 
+        set_embedding_function(self)
+
         # Create draft model from target model by reducing layers
         self.draft_model = self.create_draft_model()
 
@@ -219,6 +224,27 @@ class TinyLlamaChat:
         self.knowledge_base = self.load_knowledge()
         self.conversation_history = []
         self.system_message = DEFAULT_SYSTEM_MESSAGE
+
+    def set_embedding_function(self):
+        """Set the embedding function for memory after model is loaded."""
+        def generate_embedding(text):
+            # Use the model to generate embeddings
+            with torch.no_grad():
+                inputs = self.tokenizer(
+                    text,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=512,
+                    padding=True
+                ).to(self.device)
+
+                outputs = self.model(**inputs)
+
+                # Use mean pooling to get a single vector
+                return outputs.last_hidden_state.mean(dim=1).cpu().numpy()[0]
+
+        # Set the embedding function
+        self.memory_manager.embedding_function = generate_embedding
 
     def create_draft_model(self):
         """Create a smaller version of the model by skipping layers"""
