@@ -86,6 +86,27 @@ class TinyLlamaChat:
         self.top_p = top_p
         self.top_k = top_k
 
+        # Add Gemma-specific configurations
+        if "gemma" in model_name.lower():
+            print("Using Gemma-specific configuration")
+
+            # Determine BF16 capability
+            bf16_supported = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
+
+            self.loading_options = {
+                "torch_dtype": torch.bfloat16 if bf16_supported else torch.float16,
+                "device_map": "auto",
+                "low_cpu_mem_usage": True,
+                # More aggressive quantization for Gemma
+                "load_in_8bit": True if torch.cuda.is_available() else False,
+            }
+
+            # Gemma-specific generation parameters
+            self.do_sample = True  # Sampling works better for Gemma
+            self.top_p = 0.9       # Slight nucleus sampling
+            self.top_k = 40        # More restrictive top-k
+            self.repetition_penalty = 1.2  # Higher repetition penalty
+
         self.stop_event = threading.Event()
 
         self.mcp_handler = MCPHandler(output_dir=output_dir, allow_shell_commands=True)
@@ -222,7 +243,6 @@ class TinyLlamaChat:
 
     def create_draft_model(self):
         """Create a smaller version of the model by skipping layers"""
-        # This works best for decoder-only transformers like Llama
         import copy
 
         try:
@@ -231,17 +251,28 @@ class TinyLlamaChat:
                 # Create a copy for draft model
                 draft_model = copy.deepcopy(self.model)
 
-                # Reduce to 1/3 of the layers for draft model
+                # Reduce layers but keep more for Gemma models
                 orig_layers = draft_model.model.layers
                 num_layers = len(orig_layers)
-                keep_layers = max(1, num_layers // 3)
 
-                # Keep only every third layer
-                indices_to_keep = list(range(0, num_layers, 3))[:keep_layers]
+                # More conservative layer reduction for Gemma models
+                if "gemma" in self.model_name.lower():
+                    # Keep half the layers for Gemma
+                    keep_layers = max(1, num_layers // 2)
+                    indices_to_keep = list(range(0, num_layers, 2))[:keep_layers]
+                else:
+                    # Keep one third for other models
+                    keep_layers = max(1, num_layers // 3)
+                    indices_to_keep = list(range(0, num_layers, 3))[:keep_layers]
+
                 new_layers = torch.nn.ModuleList([orig_layers[i] for i in indices_to_keep])
 
                 # Replace layers with reduced set
                 draft_model.model.layers = new_layers
+
+                # Ensure draft model is on same device as main model
+                device = next(self.model.parameters()).device
+                draft_model = draft_model.to(device)
 
                 print(f"Created draft model with {keep_layers}/{num_layers} layers")
                 return draft_model
@@ -510,6 +541,52 @@ class TinyLlamaChat:
 
         return self.enable_web_knowledge
 
+    def load_model_memory_efficient(self, model_name):
+        """Memory-efficient model loading specifically for larger models"""
+        # For 4B+ models, use more aggressive memory optimization
+        if "gemma-3-4b" in model_name.lower() or "gemma-3-8b" in model_name.lower():
+            print("Using memory-efficient loading for large model")
+
+            # BF16 support check
+            bf16_supported = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
+
+            try:
+                # Try with 4-bit quantization if bitsandbytes is installed
+                import bitsandbytes as bnb
+                from transformers import AutoTokenizer, AutoModelForCausalLM
+                from transformers import BitsAndBytesConfig
+
+                # Configure quantization
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16 if bf16_supported else torch.float16,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True
+                )
+
+                # Load tokenizer separately
+                self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+
+                # Load the model with quantization
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    device_map="auto",
+                    quantization_config=quantization_config,
+                    low_cpu_mem_usage=True
+                )
+
+                return model, self.tokenizer
+
+            except ImportError:
+                print("bitsandbytes not available, falling back to 8-bit quantization")
+
+            except Exception as e:
+                print(f"Error in memory-efficient loading: {e}")
+                print("Falling back to standard loading with 8-bit quantization")
+
+        # Default loading if not a large model or if memory-efficient loading failed
+        return None, None
+
     def get_domain_specific_generation_config(self, query, base_config):
         """
         Get domain-specific generation configuration.
@@ -551,14 +628,9 @@ class TinyLlamaChat:
 
     def speculative_decode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, num_draft_tokens: int = 5) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Implement speculative decoding with loop detection:
-        1. Generate tokens with the smaller draft model
-        2. Verify with larger target model
-        3. Keep tokens that match, regenerate from first mismatch
-        4. Detect and prevent repetitive loops
+        Implement speculative decoding with enhanced device handling
         """
         if self.draft_model is None:
-            # Fall back to regular generation if no draft model
             return None, None, None
 
         # Only implement speculative decoding for GPU for speed
@@ -566,18 +638,29 @@ class TinyLlamaChat:
             return None, None, None
 
         try:
+            # Ensure all tensors are on the same device
+            device = input_ids.device
+
+            # Ensure draft model is on same device
+            draft_params = next(self.draft_model.parameters())
+            if draft_params.device != device:
+                print(f"Moving draft model to {device}")
+                self.draft_model = self.draft_model.to(device)
+
             # Step 1: Generate draft tokens with the smaller model
             with torch.no_grad():
                 draft_outputs = self.draft_model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     max_new_tokens=num_draft_tokens,
-                    do_sample=self.do_sample,  # set to True for non greedy decoding for draft
+                    do_sample=self.do_sample,
+                    top_p=self.top_p,
+                    top_k=self.top_k,
                     use_cache=True,
                     return_dict_in_generate=True,
                     output_scores=True,
-                    # Add repetition penalty to avoid loops
-                    repetition_penalty=1.2,
+                    # Add repetition penalty
+                    repetition_penalty=self.repetition_penalty if hasattr(self, 'repetition_penalty') else 1.2,
                 )
 
             # Extract draft tokens (excluding input prompt)
@@ -587,7 +670,7 @@ class TinyLlamaChat:
             if len(draft_ids) == 0:
                 return None, None, None
 
-            # NEW: Check for repetitive loops
+            # Check for repetitive patterns
             prompt_tokens = input_ids[0][-5:].tolist() if input_ids[0].size(0) >= 5 else input_ids[0].tolist()
             draft_tokens = draft_ids.tolist()
 
@@ -603,24 +686,8 @@ class TinyLlamaChat:
             full_sequence = torch.cat([input_ids[0], draft_ids]).unsqueeze(0)
             full_attention = torch.ones_like(full_sequence)
 
-            # Process in batches for large inputs
-            if full_sequence.size(1) > 1024:  # For long sequences
-                def get_logits(batch):
-                    with torch.no_grad():
-                        outputs = self.model(
-                            input_ids=batch,
-                            attention_mask=torch.ones_like(batch),
-                            return_dict=True
-                        )
-                    return outputs.logits
-
-                target_logits = tensor_batch_processing(
-                    get_logits,
-                    full_sequence,
-                    batch_size=4
-                )
-            else:
-                #  Get logits from target model for the full sequence
+            try:
+                # Get logits from target model for the full sequence
                 with torch.no_grad():
                     target_outputs = self.model(
                         input_ids=full_sequence,
@@ -629,40 +696,46 @@ class TinyLlamaChat:
                     )
                 target_logits = target_outputs.logits
 
-            # Only examine logits for draft tokens (exclude input)
-            target_logits = target_logits[0, input_ids.shape[1]-1:-1, :]
+                # Only examine logits for draft tokens (exclude input)
+                target_logits = target_logits[0, input_ids.shape[1]-1:-1, :]
 
-            # Get predicted tokens from target logits
-            target_predictions = torch.argmax(target_logits, dim=-1)
+                # Get predicted tokens from target logits
+                target_predictions = torch.argmax(target_logits, dim=-1)
 
-            # Step 3: Find the first mismatch
-            matches = (target_predictions == draft_ids)
+                # Step 3: Find the first mismatch
+                matches = (target_predictions == draft_ids)
 
-            # If all match, accept all draft tokens!
-            if matches.all():
-                # Add logits to confidence metrics
-                for i, token_id in enumerate(draft_ids):
-                    self.confidence_metrics.add_token_score(target_logits[i], token_id.item())
-                return draft_ids, torch.ones_like(draft_ids), target_logits
+                # If all match, accept all draft tokens!
+                if matches.all():
+                    # Add logits to confidence metrics
+                    for i, token_id in enumerate(draft_ids):
+                        self.confidence_metrics.add_token_score(target_logits[i], token_id.item())
+                    return draft_ids, torch.ones_like(draft_ids), target_logits
 
-            # Find first mismatch position
-            first_mismatch = len(matches) if matches.all() else matches.tolist().index(False)
+                # Find first mismatch position
+                first_mismatch = len(matches) if matches.all() else matches.tolist().index(False)
 
-            # Return accepted tokens
-            if first_mismatch > 0:
-                accepted_tokens = draft_ids[:first_mismatch]
-                acceptance_mask = torch.ones_like(accepted_tokens)
+                # Return accepted tokens
+                if first_mismatch > 0:
+                    accepted_tokens = draft_ids[:first_mismatch]
+                    acceptance_mask = torch.ones_like(accepted_tokens)
 
-                # Add logits to confidence metrics for the accepted tokens
-                for i, token_id in enumerate(accepted_tokens):
-                    self.confidence_metrics.add_token_score(target_logits[i], token_id.item())
+                    # Add logits to confidence metrics for the accepted tokens
+                    for i, token_id in enumerate(accepted_tokens):
+                        self.confidence_metrics.add_token_score(target_logits[i], token_id.item())
 
-                # Also return the target logits for these tokens
-                return accepted_tokens, acceptance_mask, target_logits[:first_mismatch]
+                    # Also return the target logits for these tokens
+                    return accepted_tokens, acceptance_mask, target_logits[:first_mismatch]
+
+            except RuntimeError as e:
+                # Handle device mismatch errors
+                if "expected all tensors to be on the same device" in str(e):
+                    print(f"Device mismatch error: {e}")
+                    return None, None, None
+                raise
 
             # No accepted tokens
             return None, None, None
-
         except Exception as e:
             print(f"Error in speculative decoding: {e}")
             return None, None, None
@@ -946,6 +1019,15 @@ class TinyLlamaChat:
 
                 if 'top_p' in generation_config:
                     del generation_config['top_p']
+
+            if "gemma" in self.model_name.lower():
+                # Gemma-specific generation parameters
+                generation_config["repetition_penalty"] = self.repetition_penalty if hasattr(self, 'repetition_penalty') else 1.2
+                generation_config["temperature"] = temperature if temperature > 0.1 else 0.7
+                # Ensure top_p is used for Gemma
+                generation_config["top_p"] = self.top_p if hasattr(self, 'top_p') else 0.9
+                # Ensure top_k is used for Gemma
+                generation_config["top_k"] = self.top_k if hasattr(self, 'top_k') else 40
 
             # Start generation in background
             thread = Thread(target=self.generate_speculative, args=(input_ids, streamer, max_new_tokens, generation_config, turbo_mode))
@@ -1594,7 +1676,7 @@ class TinyLlamaChat:
         return response
 
     def _clean_general_response(self, response):
-        """General cleanup for all responses"""
+        """General cleanup for all responses with multilingual filtering"""
         # Remove repeated paragraphs (not just lines)
         lines = response.split('\n')
         paragraphs = []
@@ -1613,11 +1695,20 @@ class TinyLlamaChat:
         if current_paragraph:
             paragraphs.append('\n'.join(current_paragraph))
 
+        # Filter out non-English text segments
+        cleaned_paragraphs = []
+        for paragraph in paragraphs:
+            # Skip paragraphs with high concentration of non-ASCII characters
+            non_ascii_ratio = sum(1 for c in paragraph if ord(c) > 127) / max(1, len(paragraph))
+            if non_ascii_ratio > 0.3:  # If more than 30% non-ASCII, skip
+                continue
+            cleaned_paragraphs.append(paragraph)
+
         # Remove duplicate paragraphs
         unique_paragraphs = []
         seen_paragraphs = set()
 
-        for paragraph in paragraphs:
+        for paragraph in cleaned_paragraphs:
             # Create a simplified key for comparison
             if paragraph:
                 simplified = re.sub(r'[^\w\s]', '', paragraph.lower())
@@ -1633,6 +1724,9 @@ class TinyLlamaChat:
 
         # Remove any debugging information that might have leaked
         cleaned = re.sub(r'(?:relevance|similarity)\s+(?:increased|decreased)\s+by\s+[\d\.]+%.*?$', '', cleaned, flags=re.MULTILINE)
+
+        # Remove repetition patterns (like ishu.ishu.ishu...)
+        cleaned = re.sub(r'(\w+)(\.\1){3,}', r'\1', cleaned)
 
         return cleaned
 
@@ -2451,7 +2545,7 @@ class TinyLlamaChat:
 
             # Calculate type match score
             if command_context:
-                context_type = self._extract_command_type_from_context(command_context)
+                context_type = extract_command_type(command_context)
                 memory_type = metadata.get('command_type', metadata.get('memory_type', ''))
 
                 if context_type == memory_type:
@@ -2917,10 +3011,16 @@ def main():
     parser.add_argument("--do-sample", action="store_true", help="Enable sampling-based generation")
     parser.add_argument("--top-p", type=float, default=1.0, help="Top-p (nucleus) sampling parameter")
     parser.add_argument("--top-k", type=int, default=0, help="Top-k sampling parameter")
-
+    parser.add_argument("--disable-speculative", action="store_true",
+                        help="Disable speculative decoding (useful for Gemma models)")
+    parser.add_argument("--repetition-penalty", type=float, default=1.2,
+                        help="Repetition penalty (1.0 = none, higher = more penalty)")
+    parser.add_argument("--load-in-8bit", action="store_true",
+                        help="Load model in 8-bit mode to save memory")
+    parser.add_argument("--load-in-4bit", action="store_true",
+                        help="Load model in 4-bit mode to save more memory (requires bitsandbytes)")
 
     args = parser.parse_args()
-
 
     filter_enabled = True  # Add this to track filtering state
     user_context = {}  # Shared context for the ResponseFilter
@@ -2945,6 +3045,20 @@ def main():
     )
 
     try:
+        if "gemma" in args.model.lower() and (args.load_in_4bit or args.load_in_8bit):
+            model, tokenizer = chat.load_model_memory_efficient(args.model)
+            if model is not None and tokenizer is not None:
+                self.model = model
+                self.tokenizer = tokenizer
+                # Skip regular model loading
+                model_loaded = True
+
+        if "gemma" in args.model.lower():
+            chat.repetition_penalty = args.repetition_penalty
+            if args.disable_speculative:
+                print("Speculative decoding disabled for Gemma model")
+                chat.use_speculative_decoding = False
+
         # If web knowledge is enabled, configure the search engine
         if args.web_knowledge and chat.web_enhancer:
             chat.web_enhancer.search_engine = args.search_engine

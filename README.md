@@ -243,3 +243,19 @@ pip install --no-deps --force-reinstall 'https://github.com/bitsandbytes-foundat
 ```
 
 (source: https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1202)
+
+# Gemma
+
+Branch `unstable_18` contains changes related to Gemma models
+
+run:
+
+```bash
+python local_ai.py --model google/gemma-3-1b-it --temperature 0.7 --repetition-penalty 1.3 --load-in-8bit --heatmap
+```
+
+or
+
+```bash
+python local_ai.py --model google/gemma-3-4b-it --temperature 0.7 --repetition-penalty 1.3 --load-in-4bit --disable-speculative --max-tokens 256
+```
