@@ -1013,6 +1013,9 @@ class TinyLlamaChat:
 
             user_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
 
+            # If no system command matched, generate response using the model
+            print(f"\n{self.get_time()} Assistant: \n", end='', flush=True)
+
             try:
                 while True:
                     if select.select([sys.stdin], [], [], 0)[0]:
@@ -1048,7 +1051,7 @@ class TinyLlamaChat:
                     # If repetition detected and web enhancer is available, get correction suggestion
                     if detected_repetition and hasattr(self, 'web_enhancer') and self.web_enhancer:
                         try:
-                            print("\n[Repetitive pattern detected, getting correction suggestions...]")
+                            print(f"\n{self.get_time()} [Repetitive pattern detected, getting correction suggestions...]")
 
                             # Get a fresh perspective from the web
                             correction_query = f"{complete_response[-150:]}"
@@ -1088,7 +1091,7 @@ class TinyLlamaChat:
                     if hasattr(self, 'window_manager') and hasattr(self.window_manager, 'is_generation_complete'):
                         if self.window_manager.is_generation_complete(self.current_user_id, complete_response):
                             # End generation and clean up
-                            print("\n[Generation complete: target length reached]")
+                            print(f"\n{self.get_time()} [Generation complete: target length reached]")
                             self.stop_event.set()  # Signal to stop generation
 
                             # Ensure response is properly terminated at a sentence boundary
@@ -2266,7 +2269,7 @@ def main():
         sharpening_factor=args.sharpening_factor,
         enable_web_knowledge=args.web_knowledge,
         fractal_enabled=True,
-        max_fractal_levels=3,
+        max_fractal_levels=1,
         do_sample=args.do_sample,
         top_p=args.top_p,
         top_k=args.top_k
@@ -2630,9 +2633,6 @@ def main():
                 start_time = time.time()
                 chat.stop_event.clear()  # Reset the event
 
-                # If no system command matched, generate response using the model
-                print(f"\n{chat.get_time()} Assistant: \n", end='', flush=True)
-
                 # Generate response
                 response = chat.generate_response(
                     conversation,
@@ -2644,7 +2644,7 @@ def main():
                 )
 
                 # Add a newline after streaming output is complete
-                print()
+                print("...")
 
                 # Report generation time and calculate tokens per second
                 end_time = time.time()

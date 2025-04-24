@@ -1256,7 +1256,7 @@ class WebKnowledgeEnhancer:
                 return None
 
             # Additional verification of fractal capability
-            if not hasattr(store, 'fractal_enabled') or not store.fractal_enabled:
+            if not hasattr(store, 'use_fractal') or not store.use_fractal:
                 print(f"{self.get_time()} [Web] Fractal embeddings not enabled in vector store")
                 return None
 
@@ -1269,7 +1269,7 @@ class WebKnowledgeEnhancer:
             query_embedding = self.memory_manager.embedding_function(query)
 
             # Log diagnostics
-            print(f"{self.get_time()} [Web] Fractal search enabled: {getattr(store, 'fractal_enabled', False)}")
+            print(f"{self.get_time()} [Web] Fractal search enabled: {getattr(store, 'use_fractal', False)}")
             print(f"{self.get_time()} [Web] Store total documents: {len(getattr(store, 'documents', []))}")
 
             try:
