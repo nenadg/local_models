@@ -1267,6 +1267,35 @@ class WebKnowledgeEnhancer:
                 print(f"{self.get_time()} [Web] Store has no items to search")
                 return None
 
+            # Include conversation history in search
+            if hasattr(self.chat, 'conversation_history') and self.chat.conversation_history:
+                # Get the last few user messages for context
+                recent_queries = []
+                for msg in self.chat.conversation_history[-5:]:  # Look at last 5 messages
+                    if msg.get('role') == 'user':
+                        recent_queries.append(msg.get('content', ''))
+
+                # If we have recent queries, create a combined query
+                if recent_queries:
+                    # Create a richer query combining current and recent user inputs
+                    combined_query = query + " " + " ".join(recent_queries[-2:])
+                    print(f"{self.get_time()} [Web] Using conversation context: {combined_query[:50]}...")
+
+                    # Try search with enhanced query
+                    search_results = store.retrieve(
+                        query=combined_query,
+                        top_k=8,  # Get more results
+                        min_similarity=min_similarity,
+                        use_fractal=True
+                    )
+
+                    # If we get results with the enhanced query, use them
+                    if search_results:
+                        print(f"{self.get_time()} [Web] Enhanced search found {len(search_results)} results")
+                        # Process results as before
+                        # ...
+                        return processed_result
+
             # Generate embedding for query
             # query_embedding = self.memory_manager.embedding_function(query)
 
@@ -1282,7 +1311,7 @@ class WebKnowledgeEnhancer:
                     query=query,
                     memory_types=["web", "knowledge"],
                     top_k=5,  # Get more than needed for better filtering
-                    min_similarity=0.6, # Lower threshold to find more potential matches
+                    min_similarity=0.45, # Lower threshold to find more potential matches (starting was 0.6)
                     use_fractal=self.memory_manager.use_fractal
                 )
 

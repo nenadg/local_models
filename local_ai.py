@@ -1328,6 +1328,7 @@ class TinyLlamaChat:
             return "Error in streaming setup. Please try again."
 
         finally:
+            print(f"\n{self.get_time()} -.-", end='', flush=True)
             if show_confidence and not self.stop_event.is_set() and not fallback_message_streamed:
                 # Print the legend after the response is complete
                 print()  # Add a newline
