@@ -1228,6 +1228,8 @@ class WebKnowledgeEnhancer:
 
         return unique_entities
 
+    # In web_knowledge_enhancer.py, _extract_from_fractal_memory method:
+
     def _extract_from_fractal_memory(self, query: str) -> Optional[str]:
         """
         Enhanced function to extract from fractal memory with retry mechanisms.
@@ -1248,7 +1250,7 @@ class WebKnowledgeEnhancer:
             print(f"{self.get_time()} [Web] Attempting fractal memory retrieval for user: {current_user_id}")
 
             # Create fractal-enabled store if not already using one
-            store = self.memory_manager #._get_user_store(current_user_id)
+            store = self.memory_manager
 
             # Defensive check: ensure store and index are initialized
             if not store or not hasattr(store, 'index') or store.index is None:
@@ -1260,37 +1262,29 @@ class WebKnowledgeEnhancer:
                 print(f"{self.get_time()} [Web] Fractal embeddings not enabled in vector store")
                 return None
 
-            # Check if the store has any documents
-            if not hasattr(store, 'documents') or len(store.documents) == 0:
-                print(f"{self.get_time()} [Web] Store has no documents to search")
+            # Check if the store has any items - UPDATED FOR UNIFIED MEMORY MANAGER
+            if not hasattr(store, 'items') or len(store.items) == 0:
+                print(f"{self.get_time()} [Web] Store has no items to search")
                 return None
 
             # Generate embedding for query
-            query_embedding = self.memory_manager.embedding_function(query)
+            # query_embedding = self.memory_manager.embedding_function(query)
 
             # Log diagnostics
             print(f"{self.get_time()} [Web] Fractal search enabled: {getattr(store, 'use_fractal', False)}")
-            print(f"{self.get_time()} [Web] Store total documents: {len(getattr(store, 'documents', []))}")
+            print(f"{self.get_time()} [Web] Store total items: {len(getattr(store, 'items', []))}")
 
             try:
                 # Conduct a broader, multi-level fractal search with lower threshold to find anything related
                 print(f"{self.get_time()} [Web] Executing multi-level fractal search")
 
-                # Try enhanced fractal search first
-                if hasattr(store, 'enhanced_fractal_search'):
-                    search_results = store.enhanced_fractal_search(
-                        query_embedding,
-                        top_k=5,
-                        min_similarity=0.60, # Lower threshold to find more potential matches
-                        multi_level_search=True
-                    )
-                else:
-                    # Fallback to standard search
-                    search_results = store.search(
-                        query_embedding,
-                        top_k=5,
-                        min_similarity=0.60
-                    )
+                search_results = self.memory_manager.retrieve(
+                    query=query,
+                    memory_types=["web", "knowledge"],
+                    top_k=5,  # Get more than needed for better filtering
+                    min_similarity=0.6, # Lower threshold to find more potential matches
+                    use_fractal=self.memory_manager.use_fractal
+                )
 
                 print(f"{self.get_time()} [Web] Fractal search returned {len(search_results)} results")
             except Exception as search_error:
@@ -1311,7 +1305,7 @@ class WebKnowledgeEnhancer:
 
                 # Check for web knowledge memories
                 if metadata.get('memory_type') == 'web_knowledge':
-                    content = result.get('text', '')
+                    content = result.get('content', '')  # Changed from 'text' to 'content'
                     # Extract potential search terms
                     first_sentence = content.split('.')[0].strip()
                     if len(first_sentence.split()) <= 10:

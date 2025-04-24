@@ -213,6 +213,44 @@ class TinyLlamaChat:
         self.conversation_history = []
         self.system_message = DEFAULT_SYSTEM_MESSAGE
 
+    def test_embedding_performance(self):
+        """Test embedding performance with minimal overhead"""
+        import time
+
+        # Create some sample text
+        sample_texts = [
+            "This is a sample text for testing embedding performance",
+            "Another sample text with different content",
+            "Third sample with yet more different content",
+            "Fourth sample to test batching performance",
+            "Fifth sample completing our test batch"
+        ]
+
+        print("Testing individual embedding performance...")
+
+        # Test individual embeddings
+        start_time = time.time()
+        individual_embeddings = []
+
+        for text in sample_texts:
+            embedding = self.memory_manager.embedding_function(text)
+            individual_embeddings.append(embedding)
+
+        individual_time = time.time() - start_time
+        print(f"Individual embedding time: {individual_time:.4f}s for {len(sample_texts)} texts")
+        print(f"Average time per text: {individual_time/len(sample_texts):.4f}s")
+
+        # Now test batched operation for raw comparison
+        # (this won't run unless you implement a batch_embedding_function)
+        if hasattr(self.memory_manager, 'batch_embedding_function'):
+            print("Testing batch embedding performance...")
+            start_time = time.time()
+            batch_embeddings = self.memory_manager.batch_embedding_function(sample_texts)
+            batch_time = time.time() - start_time
+            print(f"Batch embedding time: {batch_time:.4f}s for {len(sample_texts)} texts")
+            print(f"Average time per text: {batch_time/len(sample_texts):.4f}s")
+            print(f"Speedup: {individual_time/batch_time:.2f}x")
+
     def get_time(self):
         return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
 
@@ -1014,7 +1052,7 @@ class TinyLlamaChat:
             user_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
 
             # If no system command matched, generate response using the model
-            print(f"\n{self.get_time()} Assistant: \n", end='', flush=True)
+            print(f"{self.get_time()} Assistant: \n", end='', flush=True)
 
             try:
                 while True:
@@ -2249,9 +2287,7 @@ def main():
     parser.add_argument("--top-p", type=float, default=1.0, help="Top-p (nucleus) sampling parameter")
     parser.add_argument("--top-k", type=int, default=0, help="Top-k sampling parameter")
 
-
     args = parser.parse_args()
-
 
     filter_enabled = True  # Add this to track filtering state
     user_context = {}  # Shared context for the ResponseFilter
@@ -2269,11 +2305,14 @@ def main():
         sharpening_factor=args.sharpening_factor,
         enable_web_knowledge=args.web_knowledge,
         fractal_enabled=True,
-        max_fractal_levels=1,
+        max_fractal_levels=3,
         do_sample=args.do_sample,
         top_p=args.top_p,
         top_k=args.top_k
     )
+
+    # for debugging embed performance
+    # return chat.test_embedding_performance()
 
     try:
         # If web knowledge is enabled, configure the search engine
