@@ -122,7 +122,7 @@ class TinyLlamaChat:
             try:
                 integrate_semantic_reasoning(self, finetuned_model_path)
             except Exception as e:
-                print(f"Finetuned model not loaded: {e}")
+                print(f"{self.get_time()} Finetuned model not loaded: {e}")
 
         self.knowledge_system_enabled = True  # UnifiedMemoryManager has built-in knowledge capabilities
         self.current_domain_id = None  # Currently active domain ID
@@ -138,7 +138,7 @@ class TinyLlamaChat:
                 search_engine="duckduckgo",  # Use DuckDuckGo by default for fewer rate limits
                 embedding_function=self.memory_manager.embedding_function  # Direct reference to the function
             )
-            print("Web knowledge enhancement initialized")
+            print(f"{self.get_time()} Web knowledge enhancement initialized")
         else:
             self.web_enhancer = None
 
@@ -146,14 +146,13 @@ class TinyLlamaChat:
 
         os.makedirs(memory_dir, exist_ok=True)
 
-        current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
 
         # Determine the device to use
         if device:
             self.device = device
         elif torch.cuda.is_available():
             self.device = "cuda"
-            print("Using GPU for acceleration")
+            print(f"{self.get_time()} Using GPU for acceleration")
             if hasattr(torch.backends, "cuda"):
                 if hasattr(torch.backends.cuda, "matmul"):
                     torch.backends.cuda.matmul.allow_tf32 = True
@@ -163,7 +162,7 @@ class TinyLlamaChat:
                     torch.backends.cuda.enable_flash_sdp = True
         else:
             self.device = "cpu"
-            print("No GPU detected, using CPU (this will be slow)")
+            print(f"{self.get_time()} No GPU detected, using CPU (this will be slow)")
 
         # Setup appropriate torch dtype
         if self.device == "cpu":
@@ -172,7 +171,7 @@ class TinyLlamaChat:
             self.torch_dtype = torch.float16
 
         # Load model and tokenizer
-        print(f"Loading target model: {model_name}")
+        print(f"{self.get_time()} Loading target model: {model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 
         # Initialize the window manager with our tokenizer
@@ -184,7 +183,7 @@ class TinyLlamaChat:
             continuation_buffer_size=200  # Store the last 200 tokens for continuation
         )
 
-        print("Context window and continuation tracking initialized")
+        print(f"{self.get_time()} Context window and continuation tracking initialized")
 
         # Main model loading
         self.loading_options = {
@@ -194,7 +193,7 @@ class TinyLlamaChat:
         }
 
         # Load model
-        print("Loading model...")
+        print(f"{self.get_time()} Loading model...")
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **self.loading_options)
         self.model = self.resource_manager.register_model(self.model)
 
@@ -205,14 +204,17 @@ class TinyLlamaChat:
         self.draft_model = self.create_draft_model()
 
         if self.draft_model:
-            print("Created draft model by reducing layers")
+            print(f"{self.get_time()} Created draft model by reducing layers")
         else:
-            print("Could not create draft model, speculative decoding disabled")
+            print(f"{self.get_time()} Could not create draft model, speculative decoding disabled")
 
         # Load knowledge base
         self.knowledge_base = self.load_knowledge()
         self.conversation_history = []
         self.system_message = DEFAULT_SYSTEM_MESSAGE
+
+    def get_time(self):
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
 
     def set_embedding_function(self):
         """Generate embedding with caching for repeated queries"""
@@ -280,12 +282,12 @@ class TinyLlamaChat:
                 # Replace layers with reduced set
                 draft_model.model.layers = new_layers
 
-                print(f"Created draft model with {keep_layers}/{num_layers} layers")
+                print(f"{self.get_time()} Created draft model with {keep_layers}/{num_layers} layers")
                 return draft_model
 
             return None
         except Exception as e:
-            print(f"Error creating draft model: {e}")
+            print(f"{self.get_time()} Error creating draft model: {e}")
             return None
 
     def load_knowledge(self):
@@ -296,7 +298,7 @@ class TinyLlamaChat:
                 with open(knowledge_file, 'r') as f:
                     return json.load(f)
             except:
-                print("Error loading knowledge base, creating new one")
+                print(f"{self.get_time()} Error loading knowledge base, creating new one")
 
         # Default knowledge structure
         return {
@@ -315,7 +317,7 @@ class TinyLlamaChat:
             with open(knowledge_file, 'w') as f:
                 json.dump(self.knowledge_base, f, indent=2)
         except Exception as e:
-            print(f"Error saving knowledge base: {e}")
+            print(f"{self.get_time()} Error saving knowledge base: {e}")
 
     def add_to_knowledge(self, fact_or_correction, fact_type="fact"):
         """Add new information to knowledge base"""
@@ -702,7 +704,7 @@ class TinyLlamaChat:
             return None, None, None
 
         except Exception as e:
-            print(f"Error in speculative decoding: {e}")
+            print(f"{self.get_time()} Error in speculative decoding: {e}")
             return None, None, None
 
     # Function for speculative decoding with streaming
@@ -758,7 +760,7 @@ class TinyLlamaChat:
                                 self.stop_event.clear()  # Reset the event
                                 streamer.end()
                             except Exception as e:
-                                print(f"Error during interrupt cleanup: {e}")
+                                print(f"{self.get_time()} Error during interrupt cleanup: {e}")
                             return
 
 
@@ -835,7 +837,7 @@ class TinyLlamaChat:
                 # Report speculative decoding stats
                 if using_spec_decoding and total_tokens > 0:
                     efficiency = (accepted_draft_tokens / total_tokens) * 100
-                    print(f"Speculative decoding: {accepted_draft_tokens}/{total_tokens} tokens accepted ({efficiency:.1f}%)")
+                    print(f"{self.get_time()} Speculative decoding: {accepted_draft_tokens}/{total_tokens} tokens accepted ({efficiency:.1f}%)")
 
                 # If we didn't collect any metrics, add fallback values
                 # This should only happen if the generation fails completely
@@ -854,13 +856,13 @@ class TinyLlamaChat:
                         self.confidence_metrics.add_token_score(dummy_logits, token_id)
 
         except Exception as e:
-            print(f"\nError in generation thread: {str(e)}")
+            print(f"{self.get_time()} Error in generation thread: {str(e)}")
             import traceback
             traceback.print_exc()
             try:
                 streamer.end()
             except Exception as specific_e:
-                print(f"Error ending streamer: {specific_e}")
+                print(f"{self.get_time()} Error ending streamer: {specific_e}")
 
     def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None, use_web_search=True):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
@@ -914,7 +916,7 @@ class TinyLlamaChat:
                     successful = [file for file, status in file_commands.items()]
                     if successful:
                         files_info = ", ".join(successful)
-                        print(f"[User content saved to: {files_info}]")
+                        print(f"{self.get_time()} [User content saved to: {files_info}]")
 
             # Create enhanced prompt with knowledge
             enhanced_messages = self.create_prompt_with_knowledge(messages, use_web_search)
@@ -927,7 +929,7 @@ class TinyLlamaChat:
             optimized_tokens = self.window_manager.calculate_tokens(optimized_messages)
 
             if original_tokens != optimized_tokens:
-                print(f"Context window optimized: {original_tokens} → {optimized_tokens} tokens " +
+                print(f"{self.get_time()} Context window optimized: {original_tokens} → {optimized_tokens} tokens " +
                       f"(saved {original_tokens - optimized_tokens} tokens)")
 
             # Apply chat template
@@ -941,7 +943,7 @@ class TinyLlamaChat:
             try:
                 input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
             except Exception as e:
-                print(f"Error encoding prompt: {e}")
+                print(f"{self.get_time()} Error encoding prompt: {e}")
                 return "Error preparing response. Please try again with a simpler query."
 
 
@@ -1062,7 +1064,7 @@ class TinyLlamaChat:
                                 # Add note about available correction
                                 complete_response += "\n\n// Note: Repetitive pattern detected. Use 'fix code' to get correction suggestions."
                         except Exception as e:
-                            print(f"Error getting correction suggestions: {e}")
+                            print(f"{self.get_time()} Error getting correction suggestions: {e}")
 
                     # Get confidence for latest token
                     if self.confidence_metrics.token_probabilities:
@@ -1233,9 +1235,9 @@ class TinyLlamaChat:
                         if cmd.get("action") == "save_response":
                             success = self.mcp_handler.save_response_to_file(complete_response, filename)
                             if success:
-                                print(f"[Response saved to: {filename}]")
+                                print(f"{self.get_time()} [Response saved to: {filename}]")
                             else:
-                                print(f"[Failed to save response to: {filename}]")
+                                print(f"{self.get_time()} [Failed to save response to: {filename}]")
 
                 # Track the generated response for continuation
                 if hasattr(self, 'window_manager') and hasattr(self.window_manager, 'track_generated_response'):
@@ -1247,7 +1249,7 @@ class TinyLlamaChat:
                 return complete_response
 
             except Exception as e:
-                print(f"\nError during token streaming: {str(e)}")
+                print(f"\n{self.get_time()} Error during token streaming: {str(e)}")
                 if complete_response:
                     # Even with errors, make sure we have metrics
                     if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
@@ -1261,7 +1263,7 @@ class TinyLlamaChat:
             self.last_token_confidences = token_confidences
 
         except Exception as e:
-            print(f"\nStreaming setup failed: {e}")
+            print(f"\n{self.get_time()} Streaming setup failed: {e}")
             return "Error in streaming setup. Please try again."
 
         finally:
@@ -1327,7 +1329,7 @@ class TinyLlamaChat:
             with open(conversation_file, 'w') as f:
                 json.dump(conversation, f, indent=2)
         except Exception as e:
-            print(f"Error saving conversation: {e}")
+            print(f"{self.get_time()} Error saving conversation: {e}")
 
         return len(conversation)
 
@@ -1397,7 +1399,7 @@ class TinyLlamaChat:
         tokens_per_second = response_tokens / max(0.01, generation_time)
 
         # Print header
-        print(f"\n[Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec]")
+        print(f"\n{self.get_time()} [Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec]")
 
         # Get confidence metrics with sharpening applied
         confidence_data = self.confidence_metrics.get_metrics(apply_sharpening=True)
@@ -1467,7 +1469,7 @@ class TinyLlamaChat:
 
         # Show sharpening status if enabled
         if self.memory_manager.use_fractal:
-            print(f"[Sharpening enabled: factor={self.sharpening_factor:.2f}]")
+            print(f"{self.get_time()} [Sharpening enabled: factor={self.sharpening_factor:.2f}]")
 
     def add_conversation_to_memory(self, query, response):
         """Add the current exchange to memory if auto-memorize is enabled"""
@@ -1510,7 +1512,7 @@ class TinyLlamaChat:
         memories_added = sum(1 for item_id in added_ids if item_id is not None)
         
         if memories_added > 0:
-            print(f"[Memory] Added {memories_added} new memories")
+            print(f"{self.get_time()} [Memory] Added {memories_added} new memories")
             
         return memories_added
 
@@ -1570,7 +1572,7 @@ class TinyLlamaChat:
             if hasattr(self.confidence_metrics, 'token_probabilities') and self.confidence_metrics.token_probabilities:
                 _ = self.confidence_metrics.get_metrics(apply_sharpening=True)
 
-        print(f"Sharpening factor set to {factor}")
+        print(f"{self.get_time()} Sharpening factor set to {factor}")
 
     def post_process_response(self, response, query, domain=None):
         """
@@ -2101,22 +2103,22 @@ class TinyLlamaChat:
                 try:
                     # Clean up memory
                     self.memory_manager.cleanup()
-                    print(f"Consolidated memories for user {self.current_user_id}")
+                    print(f"{self.get_time()} Consolidated memories for user {self.current_user_id}")
                 except Exception as e:
-                    print(f"Error consolidating memories: {e}")
+                    print(f"{self.get_time()} Error consolidating memories: {e}")
 
             # Final cleanup
             if hasattr(self, 'resource_manager'):
                 self.resource_manager.cleanup()
 
             if torch.cuda.is_available():
-                print("Releasing cuda cache.")
+                print(f"{self.get_time()} Releasing cuda cache.")
                 torch.cuda.empty_cache()
 
-            print("Resources cleaned up successfully")
+            print(f"{self.get_time()} Resources cleaned up successfully")
 
         except Exception as e:
-            print(f"Error during cleanup: {e}")
+            print(f"{self.get_time()} Error during cleanup: {e}")
             # Attempt to run basic cleanup even after an error
             try:
                 if hasattr(self, 'resource_manager'):
@@ -2192,15 +2194,15 @@ class TinyLlamaChat:
 
             # Confirm and return input
             if user_input:
-                print(f"Received {len(user_input.splitlines())} lines of input.")
+                print(f"{self.get_time()} Received {len(user_input.splitlines())} lines of input.")
 
             return user_input
 
         except KeyboardInterrupt:
-            print("\nInput cancelled.")
+            print(f"\n{self.get_time()} Input cancelled.")
             return ""
         except Exception as e:
-            print(f"\nError during input: {e}")
+            print(f"\n{self.get_time()} Error during input: {e}")
             return ""
 
 def main():
@@ -2275,7 +2277,7 @@ def main():
         if args.web_knowledge and chat.web_enhancer:
             chat.web_enhancer.search_engine = args.search_engine
             chat.web_enhancer.confidence_threshold = args.web_confidence
-            print(f"Web knowledge enhancement enabled using {args.search_engine}")
+            print(f"{chat.get_time()} Web knowledge enhancement enabled using {args.search_engine}")
 
         if args.test_fractal:
             # Initialize memory manager with fractal enabled
@@ -2297,9 +2299,8 @@ def main():
             question_classifier=chat.question_classifier
         )
 
-        current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
         history_file = setup_readline_history(chat.memory_dir)
-        print(f"{current_time} Command history stored in: {history_file}")
+        print(f"{chat.get_time()} Command history stored in: {history_file}")
 
         # Set system message
         chat.system_message = {
@@ -2312,11 +2313,11 @@ def main():
             try:
                 import bitsandbytes as bnb
                 chat.loading_options["load_in_4bit"] = True  # or load_in_4bit=True for even better performance
-                print("Using 8-bit quantization for better performance")
+                print(f"{chat.get_time()} Using 8-bit quantization for better performance")
             except ImportError:
-                print("bitsandbytes not installed, using full precision")
+                print(f"{chat.get_time()} bitsandbytes not installed, using full precision")
 
-            print("Warming up model for maximum throughput...")
+            print(f"{chat.get_time()} Warming up model for maximum throughput...")
             _ = chat.generate_response(
                 [{"role": "user", "content": "Say some nice greeting."}],
                 max_new_tokens=16,
@@ -2369,8 +2370,7 @@ def main():
 
         while True:
             # Get timestamp for user input
-            current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-            user_input = chat.get_multiline_input(f"\n{current_time} You: ")
+            user_input = chat.get_multiline_input(f"{chat.get_time()} You: ")
 
             if user_input == "":
                 chat.stop_event.set()
@@ -2393,20 +2393,20 @@ def main():
 
                 # Show final stats
                 stats = store.get_stats()
-                print(f"Memories saved this session: {stats['active_items']}")
-                print(f"Total memories saved this: {stats['total_items']}")
+                print(f"{chat.get_time()} Memories saved this session: {stats['active_items']}")
+                print(f"{chat.get_time()} Total memories saved this: {stats['total_items']}")
                 break
 
             elif user_input.lower().startswith('!teach:'):
                 new_fact = user_input[7:].strip()
                 chat.add_to_knowledge(new_fact, fact_type="fact")
-                print(f"Added to knowledge base: {new_fact}")
+                print(f"{chat.get_time()} Added to knowledge base: {new_fact}")
                 continue
 
             elif user_input.lower().startswith('!correct:'):
                 correction = user_input[9:].strip()
                 chat.add_to_knowledge(correction, fact_type="correction")
-                print(f"Added correction: {correction}")
+                print(f"{chat.get_time()} Added correction: {correction}")
                 continue
 
             elif user_input.lower() == '!save':
@@ -2421,12 +2421,12 @@ def main():
                     "content": new_system
                 }
                 conversation[0] = chat.system_message
-                print(f"System message updated: {new_system}")
+                print(f"{chat.get_time()} System message updated: {new_system}")
                 continue
 
             elif user_input.lower() == '!toggle-turbo':
                 turbo_mode = not turbo_mode
-                print(f"Turbo mode {'enabled' if turbo_mode else 'disabled'}")
+                print(f"{chat.get_time()} Turbo mode {'enabled' if turbo_mode else 'disabled'}")
                 continue
 
             elif user_input.lower() == '!mcp-help':
@@ -2435,19 +2435,19 @@ def main():
                 continue
             elif user_input.lower() == '!toggle-filter':
                 filter_enabled = not filter_enabled
-                print(f"Response filtering {'enabled' if filter_enabled else 'disabled'}")
+                print(f"{chat.get_time()} Response filtering {'enabled' if filter_enabled else 'disabled'}")
                 continue
             elif user_input.lower() == '!toggle-heatmap':
                 show_confidence = not show_confidence
-                print(f"Confidence heatmap {'enabled' if show_confidence else 'disabled'}")
+                print(f"{chat.get_time()} Confidence heatmap {'enabled' if show_confidence else 'disabled'}")
                 continue
             elif user_input.lower() == '!toggle-all-metrics':
                 show_all_metrics = not show_all_metrics
-                print(f"Detailed metrics display {'enabled' if show_all_metrics else 'disabled'}")
+                print(f"{chat.get_time()} Detailed metrics display {'enabled' if show_all_metrics else 'disabled'}")
                 continue
             elif user_input.lower() == '!toggle-sharpening':
                 is_enabled = chat.memory_manager.toggle_sharpening()
-                print(f"Vector space sharpening {'enabled' if is_enabled else 'disabled'}")
+                print(f"{chat.get_time()} Vector space sharpening {'enabled' if is_enabled else 'disabled'}")
                 continue
             elif user_input.lower().startswith('!sharpening-factor:'):
                 try:
@@ -2457,17 +2457,17 @@ def main():
                     else:
                         print("Sharpening factor must be between 0.0 and 1.0")
                 except Exception as e:
-                    print(f"Invalid value: {str(e)}. Please specify a number between 0.0 and 1.0")
+                    print(f"{chat.get_time()} Invalid value: {str(e)}. Please specify a number between 0.0 and 1.0")
                 continue
 
             elif user_input.lower() == '!memorize':
                 memories_added = chat.save_conversation(conversation)
-                print(f"Conversation saved to long-term memory! Added {memories_added} memories.")
+                print(f"{chat.get_time()} Conversation saved to long-term memory! Added {memories_added} memories.")
                 continue
 
             elif user_input.lower() == '!toggle-memory':
                 is_enabled = chat.memory_manager.toggle_auto_memorize()
-                print(f"Automatic memorization {'enabled' if is_enabled else 'disabled'}")
+                print(f"{chat.get_time()} Automatic memorization {'enabled' if is_enabled else 'disabled'}")
                 continue
 
             elif user_input.lower() == '!memory-stats':
@@ -2479,44 +2479,44 @@ def main():
                     # Get memory manager state
                     auto_memorize = chat.memory_manager.auto_memorize if hasattr(chat.memory_manager, 'auto_memorize') else False
 
-                    print("\nMemory System Statistics:")
-                    print(f"Total memories: {store_stats.get('total_items', 0)}")
-                    print(f"Active memories: {store_stats.get('active_items', 0)}")
-                    print(f"Auto-memorize: {'Enabled' if auto_memorize else 'Disabled'}")
+                    print(f"\n{chat.get_time()} Memory System Statistics:")
+                    print(f"{chat.get_time()} Total memories: {store_stats.get('total_items', 0)}")
+                    print(f"{chat.get_time()} Active memories: {store_stats.get('active_items', 0)}")
+                    print(f"{chat.get_time()} Auto-memorize: {'Enabled' if auto_memorize else 'Disabled'}")
 
                     # Add additional statistics from the store if available
                     if hasattr(store, 'get_stats') and callable(store.get_stats):
                         try:
                             # Include more stats if they're available and informative
                             if 'index_dimension' in store_stats:
-                                print(f"Embedding dimension: {store_stats.get('index_dimension', 384)}")
+                                print(f"{chat.get_time()} Embedding dimension: {store_stats.get('index_dimension', 384)}")
                             if 'deleted_documents' in store_stats:
-                                print(f"Deleted memories: {store_stats.get('deleted_documents', 0)}")
+                                print(f"{chat.get_time()} Deleted memories: {store_stats.get('deleted_documents', 0)}")
                             # Show when the last store update happened
                             if 'last_updated' in store_stats:
-                                print(f"Last updated: {store_stats.get('last_updated', 'never')}")
+                                print(f"{chat.get_time()} Last updated: {store_stats.get('last_updated', 'never')}")
                         except Exception:
                             # Ignore errors in additional stats
                             pass
 
                 except Exception as e:
-                    print(f"Unexpected error when getting memory stats: {str(e)}")
+                    print(f"{chat.get_time()} Unexpected error when getting memory stats: {str(e)}")
                 continue
 
             elif user_input.lower() == '!toggle-web':
                 is_enabled = chat.toggle_web_knowledge()
-                print(f"Web knowledge enhancement {'enabled' if is_enabled else 'disabled'}")
+                print(f"{chat.get_time()} Web knowledge enhancement {'enabled' if is_enabled else 'disabled'}")
                 continue
 
             elif user_input.lower() == '!web-stats':
                 if hasattr(chat, 'web_enhancer') and chat.web_enhancer:
                     stats = chat.web_enhancer.get_stats()
-                    print("\nWeb Knowledge Statistics:")
-                    print(f"Total searches: {stats['total_searches']}")
-                    print(f"Successful searches: {stats['successful_searches']}")
-                    print(f"Success rate: {stats['success_rate']*100:.1f}%")
-                    print(f"Cache hits: {stats['cache_hits']}")
-                    print(f"Cache hit rate: {stats['cache_hit_rate']*100:.1f}%")
+                    print(f"\n{chat.get_time()} Web Knowledge Statistics:")
+                    print(f"{chat.get_time()} Total searches: {stats['total_searches']}")
+                    print(f"{chat.get_time()} Successful searches: {stats['successful_searches']}")
+                    print(f"{chat.get_time()} Success rate: {stats['success_rate']*100:.1f}%")
+                    print(f"{chat.get_time()} Cache hits: {stats['cache_hits']}")
+                    print(f"{chat.get_time()} Cache hit rate: {stats['cache_hit_rate']*100:.1f}%")
                 else:
                     print("Web knowledge enhancement is not enabled")
                 continue
@@ -2526,9 +2526,9 @@ def main():
                     engine = user_input.split(':')[1].strip().lower()
                     if engine in ["duckduckgo", "google"]:
                         chat.web_enhancer.search_engine = engine
-                        print(f"Search engine set to: {engine}")
+                        print(f"{chat.get_time()} Search engine set to: {engine}")
                     else:
-                        print(f"Unsupported search engine: {engine}. Please use 'duckduckgo' or 'google'")
+                        print(f"{chat.get_time()} Unsupported search engine: {engine}. Please use 'duckduckgo' or 'google'")
                 else:
                     print("Web knowledge enhancement is not enabled")
                 continue
@@ -2538,7 +2538,7 @@ def main():
                 if hasattr(store, 'print_fractal_embedding_diagnostics'):
                     store.print_fractal_embedding_diagnostics()
                 else:
-                    print("Fractal diagnostics not available.")
+                    print(f"{chat.get_time()} Fractal diagnostics not available.")
                 continue
 
             elif user_input.lower() == '!visualize-fractal':
@@ -2546,7 +2546,7 @@ def main():
                 if hasattr(store, 'visualize_fractal_embeddings'):
                     store.visualize_fractal_embeddings()
                 else:
-                    print("Fractal visualization not available.")
+                    print(f"{chat.get_time()} Fractal visualization not available.")
                 continue
 
             elif user_input.lower().startswith('!compare-queries:'):
@@ -2560,12 +2560,12 @@ def main():
                     # Call the semantic reasoning function
                     if hasattr(chat, 'test_semantic_relationship'):
                         relationship = chat.test_semantic_relationship(query1, query2)
-                        print(f"\nSemantic relationship between the queries: {relationship}")
+                        print(f"\n{chat.get_time()} Semantic relationship between the queries: {relationship}")
                     else:
-                        print("\nSemantic reasoning capability not available. Run the finetuning first.")
+                        print(f"\n{chat.get_time()} Semantic reasoning capability not available. Run the finetuning first.")
                 except Exception as e:
-                    print(f"\nError comparing queries: {e}")
-                    print("Usage: !compare-queries: first query | second query")
+                    print(f"\n{chat.get_time()} Error comparing queries: {e}")
+                    print(f"{chat.get_time()} Usage: !compare-queries: first query | second query")
                 continue
 
             elif user_input.lower().startswith('!create-domain:'):
@@ -2575,18 +2575,18 @@ def main():
                 description = parts[1].strip() if len(parts) > 1 else ""
                 domain_id = chat.create_knowledge_domain(name, description)
                 if domain_id:
-                    print(f"Created domain: {name} (ID: {domain_id})")
+                    print(f"{chat.get_time()} Created domain: {name} (ID: {domain_id})")
                 else:
-                    print("Failed to create domain")
+                    print(f"{chat.get_time()} Failed to create domain")
                 continue
 
             elif user_input.lower().startswith('!load-domain:'):
                 domain_id = user_input[13:].strip()
                 success = chat.load_knowledge_domain(domain_id)
                 if success:
-                    print(f"Loaded domain: {domain_id}")
+                    print(f"{chat.get_time()} Loaded domain: {domain_id}")
                 else:
-                    print(f"Failed to load domain: {domain_id}")
+                    print(f"{chat.get_time()} Failed to load domain: {domain_id}")
                 continue
 
             elif user_input.lower().startswith('!list-domains'):
@@ -2594,9 +2594,9 @@ def main():
                     domains = chat.memory_manager.knowledge_registry.list_domains()
                     print("\nAvailable Knowledge Domains:")
                     for domain in domains:
-                        print(f"- {domain['name']} (ID: {domain['domain_id']})")
-                        print(f"  Description: {domain['description']}")
-                        print(f"  Items: {domain['stats'].get('total_items', 0)}")
+                        print(f"{chat.get_time()} - {domain['name']} (ID: {domain['domain_id']})")
+                        print(f"{chat.get_time()}   Description: {domain['description']}")
+                        print(f"{chat.get_time()}   Items: {domain['stats'].get('total_items', 0)}")
                 else:
                     print("Knowledge registry not available")
                 continue
@@ -2607,17 +2607,17 @@ def main():
                     print("Please provide text to extract knowledge from")
                 else:
                     knowledge_items = chat.extract_knowledge_from_text(text, "user_input")
-                    print(f"Extracted {len(knowledge_items)} knowledge items:")
+                    print(f"{chat.get_time()} Extracted {len(knowledge_items)} knowledge items:")
                     for i, item in enumerate(knowledge_items[:5]):  # Show first 5
-                        print(f"{i+1}. Type: {item['type']}")
-                        print(f"   Content: {item['content']}")
-                        print(f"   Confidence: {item['metadata']['confidence']}")
+                        print(f"{chat.get_time()} {i+1}. Type: {item['type']}")
+                        print(f"{chat.get_time()}    Content: {item['content']}")
+                        print(f"{chat.get_time()}    Confidence: {item['metadata']['confidence']}")
 
                     if chat.current_domain_id:
                         add_to_domain = input(f"Add to current domain '{chat.current_domain_id}'? (y/n): ")
                         if add_to_domain.lower() == 'y':
                             count = chat.add_knowledge_to_domain(knowledge_items)
-                            print(f"Added {count} knowledge items to domain {chat.current_domain_id}")
+                            print(f"{chat.get_time()} Added {count} knowledge items to domain {chat.current_domain_id}")
                 continue
 
             # Add user message to conversation
@@ -2628,14 +2628,10 @@ def main():
             try:
                 # Measure generation time
                 start_time = time.time()
-
-                # Add timestamp for model output
-                response_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-
                 chat.stop_event.clear()  # Reset the event
 
                 # If no system command matched, generate response using the model
-                print(f"\n{response_time} Assistant: \n", end='', flush=True)
+                print(f"\n{chat.get_time()} Assistant: \n", end='', flush=True)
 
                 # Generate response
                 response = chat.generate_response(
@@ -2679,7 +2675,7 @@ def main():
                             # Show confidence legend and add separator for clarity
                             heatmap = TerminalHeatmap(tokenizer=None, use_background=False, color_scheme="sepia-red")
                             heatmap.print_legend()
-                            print("\nFiltered response:")
+                            print(f"\n{chat.get_time()} Filtered response:")
 
                     else:
                         # If not filtered, print the original response
@@ -2723,11 +2719,11 @@ def main():
                         show_all_metrics
                     )
                 except Exception as e:
-                    print(f"stupid error {e}")
+                    print(f"{chat.get_time()} stupid error {e}")
                     # Fallback to maximum tokens estimate
                     if args.max_tokens > 0:
                         tokens_per_second = args.max_tokens / generation_time
-                        print(f"[Generated in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f}]")
+                        print(f"{chat.get_time()} [Generated in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f}]")
 
                 # Get feedback with timestamp
                 # feedback_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
@@ -2743,16 +2739,16 @@ def main():
                 #         print("Sorry the response wasn't helpful.")
 
             except Exception as e:
-                print(f"Error generating response: {e}")
-                print("Please try again with a different question.")
+                print(f"{chat.get_time()} Error generating response: {e}")
+                print(f"{chat.get_time()} Please try again with a different question.")
 
             # finally:
             #     chat.cleanup()
 
     except KeyboardInterrupt:
-        print("\nExiting due to keyboard interrupt...")
+        print(f"\n{chat.get_time()} Exiting due to keyboard interrupt...")
     except Exception as e:
-        print(f"\nUnexpected error: {e}")
+        print(f"\n{chat.get_time()} Unexpected error: {e}")
     finally:
         # This should only happen when exiting the program
         chat.cleanup()

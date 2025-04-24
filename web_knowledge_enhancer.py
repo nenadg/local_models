@@ -12,6 +12,7 @@ import spacy
 import rake_nltk
 from rake_nltk import Rake
 from spacy.lang.en.stop_words import STOP_WORDS
+from datetime import datetime
 
 from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import quote_plus
@@ -76,7 +77,7 @@ class WebKnowledgeEnhancer:
                     "create", "make", "do", "how", "can", "would", "should"
                 }
             except Exception as e:
-                print(f"[Web] Error loading NLP components: {e}")
+                print(f"{self.get_time()} [Web] Error loading NLP components: {e}")
                 raise
         
         # Default user agents to rotate
@@ -98,6 +99,9 @@ class WebKnowledgeEnhancer:
         self.total_searches = 0
         self.successful_searches = 0
         self.cache_hits = 0
+
+    def get_time(self):
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
     
     def should_enhance_with_web_knowledge(self, 
                                          query: str, 
@@ -158,7 +162,7 @@ class WebKnowledgeEnhancer:
         if any(phrase in query.lower() for phrase in ["go on", "continue", "keep going", "next", "more"]):
             continuation_context["web_enhanced"] = False
             continuation_context["web_search_skipped"] = True
-            print("[Web] Skipping search for simple continuation with existing context")
+            print(f"{self.get_time()} [Web] Skipping search for simple continuation with existing context")
             return continuation_context
 
         # For complex continuations or continuations without context, proceed with web search
@@ -236,14 +240,14 @@ class WebKnowledgeEnhancer:
         cache_key = f"{self.search_engine}:{query}:{num_results}"
 
         if hasattr(self, '_last_search_query') and self._last_search_query == query:
-            print(f"[Web] WARNING: Reusing same query as previous request: '{query}'")
+            print(f"{self.get_time()} [Web] WARNING: Reusing same query as previous request: '{query}'")
         self._last_search_query = query
 
         if cache_key in self.search_cache:
             timestamp, results = self.search_cache[cache_key]
             if time.time() - timestamp < self.cache_ttl:
                 self.cache_hits += 1
-                print(f"[Web] Cache hit for query: '{query}'")
+                print(f"{self.get_time()} [Web] Cache hit for query: '{query}'")
                 return results
         
         # Increment search counter
@@ -297,7 +301,7 @@ class WebKnowledgeEnhancer:
             
             # Check response
             if response.status_code != 200:
-                print(f"[Web] Error: DuckDuckGo returned status code {response.status_code}")
+                print(f"{self.get_time()} [Web] Error: DuckDuckGo returned status code {response.status_code}")
                 return []
                 
             # Parse HTML
@@ -336,13 +340,13 @@ class WebKnowledgeEnhancer:
                         'source': 'duckduckgo'
                     })
                 except Exception as e:
-                    print(f"[Web] Error extracting DuckDuckGo result: {e}")
+                    print(f"{self.get_time()} [Web] Error extracting DuckDuckGo result: {e}")
             
-            print(f"[Web] Found {len(results)} results from DuckDuckGo for query: '{query}'")
+            print(f"{self.get_time()} [Web] Found {len(results)} results from DuckDuckGo for query: '{query}'")
             return results
             
         except Exception as e:
-            print(f"[Web] Error searching DuckDuckGo: {e}")
+            print(f"{self.get_time()} [Web] Error searching DuckDuckGo: {e}")
             return []
     
     def _search_google(self, query: str, num_results: int) -> List[Dict[str, Any]]:
@@ -380,7 +384,7 @@ class WebKnowledgeEnhancer:
             
             # Check response
             if response.status_code != 200:
-                print(f"[Web] Error: Google returned status code {response.status_code}")
+                print(f"{self.get_time()} [Web] Error: Google returned status code {response.status_code}")
                 return []
                 
             # Parse HTML
@@ -424,13 +428,13 @@ class WebKnowledgeEnhancer:
                         'source': 'google'
                     })
                 except Exception as e:
-                    print(f"[Web] Error extracting Google result: {e}")
+                    print(f"{self.get_time()} [Web] Error extracting Google result: {e}")
             
-            print(f"[Web] Found {len(results)} results from Google for query: '{query}'")
+            print(f"{self.get_time()} [Web] Found {len(results)} results from Google for query: '{query}'")
             return results
             
         except Exception as e:
-            print(f"[Web] Error searching Google: {e}")
+            print(f"{self.get_time()} [Web] Error searching Google: {e}")
             return []
     
     def fetch_content(self, url: str, timeout: int = 10) -> Optional[str]:
@@ -463,7 +467,7 @@ class WebKnowledgeEnhancer:
             
             # Check response
             if response.status_code != 200:
-                print(f"[Web] Error: URL {url} returned status code {response.status_code}")
+                print(f"{self.get_time()} [Web] Error: URL {url} returned status code {response.status_code}")
                 return None
                 
             # Parse HTML
@@ -486,7 +490,7 @@ class WebKnowledgeEnhancer:
             return text
             
         except Exception as e:
-            print(f"[Web] Error fetching content from {url}: {e}")
+            print(f"{self.get_time()} [Web] Error fetching content from {url}: {e}")
             return None
 
     def compare_vectors_enhanced(
@@ -707,7 +711,7 @@ class WebKnowledgeEnhancer:
             search_query = seo_friendly_query
 
         # Search the web
-        print(f"[Web] Enhanced search query: {search_query}")
+        print(f"{self.get_time()} [Web] Enhanced search query: {search_query}")
         search_results = self.search_web(search_query)
 
         if not search_results:
@@ -735,7 +739,7 @@ class WebKnowledgeEnhancer:
                             # Add full content to result
                             result['content'] = content
                     except Exception as e:
-                        print(f"[Web] Error processing URL {result['url']}: {e}")
+                        print(f"{self.get_time()} [Web] Error processing URL {result['url']}: {e}")
 
         # Create result vectors
         result_vectors = []
@@ -927,7 +931,7 @@ class WebKnowledgeEnhancer:
             added_count = sum(1 for item_id in added_ids if item_id is not None)
 
             if added_count > 0:
-                print(f"[Web] Added {added_count} web knowledge items to memory")
+                print(f"{self.get_time()} [Web] Added {added_count} web knowledge items to memory")
 
         # Handle extracted knowledge for domain (this was missing)
         extracted_knowledge = enhancement_data.get('extracted_knowledge', [])
@@ -1017,7 +1021,7 @@ class WebKnowledgeEnhancer:
             return " ".join(result)
 
         except Exception as e:
-            print(f"[Web] Detailed error in NLP query extraction: {str(e)}")
+            print(f"{self.get_time()} [Web] Detailed error in NLP query extraction: {str(e)}")
             # Return a simpler query as fallback
             return " ".join([t for t in text.lower().split() if t not in self._custom_stop][:max_phrases])
 
@@ -1038,14 +1042,14 @@ class WebKnowledgeEnhancer:
 
         # Log entities found for debugging
         if entities:
-            print(f"[Web] Extracted entities: {entities}")
+            print(f"{self.get_time()} [Web] Extracted entities: {entities}")
 
         # Try multiple methods and build a composite query
 
         # First try to extract from fractal memory for similar past queries
         fractal_query = self._extract_from_fractal_memory(query)
         if fractal_query:
-            print(f"[Web] Using fractal memory query: {fractal_query}")
+            print(f"{self.get_time()} [Web] Using fractal memory query: {fractal_query}")
 
             # Make sure entity is included
             if entities and not any(entity.lower() in fractal_query.lower() for entity in entities):
@@ -1064,10 +1068,10 @@ class WebKnowledgeEnhancer:
             if len(terms) > max_words:
                 terms = terms[:max_words]
 
-            print(f"[Web] Using NLP enhanced key terms extraction: {terms}")
+            print(f"{self.get_time()} [Web] Using NLP enhanced key terms extraction: {terms}")
             return " ".join(terms)
         except Exception as e:
-            print(f"[Web] Error in NLP query extraction: {e}")
+            print(f"{self.get_time()} [Web] Error in NLP query extraction: {e}")
             # Fall back to existing methods
 
         # Fallback to existing extraction methods
@@ -1075,7 +1079,7 @@ class WebKnowledgeEnhancer:
         # Try pattern matching, which is more context-aware
         pattern_query = self._extract_with_patterns(query)
         if pattern_query:
-            print(f"[Web] Using pattern-based query: {pattern_query}")
+            print(f"{self.get_time()} [Web] Using pattern-based query: {pattern_query}")
 
             # Make sure entity is included
             if entities and not any(entity.lower() in pattern_query.lower() for entity in entities):
@@ -1095,7 +1099,7 @@ class WebKnowledgeEnhancer:
             combined_terms = entities + [term for term in terms if term.lower() not in [e.lower() for e in entities]]
             key_terms = ' '.join(combined_terms[:max_words])
 
-        print(f"[Web] Using enhanced key terms extraction: {key_terms}")
+        print(f"{self.get_time()} [Web] Using enhanced key terms extraction: {key_terms}")
         return key_terms
 
     def _extract_entities(self, query: str) -> List[str]:
@@ -1236,41 +1240,41 @@ class WebKnowledgeEnhancer:
         """
         try:
             if not hasattr(self, 'memory_manager') or not self.memory_manager:
-                print("[Web] Memory manager not available for fractal retrieval")
+                print(f"{self.get_time()} [Web] Memory manager not available for fractal retrieval")
                 return None
 
             # Ensure we have a user ID
             current_user_id = getattr(self.chat, 'current_user_id', 'default_user') if hasattr(self, 'chat') else 'default_user'
-            print(f"[Web] Attempting fractal memory retrieval for user: {current_user_id}")
+            print(f"{self.get_time()} [Web] Attempting fractal memory retrieval for user: {current_user_id}")
 
             # Create fractal-enabled store if not already using one
             store = self.memory_manager #._get_user_store(current_user_id)
 
             # Defensive check: ensure store and index are initialized
             if not store or not hasattr(store, 'index') or store.index is None:
-                print("[Web] Vector store not properly initialized")
+                print(f"{self.get_time()} [Web] Vector store not properly initialized")
                 return None
 
             # Additional verification of fractal capability
             if not hasattr(store, 'fractal_enabled') or not store.fractal_enabled:
-                print("[Web] Fractal embeddings not enabled in vector store")
+                print(f"{self.get_time()} [Web] Fractal embeddings not enabled in vector store")
                 return None
 
             # Check if the store has any documents
             if not hasattr(store, 'documents') or len(store.documents) == 0:
-                print("[Web] Store has no documents to search")
+                print(f"{self.get_time()} [Web] Store has no documents to search")
                 return None
 
             # Generate embedding for query
             query_embedding = self.memory_manager.embedding_function(query)
 
             # Log diagnostics
-            print(f"[Web] Fractal search enabled: {getattr(store, 'fractal_enabled', False)}")
-            print(f"[Web] Store total documents: {len(getattr(store, 'documents', []))}")
+            print(f"{self.get_time()} [Web] Fractal search enabled: {getattr(store, 'fractal_enabled', False)}")
+            print(f"{self.get_time()} [Web] Store total documents: {len(getattr(store, 'documents', []))}")
 
             try:
                 # Conduct a broader, multi-level fractal search with lower threshold to find anything related
-                print("[Web] Executing multi-level fractal search")
+                print(f"{self.get_time()} [Web] Executing multi-level fractal search")
 
                 # Try enhanced fractal search first
                 if hasattr(store, 'enhanced_fractal_search'):
@@ -1288,21 +1292,21 @@ class WebKnowledgeEnhancer:
                         min_similarity=0.60
                     )
 
-                print(f"[Web] Fractal search returned {len(search_results)} results")
+                print(f"{self.get_time()} [Web] Fractal search returned {len(search_results)} results")
             except Exception as search_error:
-                print(f"[Web] Error during fractal search: {search_error}")
+                print(f"{self.get_time()} [Web] Error during fractal search: {search_error}")
                 return None
 
             # Process results
             for result in search_results:
                 similarity = result.get('similarity', 0)
-                print(f"[Web] Fractal result: sim={similarity:.2f}, level={result.get('level', 0)}")
+                print(f"{self.get_time()} [Web] Fractal result: sim={similarity:.2f}, level={result.get('level', 0)}")
 
                 metadata = result.get('metadata', {})
 
                 # Check for search terms in metadata
                 if 'search_term' in metadata:
-                    print(f"[Web] Found search term in memory: {metadata['search_term']}")
+                    print(f"{self.get_time()} [Web] Found search term in memory: {metadata['search_term']}")
                     return metadata['search_term']
 
                 # Check for web knowledge memories
@@ -1311,7 +1315,7 @@ class WebKnowledgeEnhancer:
                     # Extract potential search terms
                     first_sentence = content.split('.')[0].strip()
                     if len(first_sentence.split()) <= 10:
-                        print(f"[Web] Extracted search term from web memory: {first_sentence}")
+                        print(f"{self.get_time()} [Web] Extracted search term from web memory: {first_sentence}")
                         return first_sentence
 
                 # Look for source queries that might be similar
@@ -1321,13 +1325,13 @@ class WebKnowledgeEnhancer:
                     if len(source_query.split()) <= 15:
                         # Extract key terms from the source query instead of using it directly
                         extracted_terms = self._extract_key_terms(source_query, 7)
-                        print(f"[Web] Using terms from similar query: {extracted_terms}")
+                        print(f"{self.get_time()} [Web] Using terms from similar query: {extracted_terms}")
                         return extracted_terms
 
-            print("[Web] No useful search terms found in fractal memory")
+            print(f"{self.get_time()} [Web] No useful search terms found in fractal memory")
             return None
         except Exception as e:
-            print(f"[Web] Error in fractal memory extraction: {e}")
+            print(f"{self.get_time()} [Web] Error in fractal memory extraction: {e}")
             return None
 
     def _extract_with_patterns(self, query: str) -> Optional[str]:

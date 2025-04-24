@@ -2,6 +2,7 @@ import re
 import numpy as np
 from typing import List, Dict, Any, Optional
 from pattern_matching_utils import extract_arithmetic_expression, extract_example_pairs, extract_mapping_category, clean_duplicate_memories
+from datetime import datetime
 
 class WeightedMemoryIntegrator:
     """
@@ -29,6 +30,9 @@ class WeightedMemoryIntegrator:
             'transliteration': self._post_process_translation
         }
 
+    def get_time(self):
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+
     def retrieve_and_integrate(self, user_id: str, query: str) -> Dict[str, Any]:
         """
         Retrieve memories and integrate them with domain-specific weighting.
@@ -44,11 +48,11 @@ class WeightedMemoryIntegrator:
         settings = self._get_settings(query)
 
         try:
-            current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+
             # Get memories with domain-specific settings
-            print(f"{current_time} DEBUG: Starting memory retrieval for query: {query[:30]}...")
+            print(f"{self.get_time()} [Debug] Starting memory retrieval for query: {query[:30]}...")
             memory_text = self._retrieve_memories(user_id, query, settings)
-            print(f"{current_time} DEBUG: Memory retrieval complete, got {len(memory_text)} chars")
+            print(f"{self.get_time()} [Debug]: Memory retrieval complete, got {len(memory_text)} chars")
 
             # Apply domain-specific post-processing if needed
             if settings['post_process'] and settings['domain'] in self.post_processors:

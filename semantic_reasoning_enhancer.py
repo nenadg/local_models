@@ -2,6 +2,7 @@ import os
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer
 from peft import PeftModel, PeftConfig
+from datetime import datetime
 
 class SemanticReasoningEnhancer:
     """
@@ -30,6 +31,9 @@ class SemanticReasoningEnhancer:
 
         # Ensure we have the right tokenizer
         self.tokenizer = self.base_tokenizer
+
+    def get_time(self):
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
 
     def format_reasoning_prompt(self, query1: str, query2: str) -> str:
         """
@@ -139,11 +143,11 @@ def integrate_semantic_reasoning(chat_instance, finetuned_model_path):
         # Add the method to the chat instance
         chat_instance.test_semantic_relationship = test_semantic_relationship
 
-        print("[Semantic Reasoning] Successfully integrated!")
+        print(f"{reasoning_enhancer.get_time()} [Semantic Reasoning] Successfully integrated!")
         return True
 
     except Exception as e:
-        print(f"[Semantic Reasoning] Integration failed: {e}")
+        print(f"{reasoning_enhancer.get_time()} [Semantic Reasoning] Integration failed: {e}")
         return False
 
 # Example usage in main script:
