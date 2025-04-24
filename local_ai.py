@@ -255,43 +255,63 @@ class TinyLlamaChat:
         return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
 
     def set_embedding_function(self):
-        """Generate embedding with caching for repeated queries"""
+        """Optimize embedding function for GPU"""
+
+        # Ensure model is in evaluation mode
+        if hasattr(self.model, 'eval'):
+            self.model.eval()
+
+        # Create a cache for embeddings
+        if not hasattr(self, '_embedding_cache'):
+            self._embedding_cache = {}
+
         def generate_embedding(text):
-            """Generate embedding with caching"""
-            # Create a hash of the text for cache key
+            """Generate embedding with caching and optimization"""
+            # Create a hash for cache key
             import hashlib
             cache_key = hashlib.md5(text.encode()).hexdigest()
 
             # Check cache first
-            if cache_key in self._query_embedding_cache:
-                return self._query_embedding_cache[cache_key]
+            if cache_key in self._embedding_cache:
+                return self._embedding_cache[cache_key]
 
-            # Generate embedding for new text
             with torch.no_grad():
+                # Tokenize with efficient settings
                 inputs = self.tokenizer(
                     text,
                     return_tensors="pt",
                     truncation=True,
                     max_length=512,
                     padding=True
-                ).to(self.device)
+                ).to(self.device)  # Removed the dtype parameter
 
-                outputs = self.model.model(
-                    input_ids=inputs.input_ids,
-                    attention_mask=inputs.attention_mask
-                )
+                # Use more efficient forward pass
+                # For models with LM head, we can just use the model's encoder/transformer part
+                if hasattr(self.model, 'model'):
+                    outputs = self.model.model(
+                        input_ids=inputs.input_ids,
+                        attention_mask=inputs.attention_mask
+                    )
+                else:
+                    # Fallback for other model types
+                    outputs = self.model(
+                        input_ids=inputs.input_ids,
+                        attention_mask=inputs.attention_mask,
+                        output_hidden_states=True
+                    )
 
+                # Get mean pooled representation
                 embedding = outputs.last_hidden_state.mean(dim=1).cpu().numpy()[0]
 
-            # Cache result (limit cache size)
-            if len(self._query_embedding_cache) > 1000:  # Limit cache size
-                # Remove random 100 items when we hit the limit
+            # Cache the result (limit cache size)
+            if len(self._embedding_cache) > 1000:
+                # Random eviction policy
                 import random
-                keys_to_remove = random.sample(list(self._query_embedding_cache.keys()), 100)
+                keys_to_remove = random.sample(list(self._embedding_cache.keys()), 100)
                 for key in keys_to_remove:
-                    del self._query_embedding_cache[key]
+                    del self._embedding_cache[key]
 
-            self._query_embedding_cache[cache_key] = embedding
+            self._embedding_cache[cache_key] = embedding
             return embedding
 
         # Set the embedding function

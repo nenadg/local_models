@@ -391,48 +391,33 @@ class UnifiedMemoryManager:
             level_embedding = self._generate_level_embedding(base_embedding, level)
             item.add_fractal_embedding(level, level_embedding)
     
+    # In UnifiedMemoryManager._generate_level_embedding
     def _generate_level_embedding(self, base_embedding: np.ndarray, level: int) -> np.ndarray:
         """
         Generate a level-specific embedding with controlled semantic variation.
-        Each level introduces a specific type of variation to explore different
-        areas of the semantic space while maintaining core meaning.
+        Simplified for better performance.
         """
         if level == 0:
             return base_embedding
-        
-        # Create a rotation matrix with controlled randomness
-        # Higher levels have more rotation/variation
-        rotation_strength = 0.05 * level  # 5% per level
-        rotation_matrix = np.eye(base_embedding.shape[0])  # Identity matrix
-        
-        # Add controlled noise to rotation matrix
-        noise = np.random.normal(0, rotation_strength, rotation_matrix.shape)
-        rotation_matrix += noise
-        
-        # Ensure the rotation matrix is well-conditioned
-        u, s, vh = np.linalg.svd(rotation_matrix, full_matrices=False)
-        rotation_matrix = u @ vh  # Reconstruct with balanced singular values
-        
-        # Apply rotation to base embedding
-        rotated_embedding = np.dot(base_embedding, rotation_matrix)
-        
-        # Add directional noise (more for higher levels)
-        noise_direction = np.random.normal(0, 1, base_embedding.shape)
-        noise_direction /= max(np.linalg.norm(noise_direction), 1e-10)  # Normalize
-        
-        # Scale noise by level
-        noise_scale = 0.05 * level  # 5% per level
-        
-        # Combine base embedding (with decreasing weight) and noise (with increasing weight)
-        level_embedding = (
-            (1.0 - noise_scale) * rotated_embedding +  # Weighted rotated embedding
-            noise_scale * noise_direction              # Weighted noise
-        )
-        
-        # Normalize to maintain vector properties
-        level_embedding /= max(np.linalg.norm(level_embedding), 1e-10)
-        
-        return level_embedding
+
+        # Use a simpler transformation for better performance
+        # Just apply a rotation based on pre-generated matrices
+        if not hasattr(self, '_rotation_matrices'):
+            # Create rotation matrices once and cache them
+            self._rotation_matrices = {}
+            for i in range(1, self.max_fractal_levels + 1):
+                # Create a rotation matrix with fixed seed for determinism
+                np.random.seed(42 + i)  # Fixed seed per level
+                rotation = np.random.normal(0, 0.05 * i, (self.embedding_dim, self.embedding_dim))
+                # Ensure the matrix is orthogonal (proper rotation)
+                u, _, vh = np.linalg.svd(rotation, full_matrices=False)
+                self._rotation_matrices[i] = u @ vh
+
+        # Apply cached rotation
+        rotated = np.dot(base_embedding, self._rotation_matrices[level])
+
+        # Normalize
+        return rotated / np.linalg.norm(rotated)
     
     def retrieve(self, 
                 query: str, 
