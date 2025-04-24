@@ -882,64 +882,54 @@ class WebKnowledgeEnhancer:
         
         return context
     
-    def add_web_results_to_memory(self, 
-                                user_id: str, 
-                                query: str, 
-                                enhancement_data: Dict[str, Any],
-                                min_similarity: float = 0.5) -> int:
-        """
-        Add relevant web results to memory for future use.
-        
-        Args:
-            user_id: User identifier
-            query: Original query
-            enhancement_data: Web enhancement data
-            min_similarity: Minimum similarity threshold for memory storage
-            
-        Returns:
-            Number of memories added
-        """
+    def add_web_results_to_memory(self, user_id: str, query: str, enhancement_data: Dict[str, Any], min_similarity: float = 0.5) -> int:
+        """High-performance web knowledge addition with knowledge extraction"""
         if not enhancement_data.get('enhanced', False) or not self.memory_manager:
             return 0
-            
+
         web_results = enhancement_data.get('web_results', [])
-        added_count = 0
-        
+        batch_items = []
+
+        # Prepare all items
         for result in web_results:
             # Skip low relevance results
             if result.get('similarity', 0.0) < min_similarity:
                 continue
-                
-            # Create memory entry
+
+            # Create memory text
             memory_text = f"{result['title']} - {result['snippet']}"
-            
+
             # Add source URL
             if 'url' in result:
                 memory_text += f" Source: {result['url']}"
-                
-            # Add to memory with web metadata
-            try:
-                item_id = self.memory_manager.add(
-                    content=memory_text,
-                    memory_type="web_knowledge",
-                    source="web_search",
-                    metadata={
-                        'source_query': result.get('source', 'web'),
-                        'url': result.get('url', ''),
-                        'similarity': result.get('similarity', 0.0),
-                        'web_timestamp': time.time()
-                    },
-                    use_fractal=self.memory_manager.use_fractal)
 
-                if item_id:
-                    added_count += 1
+            # Add to batch
+            batch_items.append({
+                "content": memory_text,
+                "memory_type": "web_knowledge",
+                "source": "web_search",
+                "metadata": {
+                    'source_query': query,
+                    'url': result.get('url', ''),
+                    'similarity': result.get('similarity', 0.0),
+                    'web_timestamp': time.time()
+                }
+            })
 
-            except Exception as e:
-                print(f"[Web] Error adding web result to memory: {e}")
-        
-        if added_count > 0:
-            print(f"[Web] Added {added_count} web knowledge items to memory")
+        # Add all items at once
+        added_count = 0
+        if batch_items:
+            added_ids = self.memory_manager.add_bulk(
+                batch_items,
+                use_fractal=self.memory_manager.use_fractal
+            )
 
+            added_count = sum(1 for item_id in added_ids if item_id is not None)
+
+            if added_count > 0:
+                print(f"[Web] Added {added_count} web knowledge items to memory")
+
+        # Handle extracted knowledge for domain (this was missing)
         extracted_knowledge = enhancement_data.get('extracted_knowledge', [])
         if extracted_knowledge and hasattr(self.chat, 'current_domain_id') and self.chat.current_domain_id:
             try:
@@ -950,7 +940,7 @@ class WebKnowledgeEnhancer:
                     print(f"[Knowledge] Added {added_to_domain} items to domain {self.chat.current_domain_id}")
             except Exception as e:
                 print(f"Error adding knowledge to domain: {e}")
-                
+
         return added_count
     
     def get_stats(self) -> Dict[str, Any]:

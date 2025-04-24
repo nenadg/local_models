@@ -83,6 +83,7 @@ class TinyLlamaChat:
         self.do_sample = do_sample
         self.top_p = top_p
         self.top_k = top_k
+        self._query_embedding_cache = {}
 
         self.stop_event = threading.Event()
 
@@ -214,9 +215,18 @@ class TinyLlamaChat:
         self.system_message = DEFAULT_SYSTEM_MESSAGE
 
     def set_embedding_function(self):
-        """Set the embedding function for memory after model is loaded."""
+        """Generate embedding with caching for repeated queries"""
         def generate_embedding(text):
-            # Use the model to generate embeddings
+            """Generate embedding with caching"""
+            # Create a hash of the text for cache key
+            import hashlib
+            cache_key = hashlib.md5(text.encode()).hexdigest()
+
+            # Check cache first
+            if cache_key in self._query_embedding_cache:
+                return self._query_embedding_cache[cache_key]
+
+            # Generate embedding for new text
             with torch.no_grad():
                 inputs = self.tokenizer(
                     text,
@@ -226,18 +236,23 @@ class TinyLlamaChat:
                     padding=True
                 ).to(self.device)
 
-                # For CausalLM models, we need to get hidden states differently
-                # Use the model's base transformer to get the hidden states
                 outputs = self.model.model(
                     input_ids=inputs.input_ids,
                     attention_mask=inputs.attention_mask
                 )
 
-                # Now we can access last_hidden_state
-                hidden_states = outputs.last_hidden_state
+                embedding = outputs.last_hidden_state.mean(dim=1).cpu().numpy()[0]
 
-                # Use mean pooling to get a single vector
-                return hidden_states.mean(dim=1).cpu().numpy()[0]
+            # Cache result (limit cache size)
+            if len(self._query_embedding_cache) > 1000:  # Limit cache size
+                # Remove random 100 items when we hit the limit
+                import random
+                keys_to_remove = random.sample(list(self._query_embedding_cache.keys()), 100)
+                for key in keys_to_remove:
+                    del self._query_embedding_cache[key]
+
+            self._query_embedding_cache[cache_key] = embedding
+            return embedding
 
         # Set the embedding function
         self.memory_manager.embedding_function = generate_embedding
@@ -942,7 +957,7 @@ class TinyLlamaChat:
             generation_config = {
                 "max_new_tokens": max_new_tokens,
                 #"do_sample": temperature >= 0.1, # use only if do_sample=false
-                "temperature": temperature if temperature > 0.1 else 1.0,
+                # "temperature": temperature if temperature > 0.1 else 1.0,
                 #"top_k":  50,
                 #"top_p": 0.95, # use only if do_sample=False
                 "repetition_penalty": 1.0,
@@ -960,13 +975,13 @@ class TinyLlamaChat:
                 generation_config['do_sample'] = True
                 generation_config['top_k'] = self.top_k
                 generation_config['top_p'] = self.top_p
+                generation_config['temperature'] = temperature if temperature > 0.1 else 1.0
             else:
                 generation_config['do_sample'] = False
-                if 'top_k' in generation_config:
-                    del generation_config['top_k']
-
-                if 'top_p' in generation_config:
-                    del generation_config['top_p']
+                # Remove sampling parameters when not using sampling
+                for param in ['temperature', 'top_k', 'top_p']:
+                    if param in generation_config:
+                        del generation_config[param]
 
             # Start generation in background
             thread = Thread(target=self.generate_speculative, args=(input_ids, streamer, max_new_tokens, generation_config, turbo_mode))
@@ -1458,33 +1473,41 @@ class TinyLlamaChat:
         """Add the current exchange to memory if auto-memorize is enabled"""
         if not self.auto_memorize:
             return 0
-            
+
         # Extract key information
         key_info = self._extract_key_information(query, response)
-        
-        # Store each key piece of information
-        memories_added = 0
-        
+
+        if not key_info:
+            return 0
+
+        # Create batch items
+        batch_items = []
+        timestamp = datetime.now().isoformat()
+
         for info in key_info:
-            # Create metadata with compatibility fields
+            # Create metadata
             metadata = {
                 'source_query': query,
                 'source_response': response[:100] + "..." if len(response) > 100 else response,
-                'timestamp': datetime.now().isoformat(),
+                'timestamp': timestamp,
                 'memory_type': "conversation"
             }
-            
-            # Add to the store
-            item_id = self.memory_manager.add(
-                content=info,
-                memory_type="conversation",
-                source="conversation",
-                metadata=metadata,
-                use_fractal=self.memory_manager.use_fractal
-            )
-            
-            if item_id:
-                memories_added += 1
+
+            # Add to batch
+            batch_items.append({
+                "content": info,
+                "memory_type": "conversation",
+                "source": "conversation",
+                "metadata": metadata
+            })
+
+        # Add all items at once
+        added_ids = self.memory_manager.add_bulk(
+            batch_items,
+            use_fractal=self.memory_manager.use_fractal
+        )
+
+        memories_added = sum(1 for item_id in added_ids if item_id is not None)
         
         if memories_added > 0:
             print(f"[Memory] Added {memories_added} new memories")
@@ -1492,42 +1515,37 @@ class TinyLlamaChat:
         return memories_added
 
     def _extract_key_information(self, query, response):
-        """
-        Extract key information from conversation to remember.
-        
-        Args:
-            query: User query
-            response: Assistant response
-            
-        Returns:
-            List of key information snippets
-        """
-        import re
-        # Extract factual statements (sentences with potential facts)
-        combined_text = f"{query} {response}"
-        sentences = re.split(r'[.!?]', combined_text)
+        # Use a more efficient approach to split sentences
+        sentences = re.split(r'[.!?]', query + " " + response)
+
+        # Pre-filter to avoid processing many sentences
         key_info = []
-        
-        # Process each sentence with lower thresholds
+        seen_simplified = set()  # Track similar sentences
+
         for sentence in sentences:
-            sentence = sentence.strip()
-            if len(sentence) < 10:  # Skip very short sentences
+            # Skip short sentences immediately
+            if len(sentence.strip()) < 10:
                 continue
-            
-            words = sentence.lower().split()
-            if not words:
+
+            # Create simplified key to avoid near-duplicates
+            simplified = re.sub(r'[^\w\s]', '', sentence.lower())
+            simplified = ' '.join(simplified.split())
+
+            # Skip if already seen a similar sentence
+            if simplified in seen_simplified:
                 continue
-            
-            # Simple criteria: sentences with entities or numbers
-            contains_entity = bool(re.search(r'\b[A-Z][a-z]+\b', sentence))
-            contains_numbers = bool(re.search(r'\b\d+\b', sentence))
-            
-            # Either has capitalized words or numbers or is long enough
-            if contains_entity or contains_numbers or len(words) > 5:
-                clean_sentence = re.sub(r'\s+', ' ', sentence)
-                key_info.append(clean_sentence)
-        
-        return key_info[:10]  # Return up to 10 memories
+
+            seen_simplified.add(simplified)
+
+            # Apply criteria (only compute once we know this sentence is worth checking)
+            if ("[A-Z][a-z]+" in sentence) or re.search(r'\b\d+\b', sentence) or len(sentence.split()) > 5:
+                key_info.append(sentence.strip())
+
+                # Limit to 10 memories as in the original
+                if len(key_info) >= 10:
+                    break
+
+        return key_info
 
     def toggle_auto_memorize(self):
         """Toggle automatic memorization on/off"""
@@ -1694,25 +1712,19 @@ class TinyLlamaChat:
         return cleaned
 
     def add_command_to_memory(self, command: str, output: str, error: str = None, output_file: str = None):
-        """
-        Add shell command output to memory with enhanced indexing for tabular data and structured outputs.
-
-        Args:
-            command: The shell command that was executed
-            output: Command output text
-            error: Command error text (if any)
-            output_file: Path to file where full output was saved (for large outputs)
-        """
+        """High-performance command memory addition"""
         # Skip empty outputs
         if not output and not error:
             return 0
 
-        # Detect command type and output format for specialized processing
+        batch_items = []
+
+        # Detect command type and output format
         command_type = self._detect_command_type(command, output)
         is_tabular = is_tabular_data(output)
 
-        # Create metadata for the memory
-        metadata = {
+        # Create base metadata
+        base_metadata = {
             "command": command,
             "command_type": command_type,
             "is_tabular": is_tabular,
@@ -1720,34 +1732,63 @@ class TinyLlamaChat:
         }
 
         if output_file:
-            metadata["output_file"] = output_file
+            base_metadata["output_file"] = output_file
 
         if error:
-            metadata["has_error"] = True
-            metadata["error"] = error[:100] if len(error) > 100 else error
+            base_metadata["has_error"] = True
+            base_metadata["error"] = error[:100] if len(error) > 100 else error
 
-        # Create memory content
+        # Create main memory item
         memory_content = f"Command '{command}' output: {output[:500]}"
         if len(output) > 500:
             memory_content += "... [output truncated]"
-            
+
         if error:
             memory_content += f"\nError: {error}"
 
-        # Add to memory
-        item_id = self.memory_manager.add(
-            content=memory_content,
-            memory_type="command",
-            source="shell",
-            metadata=metadata,
-            use_fractal=self.memory_manager.use_fractal
-        )
+        main_item = {
+            "content": memory_content,
+            "memory_type": "command",
+            "source": "shell",
+            "metadata": base_metadata.copy()
+        }
 
-        # For tabular data, add specialized memory entries
+        batch_items.append(main_item)
+
+        # For tabular data, add specialized entries
         if is_tabular:
-            self._add_tabular_command_memory(command, output, command_type)
+            lines = output.strip().split('\n')
 
-        return 1 if item_id else 0
+            if len(lines) >= 2:
+                # Extract header and data rows
+                header_row = lines[0]
+                data_rows = lines[1:]
+
+                # Add specialized entries for specific rows (limit to 5)
+                for i, row in enumerate(data_rows[:5]):
+                    # Create row-specific metadata
+                    row_metadata = base_metadata.copy()
+                    row_metadata.update({
+                        "row_index": i,
+                        "header": header_row
+                    })
+
+                    # Create content
+                    row_content = f"Row {i+1} from command '{command}': {row}"
+
+                    # Add to batch
+                    batch_items.append({
+                        "content": row_content,
+                        "memory_type": "command_tabular",
+                        "source": "shell",
+                        "metadata": row_metadata
+                    })
+
+        # Add all items at once
+        added_ids = self.memory_manager.add_bulk(batch_items, use_fractal=self.memory_manager.use_fractal)
+
+        # Return count of added items
+        return sum(1 for item_id in added_ids if item_id is not None)
 
     def _detect_command_type(self, command: str, output: str) -> str:
         """Detect the type of command based on the command string and output."""
@@ -2352,7 +2393,8 @@ def main():
 
                 # Show final stats
                 stats = store.get_stats()
-                print(f"Total memories saved this session: {stats['active_items']}")
+                print(f"Memories saved this session: {stats['active_items']}")
+                print(f"Total memories saved this: {stats['total_items']}")
                 break
 
             elif user_input.lower().startswith('!teach:'):

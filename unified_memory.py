@@ -188,6 +188,152 @@ class UnifiedMemoryManager:
             # Add to storage
             return self._add_item_to_store(item)
     
+    def add_bulk(self, items: List[Dict], use_fractal: Optional[bool] = None) -> List[Optional[str]]:
+        """
+        Efficiently add multiple memory items in a single operation.
+
+        Args:
+            items: List of dictionaries with content, memory_type, source, and metadata
+            use_fractal: Override default fractal setting
+
+        Returns:
+            List of item IDs or None for failed items
+        """
+        with self._lock:
+            # Temporarily disable auto_save
+            original_auto_save = self.auto_save
+            self.auto_save = False
+
+            # If this is the first item, initialize index
+            if self.index is None and len(items) > 0:
+                # Find first item with content to estimate dimensionality
+                for item in items:
+                    content = item.get('content')
+                    if content and content.strip():
+                        # Generate embedding to get dimensionality
+                        if self.embedding_function:
+                            try:
+                                embedding = self.embedding_function(content)
+                                self._create_index(embedding.shape[0])
+                                break
+                            except Exception:
+                                pass
+
+                # If still no index, create with default dimensions
+                if self.index is None:
+                    self._create_index()
+
+            # Generate all embeddings in parallel
+            all_embeddings = []
+            all_memory_items = []
+            item_ids = []
+
+            try:
+                import concurrent.futures
+
+                # Define embedding generator function
+                def generate_embedding_for_item(item_dict):
+                    content = item_dict.get('content', '')
+                    if not content or not content.strip():
+                        return None, None
+
+                    memory_type = item_dict.get('memory_type', 'general')
+                    source = item_dict.get('source', 'conversation')
+                    metadata = item_dict.get('metadata', {})
+
+                    # Generate embedding
+                    if self.embedding_function:
+                        try:
+                            embedding = self.embedding_function(content)
+                            # Create memory item
+                            item = MemoryItem(
+                                content=content,
+                                embedding=embedding,
+                                memory_type=memory_type,
+                                source=source,
+                                metadata=metadata
+                            )
+                            return item, embedding
+                        except Exception:
+                            pass
+
+                    return None, None
+
+                # Process items in parallel (up to 8 at a time)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                    futures = [executor.submit(generate_embedding_for_item, item) for item in items]
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            item, embedding = future.result()
+                            if item and embedding is not None:
+                                all_memory_items.append(item)
+                                all_embeddings.append(embedding)
+                        except Exception:
+                            # Skip failed items
+                            item_ids.append(None)
+
+                # Determine whether to use fractal embeddings
+                use_fractal_here = self.use_fractal if use_fractal is None else use_fractal
+
+                # Generate fractal embeddings for all items if requested (batched)
+                if use_fractal_here:
+                    for item in all_memory_items:
+                        self._add_fractal_embeddings(item)
+
+                # Add all items to storage at once
+                if all_memory_items:
+                    # Prepare normalized embeddings for the main index
+                    normalized_embeddings = []
+                    for embedding in all_embeddings:
+                        norm = np.linalg.norm(embedding)
+                        if norm < 1e-10:
+                            norm = 1e-10
+                        normalized_embeddings.append(embedding / norm)
+
+                    # Add to main index
+                    self.index.add(np.array(normalized_embeddings, dtype=np.float32))
+
+                    # Add to storage
+                    for i, item in enumerate(all_memory_items):
+                        index = len(self.items)
+                        self.items.append(item)
+                        self.embeddings.append(normalized_embeddings[i])
+                        self.id_to_index[item.id] = index
+                        item_ids.append(item.id)
+
+                    # Add fractal embeddings to respective indices
+                    if use_fractal_here:
+                        for level in range(1, self.max_fractal_levels + 1):
+                            level_embeddings = []
+                            items_with_level = []
+
+                            for item in all_memory_items:
+                                if level in item.fractal_embeddings:
+                                    level_embedding = item.fractal_embeddings[level]
+                                    norm = np.linalg.norm(level_embedding)
+                                    if norm < 1e-10:
+                                        norm = 1e-10
+                                    level_embeddings.append(level_embedding / norm)
+                                    items_with_level.append(item)
+
+                            if level_embeddings:
+                                # Ensure index exists for this level
+                                if level not in self.fractal_indices:
+                                    self.fractal_indices[level] = faiss.IndexFlatIP(self.embedding_dim)
+
+                                # Add all embeddings at once
+                                self.fractal_indices[level].add(np.array(level_embeddings, dtype=np.float32))
+
+                # Finally, save the updated data
+                if self.auto_save:
+                    self.save()
+
+                return item_ids
+
+            finally:
+                # Restore original auto_save setting
+                self.auto_save = original_auto_save
+
     def _add_item_to_store(self, item: MemoryItem) -> str:
         """Add a memory item to storage and indices."""
         # If this is the first item, initialize index

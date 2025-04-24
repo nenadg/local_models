@@ -44,8 +44,11 @@ class WeightedMemoryIntegrator:
         settings = self._get_settings(query)
 
         try:
+            current_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
             # Get memories with domain-specific settings
+            print(f"{current_time} DEBUG: Starting memory retrieval for query: {query[:30]}...")
             memory_text = self._retrieve_memories(user_id, query, settings)
+            print(f"{current_time} DEBUG: Memory retrieval complete, got {len(memory_text)} chars")
 
             # Apply domain-specific post-processing if needed
             if settings['post_process'] and settings['domain'] in self.post_processors:
@@ -58,7 +61,9 @@ class WeightedMemoryIntegrator:
             }
         except Exception as e:
             # Log the error and return empty memory with settings
+            import traceback
             print(f"Error retrieving memories: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
             return {
                 'memory_text': "",
                 'settings': settings
@@ -85,7 +90,7 @@ class WeightedMemoryIntegrator:
         Format search results into categorized memory text.
 
         Args:
-            results: Search results from vector store
+            results: Search results from memory store
             top_k: Maximum number of results to include
 
         Returns:
@@ -101,33 +106,37 @@ class WeightedMemoryIntegrator:
         general_info = []
 
         for result in results[:top_k]:
+            # Check if result uses 'content' (new) or 'text' (old) format
+            content_field = 'content' if 'content' in result else 'text'
+            content = result.get(content_field, '')
+
             if result.get('metadata', {}).get('is_correction', False):
-                corrections.append(result)
-            elif any(term in result['text'].lower() for term in
+                corrections.append((result, content))
+            elif any(term in content.lower() for term in
                     ['definition', 'fact', 'rule', 'alphabet', 'order']):
-                factual_info.append(result)
+                factual_info.append((result, content))
             else:
-                general_info.append(result)
+                general_info.append((result, content))
 
         # Compose the memory text with clear sections
         memory_text = ""
 
         if corrections:
             memory_text += "IMPORTANT CORRECTIONS (You MUST apply these):\n"
-            for result in corrections:
-                memory_text += f"- {result['text']}\n"
+            for result, content in corrections:
+                memory_text += f"- {content}\n"
             memory_text += "\n"
 
         if factual_info:
             memory_text += "FACTUAL INFORMATION:\n"
-            for result in factual_info:
-                memory_text += f"- {result['text']}\n"
+            for result, content in factual_info:
+                memory_text += f"- {content}\n"
             memory_text += "\n"
 
         if general_info and (not corrections or not factual_info):
             memory_text += "OTHER RELEVANT INFORMATION:\n"
-            for result in general_info:
-                memory_text += f"- {result['text']}\n"
+            for result, content in general_info:
+                memory_text += f"- {content}\n"
 
         return memory_text
 
@@ -143,49 +152,24 @@ class WeightedMemoryIntegrator:
         Returns:
             Formatted memory text
         """
-        # Instead of modifying the memory manager's sharpening factor,
-        # pass the appropriate sharpening factor directly to the retrieve method
-
-        # Get memories with domain-specific count and sharpening
+        # Get retrieval settings
         retrieve_count = settings.get('retrieval_count', 8)
         sharpening_factor = settings.get('sharpening_factor', 0.3)
         apply_sharpening = self.memory_manager.use_fractal if hasattr(self.memory_manager, 'use_fractal') else True
 
-        # Get the store directly
-        store = self.memory_manager #._get_user_store(user_id)
+        # Get the store
+        store = self.memory_manager
 
         if not store or not hasattr(store, 'index') or store.index is None:
             print("Memory store not fully initialized yet, returning empty results")
             return ""
 
-        # Generate embedding for the query
-        # query_embedding = self.memory_manager.embedding_function(query)
-
         # Search with appropriate parameters
         results = store.retrieve(
-                query=query,
-                top_k=retrieve_count*2,
-                min_similarity=0.25,
-                use_fracta=true)
-
-        # if hasattr(store, 'enhanced_fractal_search'):
-        #     results = store.enhanced_fractal_search(
-        #         query_embedding,
-        #         top_k=retrieve_count*2,
-        #         min_similarity=0.25,
-        #         apply_sharpening=apply_sharpening,
-        #         sharpening_factor=sharpening_factor,
-        #         multi_level_search=True
-        #     )
-        # else:
-        #     # Fallback to standard search
-        #     results = store.search(
-        #         query_embedding,
-        #         top_k=retrieve_count*2,
-        #         min_similarity=0.25,
-        #         apply_sharpening=apply_sharpening,
-        #         sharpening_factor=sharpening_factor
-        #    )
+            query=query,
+            top_k=retrieve_count*2,
+            min_similarity=0.25,
+            use_fractal=True)  # Fixed from 'use_fracta=true'
 
         # Format the results into memory text
         memory_text = self._format_memory_results(results, retrieve_count)
@@ -441,38 +425,25 @@ class WeightedMemoryIntegrator:
         query_embedding = self.memory_manager.embedding_function(translation_query)
 
         # Search with a low threshold to find all potential matches
-        # results = store.search(
-        #     query_embedding,
-        #     top_k=20,  # Get a good number of potential matches
-        #     min_similarity=0.2,  # Low threshold to catch more matches
-        #     apply_sharpening=False  # Don't apply sharpening for this administrative task
-        # )
-
-        if hasattr(store, 'enhanced_fractal_search'):
-            results = store.enhanced_fractal_search(
-                query_embedding,
-                top_k=20,
-                min_similarity=0.2,
-                apply_sharpening=apply_sharpening,
-                sharpening_factor=sharpening_factor,
-                multi_level_search=True
-            )
-        else:
-            # Fallback to standard search
-            results = store.search(
-                query_embedding,
-                top_k=20,
-                min_similarity=0.2,
-                apply_sharpening=apply_sharpening,
-                sharpening_factor=sharpening_factor
-            )
+        results = store.retrieve(
+            query=translation_query,
+            top_k=20,  # Get a good number of potential matches
+            min_similarity=0.2,  # Low threshold to catch more matches
+            use_fractal=True  # Use fractal search to find more matches
+        )
 
         # Find indices of memories to remove
         indices_to_remove = []
         for result in results:
             # Check if this is a translation memory for our word and language
-            doc_text = result['text'].lower()
-            idx = result['index']
+            # Check if 'content' exists (new format) or 'text' (old format)
+            content_field = 'content' if 'content' in result else 'text'
+            doc_text = result.get(content_field, '').lower()
+
+            # Get the result ID
+            result_id = result.get('id')
+            if not result_id:
+                continue
 
             if ((f'translate "{word}"' in doc_text or
                 f'say "{word}"' in doc_text or
@@ -482,11 +453,8 @@ class WeightedMemoryIntegrator:
                 # Check if it has an incorrect translation
                 # Skip if it has the correct translation
                 if correct_translation.lower() not in doc_text:
-                    indices_to_remove.append(idx)
-
-        # Remove the memories
-        for idx in sorted(indices_to_remove, reverse=True):  # Remove from highest index to lowest
-            store.remove(idx)
+                    if hasattr(store, 'remove'):
+                        store.remove(result_id)
 
         if indices_to_remove:
             print(f"[Memory] Removed {len(indices_to_remove)} incorrect translation memories for '{word}' in {language}")
