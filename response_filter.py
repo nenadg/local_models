@@ -84,22 +84,60 @@ class ResponseFilter:
 
         return sharpened_probs
 
-    def sharpen_metrics(self, metrics: Dict[str, float]) -> Dict[str, float]:
+    def sharpen_metrics(self, metrics: Dict[str, float], sharpening_factor: float = 0.3) -> Dict[str, float]:
         """
-        Apply sharpening to confidence metrics using the unified SharpeningUtils.
+        Apply sharpening to a dictionary of confidence metrics.
 
         Args:
-            metrics: Dictionary of confidence metrics
+            metrics: Dictionary of metrics (confidence, perplexity, entropy)
+            sharpening_factor: Strength of sharpening effect
 
         Returns:
             Dictionary with sharpened metrics
         """
-        from sharpening_utils import SharpeningUtils
+        # Skip if no sharpening requested
+        if sharpening_factor <= 0:
+            return metrics
 
-        return SharpeningUtils.sharpen_metrics(
-            metrics=metrics,
-            sharpening_factor=self.sharpening_factor
-        )
+        # Get key metrics
+        confidence = metrics.get('confidence', 0.5)
+        perplexity = metrics.get('perplexity', 1.0)
+        entropy = metrics.get('entropy', 0.0)
+
+        # Apply sharpening to each metric
+        sharpened_metrics = metrics.copy()
+
+        # Sharpen confidence (higher is better)
+        if confidence > 0.5:
+            # Boost high confidence
+            boost = (confidence - 0.5) * sharpening_factor
+            sharpened_metrics['confidence'] = min(1.0, confidence + boost)
+        else:
+            # Reduce low confidence
+            reduction = (0.5 - confidence) * sharpening_factor
+            sharpened_metrics['confidence'] = max(0.1, confidence - reduction)
+
+        # Sharpen perplexity (lower is better)
+        if perplexity < 5.0:
+            # Decrease low perplexity (good)
+            reduction = perplexity * sharpening_factor * 0.2
+            sharpened_metrics['perplexity'] = max(1.0, perplexity - reduction)
+        else:
+            # Increase high perplexity (bad)
+            boost = (perplexity - 5.0) * sharpening_factor * 0.2
+            sharpened_metrics['perplexity'] = perplexity + boost
+
+        # Sharpen entropy (lower is better)
+        if entropy < 1.0:
+            # Decrease low entropy (good)
+            reduction = entropy * sharpening_factor * 0.3
+            sharpened_metrics['entropy'] = max(0.0, entropy - reduction)
+        else:
+            # Increase high entropy (bad)
+            boost = (entropy - 1.0) * sharpening_factor * 0.3
+            sharpened_metrics['entropy'] = entropy + boost
+
+        return sharpened_metrics
 
     def should_filter(self, metrics: Dict[str, float], query: Optional[str] = None) -> Tuple[bool, str]:
         """

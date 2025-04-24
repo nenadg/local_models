@@ -149,37 +149,43 @@ class WeightedMemoryIntegrator:
         # Get memories with domain-specific count and sharpening
         retrieve_count = settings.get('retrieval_count', 8)
         sharpening_factor = settings.get('sharpening_factor', 0.3)
-        apply_sharpening = self.memory_manager.sharpening_enabled if hasattr(self.memory_manager, 'sharpening_enabled') else True
+        apply_sharpening = self.memory_manager.use_fractal if hasattr(self.memory_manager, 'use_fractal') else True
 
         # Get the store directly
-        store = self.memory_manager._get_user_store(user_id)
+        store = self.memory_manager #._get_user_store(user_id)
 
         if not store or not hasattr(store, 'index') or store.index is None:
             print("Memory store not fully initialized yet, returning empty results")
             return ""
 
         # Generate embedding for the query
-        query_embedding = self.memory_manager.generate_embedding(query)
+        # query_embedding = self.memory_manager.embedding_function(query)
 
         # Search with appropriate parameters
-        if hasattr(store, 'enhanced_fractal_search'):
-            results = store.enhanced_fractal_search(
-                query_embedding,
+        results = store.retrieve(
+                query=query,
                 top_k=retrieve_count*2,
                 min_similarity=0.25,
-                apply_sharpening=apply_sharpening,
-                sharpening_factor=sharpening_factor,
-                multi_level_search=True
-            )
-        else:
-            # Fallback to standard search
-            results = store.search(
-                query_embedding,
-                top_k=retrieve_count*2,
-                min_similarity=0.25,
-                apply_sharpening=apply_sharpening,
-                sharpening_factor=sharpening_factor
-            )
+                use_fracta=true)
+
+        # if hasattr(store, 'enhanced_fractal_search'):
+        #     results = store.enhanced_fractal_search(
+        #         query_embedding,
+        #         top_k=retrieve_count*2,
+        #         min_similarity=0.25,
+        #         apply_sharpening=apply_sharpening,
+        #         sharpening_factor=sharpening_factor,
+        #         multi_level_search=True
+        #     )
+        # else:
+        #     # Fallback to standard search
+        #     results = store.search(
+        #         query_embedding,
+        #         top_k=retrieve_count*2,
+        #         min_similarity=0.25,
+        #         apply_sharpening=apply_sharpening,
+        #         sharpening_factor=sharpening_factor
+        #    )
 
         # Format the results into memory text
         memory_text = self._format_memory_results(results, retrieve_count)
@@ -432,7 +438,7 @@ class WeightedMemoryIntegrator:
 
         # Create a query specifically for this translation
         translation_query = f"translate {word} to {language}"
-        query_embedding = self.memory_manager.generate_embedding(translation_query)
+        query_embedding = self.memory_manager.embedding_function(translation_query)
 
         # Search with a low threshold to find all potential matches
         # results = store.search(

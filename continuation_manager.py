@@ -348,7 +348,7 @@ class ContinuationTrackingWindowManager:
         # Get vector store from memory manager (if available)
         vector_store = None
         if self.memory_manager:
-            store = self.memory_manager._get_user_store(user_id)
+            store = self.memory_manage
             if store and hasattr(store, 'enhanced_fractal_search'):
                 vector_store = store
 
@@ -385,8 +385,8 @@ class ContinuationTrackingWindowManager:
         if vector_store:
             try:
                 # Create embedding for code context
-                if self.tokenizer and hasattr(self.memory_manager, 'generate_embedding'):
-                    code_embedding = self.memory_manager.generate_embedding("\n".join(last_lines))
+                if self.tokenizer and hasattr(self.memory_manager, 'embedding_function'):
+                    code_embedding = self.memory_manager.embedding_function("\n".join(last_lines))
 
                     # Search for similar code patterns
                     results = vector_store.enhanced_fractal_search(

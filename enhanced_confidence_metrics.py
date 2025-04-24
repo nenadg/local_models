@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from typing import List, Dict, Any
+from typing import Dict, List, Tuple, Any, Optional
 from transformers import LogitsProcessor, LogitsProcessorList
 
 class TokenProbabilityCaptureProcessor(LogitsProcessor):
@@ -93,24 +93,49 @@ class EnhancedConfidenceMetrics:
         # print(f"DEBUG - Added token: prob={token_prob:.3f}, entropy={entropy:.3f}")
         # print(f"DEBUG - Original tokens recorded: {len(self.original_token_probabilities)}")
 
-    def _sharpen_token_metrics(self, probability: float, entropy: float) -> tuple:
+
+    def _sharpen_token_metrics(self, probability: float, entropy: float, sharpening_factor: float = 0.3) -> Tuple[float, float]:
         """
-        Apply sharpening to token metrics using the unified SharpeningUtils.
+        Apply sharpening to token probability and entropy.
 
         Args:
             probability: Original token probability
             entropy: Original entropy value
+            sharpening_factor: Strength of sharpening effect (higher = stronger)
 
         Returns:
             Tuple of (sharpened_probability, sharpened_entropy)
         """
-        from sharpening_utils import SharpeningUtils
 
-        return SharpeningUtils.sharpen_token_metrics(
-            probability=probability,
-            entropy=entropy,
-            sharpening_factor=self.sharpening_factor
-        )
+        if self.sharpening_factor:
+            sharpening_factor = self.sharpening_factor
+
+        # Skip if no sharpening requested
+        if sharpening_factor <= 0:
+            return probability, entropy
+
+        # Apply non-linear sharpening to probability
+        # Higher probabilities get boosted, lower ones reduced
+        if probability > 0.5:
+            # For high probabilities, boost them higher (more confidence)
+            boost = (probability - 0.5) * sharpening_factor
+            sharpened_probability = min(1.0, probability + boost)
+        else:
+            # For low probabilities, reduce them further (less confidence)
+            reduction = (0.5 - probability) * sharpening_factor
+            sharpened_probability = max(0.0, probability - reduction)
+
+        # For entropy, lower is better (less uncertainty), so invert the effect
+        if entropy < 1.0:
+            # For low entropy (good), make it even lower
+            reduction = entropy * sharpening_factor * 0.5
+            sharpened_entropy = max(0.0, entropy - reduction)
+        else:
+            # For high entropy (bad), make it higher to emphasize uncertainty
+            boost = (entropy - 1.0) * sharpening_factor * 0.5
+            sharpened_entropy = entropy + boost
+
+        return sharpened_probability, sharpened_entropy
 
     def sharpen_values(self, values: List[float], threshold: float, higher_is_better: bool = True) -> List[float]:
         """

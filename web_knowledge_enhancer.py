@@ -55,9 +55,13 @@ class WebKnowledgeEnhancer:
         self.vector_sharpening_factor = vector_sharpening_factor
         self.max_results = max_results
         self.search_engine = search_engine
-        self.embedding_function = embedding_function
+
+        self.embedding_function = embedding_function or (
+            self.memory_manager.embedding_function if self.memory_manager else None
+        )
+
         self.knowledge_extractor = KnowledgeExtractor(
-            embedding_function=self.memory_manager.generate_embedding if self.memory_manager else None,
+            embedding_function=embedding_function or (self.memory_manager.embedding_function if self.memory_manager else None),
             enable_fractal_validation=True
         )
 
@@ -690,10 +694,10 @@ class WebKnowledgeEnhancer:
         seo_friendly_query = self._strip_preambles_strictly(seo_friendly_query)
 
         # Generate embedding for original query
-        query_vector = self.memory_manager.generate_embedding(query)
+        query_vector = self.memory_manager.embedding_function(query)
 
         # Generate embedding for seo_friendly_query
-        keyword_vector = self.memory_manager.generate_embedding(seo_friendly_query)
+        keyword_vector = self.memory_manager.embedding_function(seo_friendly_query)
 
         # Make sure entities are included in the search
         if entities and not any(entity.lower() in seo_friendly_query.lower() for entity in entities):
@@ -741,7 +745,7 @@ class WebKnowledgeEnhancer:
             text_to_embed = f"{result['title']} {result['snippet']}"
 
             # Generate embedding
-            embedding = self.memory_manager.generate_embedding(text_to_embed)
+            embedding = self.memory_manager.embedding_function(text_to_embed)
 
             # Add to result vectors
             result_vectors.append((embedding, result))
@@ -915,21 +919,21 @@ class WebKnowledgeEnhancer:
                 
             # Add to memory with web metadata
             try:
-                memories_added = self.memory_manager.add_memory(
-                    user_id,
-                    query,
-                    memory_text,
+                item_id = self.memory_manager.add(
+                    content=memory_text,
                     memory_type="web_knowledge",
-                    attributes={
-                        'source': result.get('source', 'web'),
+                    source="web_search",
+                    metadata={
+                        'source_query': result.get('source', 'web'),
                         'url': result.get('url', ''),
                         'similarity': result.get('similarity', 0.0),
                         'web_timestamp': time.time()
                     },
-                    pre_sharpen=self.memory_manager.sharpening_enabled
-                )
-                
-                added_count += memories_added
+                    use_fractal=self.memory_manager.use_fractal)
+
+                if item_id:
+                    added_count += 1
+
             except Exception as e:
                 print(f"[Web] Error adding web result to memory: {e}")
         
@@ -1250,7 +1254,7 @@ class WebKnowledgeEnhancer:
             print(f"[Web] Attempting fractal memory retrieval for user: {current_user_id}")
 
             # Create fractal-enabled store if not already using one
-            store = self.memory_manager._get_user_store(current_user_id)
+            store = self.memory_manager #._get_user_store(current_user_id)
 
             # Defensive check: ensure store and index are initialized
             if not store or not hasattr(store, 'index') or store.index is None:
@@ -1268,7 +1272,7 @@ class WebKnowledgeEnhancer:
                 return None
 
             # Generate embedding for query
-            query_embedding = self.memory_manager.generate_embedding(query)
+            query_embedding = self.memory_manager.embedding_function(query)
 
             # Log diagnostics
             print(f"[Web] Fractal search enabled: {getattr(store, 'fractal_enabled', False)}")
