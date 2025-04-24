@@ -334,37 +334,76 @@ class UnifiedMemoryManager:
                 # Restore original auto_save setting
                 self.auto_save = original_auto_save
 
-    def _add_item_to_store(self, item: MemoryItem) -> str:
-        """Add a memory item to storage and indices."""
+    def _add_item_to_store(self, item: MemoryItem) -> Optional[str]:
+        """
+        Add a memory item to storage and indices with improved error handling.
+
+        Args:
+            item: Memory item to add
+
+        Returns:
+            ID of added item or None if failed
+        """
         # If this is the first item, initialize index
         if self.index is None:
-            self._create_index(item.embedding.shape[0])
-        
+            try:
+                self._create_index(item.embedding.shape[0])
+                print(f"Created new index with dimension {item.embedding.shape[0]}")
+            except Exception as e:
+                print(f"Error creating index: {e}")
+                return None
+
         # Normalize embedding for cosine similarity
-        normalized_embedding = item.embedding / max(np.linalg.norm(item.embedding), 1e-10)
-        
+        try:
+            embedding_norm = np.linalg.norm(item.embedding)
+            if embedding_norm < 1e-10:
+                print(f"Warning: Item {item.id} has near-zero norm embedding")
+                embedding_norm = 1e-10
+
+            normalized_embedding = item.embedding / embedding_norm
+        except Exception as e:
+            print(f"Error normalizing embedding: {e}")
+            return None
+
         try:
             # Add to FAISS index
             self.index.add(np.array([normalized_embedding], dtype=np.float32))
-            
+
             # Add to storage
             index = len(self.items)
             self.items.append(item)
             self.embeddings.append(normalized_embedding)
             self.id_to_index[item.id] = index
-            
+
             # Add fractal embeddings to respective indices
             if item.fractal_embeddings:
+                fractal_added = 0
+                fractal_failed = 0
+
                 for level, level_embedding in item.fractal_embeddings.items():
-                    # Normalize level embedding
-                    normalized_level_embedding = level_embedding / max(np.linalg.norm(level_embedding), 1e-10)
-                    
-                    # Ensure index exists for this level
-                    if level not in self.fractal_indices:
-                        self.fractal_indices[level] = faiss.IndexFlatIP(self.embedding_dim)
-                    
-                    # Add to level-specific index
-                    self.fractal_indices[level].add(np.array([normalized_level_embedding], dtype=np.float32))
+                    try:
+                        # Normalize level embedding
+                        level_norm = np.linalg.norm(level_embedding)
+                        if level_norm < 1e-10:
+                            level_norm = 1e-10
+                        normalized_level_embedding = level_embedding / level_norm
+
+                        # Ensure index exists for this level
+                        if level not in self.fractal_indices:
+                            self.fractal_indices[level] = faiss.IndexFlatIP(self.embedding_dim)
+                            print(f"Created new index for level {level}")
+
+                        # Add to level-specific index
+                        self.fractal_indices[level].add(np.array([normalized_level_embedding], dtype=np.float32))
+                        fractal_added += 1
+                    except Exception as e:
+                        print(f"Error adding fractal embedding for level {level}: {e}")
+                        fractal_failed += 1
+
+                if fractal_added > 0:
+                    print(f"Added {fractal_added} fractal embeddings to indices")
+                if fractal_failed > 0:
+                    print(f"Failed to add {fractal_failed} fractal embeddings")
             
             # Auto-save if enabled
             if self.auto_save:
@@ -383,102 +422,232 @@ class UnifiedMemoryManager:
         self.index = faiss.IndexFlatIP(self.embedding_dim)  # Inner product (cosine on normalized vectors)
     
     def _add_fractal_embeddings(self, item: MemoryItem):
-        """Generate and add fractal embeddings to a memory item."""
+        """
+        Generate and add fractal embeddings to a memory item with improved diagnostics.
+
+        Args:
+            item: The memory item to process
+        """
+        # Skip if fractal embeddings are disabled
+        if not self.use_fractal:
+            return
+
+        # Skip if no base embedding available
+        if item.embedding is None or len(item.embedding) == 0:
+            print(f"Warning: Cannot generate fractal embeddings for item {item.id} - no base embedding")
+            return
+
         base_embedding = item.embedding
-        
+
+        # Reset fractal embeddings to ensure clean state
+        item.fractal_embeddings = {}
+
         # Generate a fractal embedding for each level
         for level in range(1, self.max_fractal_levels + 1):
-            level_embedding = self._generate_level_embedding(base_embedding, level)
-            item.add_fractal_embedding(level, level_embedding)
+            try:
+                level_embedding = self._generate_level_embedding(base_embedding, level)
+
+                if level_embedding is not None and len(level_embedding) > 0:
+                    # Verify the embedding is valid
+                    embedding_norm = np.linalg.norm(level_embedding)
+                    if embedding_norm < 1e-10:
+                        print(f"Warning: Generated zero-norm embedding for level {level}")
+                        continue
+
+                    # Save the embedding
+                    item.add_fractal_embedding(level, level_embedding)
+                else:
+                    print(f"Warning: Failed to generate embedding for level {level}")
+            except Exception as e:
+                print(f"Error generating fractal embedding for level {level}: {e}")
+                # Continue with other levels
     
     # In UnifiedMemoryManager._generate_level_embedding
     def _generate_level_embedding(self, base_embedding: np.ndarray, level: int) -> np.ndarray:
         """
-        Generate a level-specific embedding with controlled semantic variation.
-        Simplified for better performance.
+        Generate a level-specific embedding with improved fractal transformations.
+
+        Args:
+            base_embedding: The original embedding vector
+            level: The fractal level to generate
+
+        Returns:
+            Transformed embedding for the specified level
         """
         if level == 0:
             return base_embedding
 
-        # Use a simpler transformation for better performance
-        # Just apply a rotation based on pre-generated matrices
+        # Use cached rotation matrices if available
         if not hasattr(self, '_rotation_matrices'):
             # Create rotation matrices once and cache them
             self._rotation_matrices = {}
             for i in range(1, self.max_fractal_levels + 1):
                 # Create a rotation matrix with fixed seed for determinism
                 np.random.seed(42 + i)  # Fixed seed per level
-                rotation = np.random.normal(0, 0.05 * i, (self.embedding_dim, self.embedding_dim))
+                rotation = np.random.normal(0, 0.1 * i, (self.embedding_dim, self.embedding_dim))
                 # Ensure the matrix is orthogonal (proper rotation)
                 u, _, vh = np.linalg.svd(rotation, full_matrices=False)
                 self._rotation_matrices[i] = u @ vh
 
-        # Apply cached rotation
-        rotated = np.dot(base_embedding, self._rotation_matrices[level])
+                # Log creation of matrix
+                print(f"Created fractal rotation matrix for level {i}")
 
-        # Normalize
-        return rotated / np.linalg.norm(rotated)
+        # Apply the transformation with more pronounced level-dependent changes
+        if level in self._rotation_matrices:
+            # Apply the cached rotation
+            rotated = np.dot(base_embedding, self._rotation_matrices[level])
+
+            # Add a small level-dependent shift
+            np.random.seed(137 + level)  # Different seed for shift
+            shift = np.random.normal(0, 0.02 * level, rotated.shape)
+            shifted = rotated + shift
+
+            # Normalize the result
+            normalized = shifted / np.linalg.norm(shifted)
+
+            return normalized
+        else:
+            # Fallback if matrix isn't available
+            print(f"Warning: No rotation matrix for level {level}, using simpler transformation")
+            # Apply simpler transformation
+            perturbed = base_embedding + (np.random.normal(0, 0.01 * level, base_embedding.shape) * base_embedding)
+            return perturbed / np.linalg.norm(perturbed)
     
     def retrieve(self, 
-                query: str, 
+                query: str,
                 memory_types: Optional[List[str]] = None,
-                top_k: int = 5, 
+                top_k: int = 5,
                 min_similarity: float = 0.25,
                 use_fractal: Optional[bool] = None) -> List[Dict[str, Any]]:
         """
-        Retrieve relevant memories based on query.
-        
+        Retrieve relevant memories based on query with improved diagnostics and error handling.
+
         Args:
             query: Search query
             memory_types: Optional filter by memory types
             top_k: Maximum number of results to return
             min_similarity: Minimum similarity threshold
             use_fractal: Override default fractal setting
-            
+
         Returns:
             List of search results with similarity scores
         """
         with self._lock:
             # If no items or no index, return empty list
-            if not self.items or self.index is None or self.index.ntotal == 0:
+            if not self.items or self.index is None:
+                print("Cannot search: No items or index not initialized")
                 return []
-            
+
+            if self.index.ntotal == 0:
+                print("Cannot search: Index is empty")
+                return []
+
             # Generate query embedding
+            start_time = time.time()
             if self.embedding_function:
                 try:
                     query_embedding = self.embedding_function(query)
+                    embedding_time = time.time() - start_time
+                    print(f"Generated query embedding in {embedding_time:.3f}s")
                 except Exception as e:
                     print(f"Error generating query embedding: {e}")
                     return []
             else:
                 # Random embedding for testing
                 query_embedding = np.random.random(self.embedding_dim).astype(np.float32)
-            
+                print("Warning: Using random embedding (no embedding function available)")
+
             # Normalize query embedding
-            normalized_query = query_embedding / max(np.linalg.norm(query_embedding), 1e-10)
-            normalized_query = np.array([normalized_query], dtype=np.float32)
-            
+            try:
+                query_norm = np.linalg.norm(query_embedding)
+                if query_norm < 1e-10:
+                    print("Warning: Query embedding has near-zero norm")
+                    query_norm = 1e-10
+
+                normalized_query = query_embedding / query_norm
+                normalized_query = np.array([normalized_query], dtype=np.float32)
+            except Exception as e:
+                print(f"Error normalizing query embedding: {e}")
+                return []
+
             # Determine whether to use fractal search
             use_fractal_here = self.use_fractal if use_fractal is None else use_fractal
-            
+
+            # Check if fractal indices exist if we want to use fractal search
+            have_fractal_indices = bool(self.fractal_indices) and any(idx.ntotal > 0 for idx in self.fractal_indices.values())
+            can_use_fractal = use_fractal_here and have_fractal_indices
+
+            print(f"Search config: use_fractal={use_fractal_here}, have_indices={have_fractal_indices}, can_use={can_use_fractal}")
+
             # Use fractal search if enabled and indices are available
-            if use_fractal_here and self.fractal_indices:
-                results = self._fractal_search(
-                    normalized_query, 
-                    top_k=top_k, 
-                    min_similarity=min_similarity
-                )
+            search_start = time.time()
+            if can_use_fractal:
+                try:
+                    results = self._fractal_search(
+                        normalized_query,
+                        top_k=top_k,
+                        min_similarity=min_similarity
+                    )
+                    search_time = time.time() - search_start
+                    print(f"Fractal search completed in {search_time:.3f}s, found {len(results)} results")
+                except Exception as e:
+                    print(f"Error in fractal search: {e}")
+                    # Fall back to standard search
+                    print("Falling back to standard search")
+                    try:
+                        results = self._standard_search(
+                            normalized_query,
+                            top_k=top_k,
+                            min_similarity=min_similarity
+                        )
+                    except Exception as inner_e:
+                        print(f"Standard search also failed: {inner_e}")
+                        return []
             else:
                 # Standard search
-                results = self._standard_search(
-                    normalized_query, 
-                    top_k=top_k, 
-                    min_similarity=min_similarity
-                )
-            
+                try:
+                    print("Using standard search")
+                    results = self._standard_search(
+                        normalized_query,
+                        top_k=top_k,
+                        min_similarity=min_similarity
+                    )
+                    search_time = time.time() - search_start
+                    print(f"Standard search completed in {search_time:.3f}s, found {len(results)} results")
+                except Exception as e:
+                    print(f"Error in standard search: {e}")
+                    return []
+
             # Filter by memory types if specified
             if memory_types:
-                results = [r for r in results if r.get("memory_type") in memory_types]
+                try:
+                    # Process memory types to handle prefix matching (e.g., "command_*")
+                    matched_results = []
+
+                    for result in results:
+                        memory_type = result.get("memory_type", "")
+
+                        # Check for direct match
+                        direct_match = memory_type in memory_types
+
+                        # Check for prefix match
+                        prefix_match = False
+                        for allowed_type in memory_types:
+                            if allowed_type.endswith('*') and memory_type.startswith(allowed_type[:-1]):
+                                prefix_match = True
+                                break
+
+                        if direct_match or prefix_match:
+                            matched_results.append(result)
+
+                    filtered_count = len(results) - len(matched_results)
+                    if filtered_count > 0:
+                        print(f"Filtered {filtered_count} results by memory type")
+
+                    results = matched_results
+                except Exception as e:
+                    print(f"Error filtering by memory type: {e}")
+                    # Continue with unfiltered results
             
             # Return only requested number
             return results[:top_k]
@@ -519,103 +688,149 @@ class UnifiedMemoryManager:
         return results
     
     def _fractal_search(self, 
-                      normalized_query: np.ndarray, 
-                      top_k: int, 
+                      normalized_query: np.ndarray,
+                      top_k: int,
                       min_similarity: float) -> List[Dict[str, Any]]:
         """
-        Perform enhanced fractal search across multiple levels
-        to find semantically related content.
+        Perform enhanced fractal search across multiple levels with improved error handling.
+
+        Args:
+            normalized_query: Normalized query embedding vector
+            top_k: Maximum number of results to return
+            min_similarity: Minimum similarity threshold
+
+        Returns:
+            List of search results with similarity scores
         """
         # Level weights (decreasing importance for higher levels)
-        level_weights = [1.0, 0.7, 0.5, 0.3]
-        
+        level_weights = [1.0, 0.8, 0.6, 0.4, 0.2]
+
         # Ensure list is long enough
         while len(level_weights) <= self.max_fractal_levels:
             level_weights.append(level_weights[-1] * 0.5)
-        
+
+        # Debug information
+        print(f"Starting fractal search with {self.index.ntotal} items in base index")
+
         # Start with base index search
         search_k = min(top_k * 2, self.index.ntotal)
-        base_similarities, base_indices = self.index.search(normalized_query, search_k)
-        
-        # Track results to avoid duplicates
-        result_dict = {}
-        
-        # Process base results
-        for i, idx in enumerate(base_indices[0]):
-            if idx != -1 and base_similarities[0][i] > min_similarity:
-                if idx in self.deleted_ids:
+
+        # Add error handling for empty index
+        if search_k <= 0:
+            print("Warning: No items in index, cannot perform search")
+            return []
+
+        try:
+            base_similarities, base_indices = self.index.search(normalized_query, search_k)
+
+            # Debug information
+            print(f"Base search returned {len(base_indices[0])} results")
+
+            # Track results to avoid duplicates
+            result_dict = {}
+
+            # Process base results
+            for i, idx in enumerate(base_indices[0]):
+                if idx != -1 and base_similarities[0][i] > min_similarity:
+                    if idx in self.deleted_ids:
+                        continue
+
+                    item = self.items[idx]
+                    similarity = float(base_similarities[0][i]) * level_weights[0]
+
+                    result_dict[item.id] = {
+                        "id": item.id,
+                        "content": item.content,
+                        "memory_type": item.memory_type,
+                        "similarity": similarity,
+                        "base_similarity": float(base_similarities[0][i]),
+                        "metadata": item.metadata,
+                        "index": idx,
+                        "level": 0,
+                        "level_weight": level_weights[0]
+                    }
+
+            # Debug information
+            print(f"Found {len(result_dict)} results in base level")
+
+            # Search fractal indices if available
+            for level in range(1, self.max_fractal_levels + 1):
+                if level not in self.fractal_indices:
+                    print(f"Skipping level {level} - no index available")
                     continue
-                
-                item = self.items[idx]
-                similarity = float(base_similarities[0][i]) * level_weights[0]
-                
-                result_dict[item.id] = {
-                    "id": item.id,
-                    "content": item.content,
-                    "memory_type": item.memory_type,
-                    "similarity": similarity,
-                    "base_similarity": float(base_similarities[0][i]),
-                    "metadata": item.metadata,
-                    "index": idx,
-                    "level": 0,
-                    "level_weight": level_weights[0]
-                }
-        
-        # Search fractal indices
-        for level in range(1, self.max_fractal_levels + 1):
-            if level not in self.fractal_indices:
-                continue
-            
-            # Create level-specific query variation
-            level_query = self._generate_level_embedding(normalized_query[0], level)
-            level_query = np.array([level_query], dtype=np.float32)
 
-            try:
-                # Search with level-specific query
-                similarities, indices = self.fractal_indices[level].search(
-                    level_query,
-                    search_k
-                )
+                # Skip empty indices
+                if self.fractal_indices[level].ntotal == 0:
+                    print(f"Level {level} index is empty, skipping")
+                    continue
 
-                # Get level weight
-                weight = level_weights[min(level, len(level_weights)-1)]
+                print(f"Searching level {level} index with {self.fractal_indices[level].ntotal} items")
 
-                # Process results
-                for i, idx in enumerate(indices[0]):
-                    if idx != -1 and similarities[0][i] > min_similarity:
-                        if idx in self.deleted_ids:
-                            continue
+                # Create level-specific query variation
+                level_query = self._generate_level_embedding(normalized_query[0], level)
+                level_query = np.array([level_query], dtype=np.float32)
 
-                        # Calculate weighted similarity
-                        item = self.items[idx]
-                        raw_similarity = float(similarities[0][i])
-                        weighted_similarity = raw_similarity * weight
+                try:
+                    # Search with level-specific query
+                    similarities, indices = self.fractal_indices[level].search(
+                        level_query,
+                        search_k
+                    )
 
-                        # Only consider if similarity passes threshold
-                        if weighted_similarity < min_similarity:
-                            continue
+                    print(f"Level {level} search returned {len(indices[0])} results")
 
-                        # Update if this is better than existing or add if new
-                        if item.id not in result_dict or weighted_similarity > result_dict[item.id]["similarity"]:
-                            result_dict[item.id] = {
-                                "id": item.id,
-                                "content": item.content,
-                                "memory_type": item.memory_type,
-                                "similarity": weighted_similarity,
-                                "base_similarity": raw_similarity,
-                                "metadata": item.metadata,
-                                "index": idx,
-                                "level": level,
-                                "level_weight": weight
-                            }
-            except Exception as e:
-                print(f"Error searching fractal level {level}: {e}")
+                    # Get level weight
+                    weight = level_weights[min(level, len(level_weights)-1)]
+
+                    # Process results
+                    for i, idx in enumerate(indices[0]):
+                        if idx != -1 and similarities[0][i] > min_similarity:
+                            if idx in self.deleted_ids:
+                                continue
+
+                            # Calculate weighted similarity
+                            item = self.items[idx]
+                            raw_similarity = float(similarities[0][i])
+                            weighted_similarity = raw_similarity * weight
+
+                            # Only consider if similarity passes threshold
+                            if weighted_similarity < min_similarity:
+                                continue
+
+                            # Update if this is better than existing or add if new
+                            if item.id not in result_dict or weighted_similarity > result_dict[item.id]["similarity"]:
+                                result_dict[item.id] = {
+                                    "id": item.id,
+                                    "content": item.content,
+                                    "memory_type": item.memory_type,
+                                    "similarity": weighted_similarity,
+                                    "base_similarity": raw_similarity,
+                                    "metadata": item.metadata,
+                                    "index": idx,
+                                    "level": level,
+                                    "level_weight": weight
+                                }
+                except Exception as e:
+                    print(f"Error searching fractal level {level}: {e}")
+                    # Continue with other levels rather than failing completely
+        except Exception as e:
+            print(f"Error in base search: {e}")
+            return []
 
         # Apply cross-level verification (boost confidence if found in multiple levels)
-        self._apply_cross_level_verification(result_dict)
+        try:
+            self._apply_cross_level_verification(result_dict)
+        except Exception as e:
+            print(f"Error applying cross-level verification: {e}")
+            # Continue even if verification fails
 
         # Extract values and sort
         results = list(result_dict.values())
+
+        # Debug the results
+        print(f"Total results after fractal search: {len(results)}")
+
+        # Sort by similarity
         results.sort(key=lambda x: x["similarity"], reverse=True)
 
         return results
@@ -1066,3 +1281,220 @@ class UnifiedMemoryManager:
 
             # Run garbage collection
             gc.collect()
+
+    def print_fractal_embedding_diagnostics(self):
+        """
+        Print detailed diagnostics about the fractal embedding system.
+        Add this method to UnifiedMemoryManager.
+        """
+        print("\n======= FRACTAL EMBEDDING DIAGNOSTICS =======")
+
+        # Basic configuration
+        print(f"Fractal enabled: {self.use_fractal}")
+        print(f"Max fractal levels: {self.max_fractal_levels}")
+        print(f"Embedding dimension: {self.embedding_dim}")
+
+        # Item and index counts
+        print(f"\nBase index stats:")
+        print(f"  Total items: {len(self.items)}")
+        print(f"  Items in index: {self.index.ntotal if self.index else 0}")
+        print(f"  Deleted items: {len(self.deleted_ids)}")
+
+        # Fractal indices stats
+        print("\nFractal indices stats:")
+
+        if not self.fractal_indices:
+            print("  No fractal indices initialized")
+        else:
+            for level, index in self.fractal_indices.items():
+                print(f"  Level {level}: {index.ntotal} items")
+
+        # Fractal embeddings per item
+        items_with_fractal = 0
+        level_counts = {}
+
+        for item in self.items:
+            if item.fractal_embeddings:
+                items_with_fractal += 1
+
+                for level in item.fractal_embeddings.keys():
+                    level_counts[level] = level_counts.get(level, 0) + 1
+
+        print(f"\nItems with fractal embeddings: {items_with_fractal}/{len(self.items)}")
+
+        if level_counts:
+            print("Level distribution:")
+            for level, count in sorted(level_counts.items()):
+                print(f"  Level {level}: {count} embeddings")
+
+        # Check for inconsistencies
+        inconsistencies = 0
+
+        if self.index and self.index.ntotal != len(self.items) - len(self.deleted_ids):
+            print(f"\nWARNING: Index size ({self.index.ntotal}) doesn't match active items ({len(self.items) - len(self.deleted_ids)})")
+            inconsistencies += 1
+
+        for level, index in self.fractal_indices.items():
+            expected_count = level_counts.get(level, 0)
+            actual_count = index.ntotal
+
+            if expected_count != actual_count:
+                print(f"WARNING: Level {level} index size ({actual_count}) doesn't match item count ({expected_count})")
+                inconsistencies += 1
+
+        if items_with_fractal == 0 and self.use_fractal:
+            print("\nWARNING: Fractal embeddings are enabled but no items have fractal embeddings")
+            print("This suggests the _add_fractal_embeddings method might not be working correctly")
+            inconsistencies += 1
+
+        # Summary
+        print("\nDiagnostic Summary:")
+        if inconsistencies > 0:
+            print(f"Found {inconsistencies} potential issues that need attention")
+            print("Please check the implementation of _add_fractal_embeddings and _generate_level_embedding")
+        else:
+            print("No inconsistencies detected in the fractal embedding system")
+
+        print("===============================================\n")
+
+    def rebuild_fractal_indices(self):
+        """
+        Rebuild all fractal indices to fix inconsistencies.
+        Add this method to UnifiedMemoryManager.
+        """
+        print("Rebuilding fractal indices...")
+
+        # Clear existing fractal indices
+        self.fractal_indices = {}
+
+        # Skip if fractal embeddings are disabled
+        if not self.use_fractal:
+            print("Fractal embeddings are disabled, skipping rebuild")
+            return
+
+        # Count items with fractal embeddings
+        items_with_fractal = sum(1 for item in self.items if item.fractal_embeddings)
+
+        if items_with_fractal == 0:
+            print("No items have fractal embeddings, regenerating...")
+
+            # Regenerate fractal embeddings for all items
+            for item in self.items:
+                if hasattr(self, '_add_fractal_embeddings'):
+                    self._add_fractal_embeddings(item)
+
+            # Recount
+            items_with_fractal = sum(1 for item in self.items if item.fractal_embeddings)
+
+            if items_with_fractal == 0:
+                print("Failed to generate fractal embeddings")
+                return
+
+        print(f"Building indices for {items_with_fractal} items with fractal embeddings")
+
+        # Create indices for each level
+        all_levels = set()
+        for item in self.items:
+            all_levels.update(item.fractal_embeddings.keys())
+
+        for level in all_levels:
+            # Create index
+            self.fractal_indices[level] = faiss.IndexFlatIP(self.embedding_dim)
+
+            # Add embeddings
+            embeddings_for_level = []
+
+            for item in self.items:
+                if level in item.fractal_embeddings:
+                    level_embedding = item.fractal_embeddings[level]
+                    norm = np.linalg.norm(level_embedding)
+                    if norm < 1e-10:
+                        norm = 1e-10
+                    normalized = level_embedding / norm
+                    embeddings_for_level.append(normalized)
+
+            if embeddings_for_level:
+                self.fractal_indices[level].add(np.array(embeddings_for_level, dtype=np.float32))
+                print(f"Added {len(embeddings_for_level)} embeddings to level {level} index")
+
+        print("Fractal indices rebuilt successfully")
+
+        # Run diagnostics
+        if hasattr(self, 'print_fractal_embedding_diagnostics'):
+            self.print_fractal_embedding_diagnostics()
+
+    def verify_fractal_search(self, test_query: str = None):
+        """
+        Test fractal search with a sample query to verify it's working.
+        Add this method to UnifiedMemoryManager.
+        """
+        print("\n======= FRACTAL SEARCH VERIFICATION =======")
+
+        if test_query is None:
+            test_query = "This is a test query to verify fractal search"
+
+        print(f"Testing fractal search with query: '{test_query}'")
+
+        # Try with both fractal and standard search for comparison
+        try:
+            # First with fractal search
+            print("\nRunning fractal search...")
+            fractal_results = self.retrieve(
+                query=test_query,
+                top_k=5,
+                min_similarity=0.1,  # Very low threshold to get some results
+                use_fractal=True
+            )
+
+            print(f"Fractal search returned {len(fractal_results)} results")
+
+            # Then with standard search
+            print("\nRunning standard search...")
+            standard_results = self.retrieve(
+                query=test_query,
+                top_k=5,
+                min_similarity=0.1,  # Same threshold
+                use_fractal=False
+            )
+
+            print(f"Standard search returned {len(standard_results)} results")
+
+            # Compare results
+            if not fractal_results and not standard_results:
+                print("\nBoth searches returned no results. This suggests either:")
+                print("- The memory store is empty")
+                print("- The query is too dissimilar from all stored items")
+                print("- There might be an issue with the embedding function")
+            elif not fractal_results and standard_results:
+                print("\nWARNING: Standard search returned results but fractal search didn't")
+                print("This suggests there might be an issue with the fractal search implementation")
+                print("Check the _fractal_search method and fractal indices")
+            elif fractal_results and not standard_results:
+                print("\nInteresting: Fractal search returned results but standard search didn't")
+                print("This suggests fractal search is finding connections the standard search missed")
+            else:
+                print(f"\nBoth searches returned results: {len(fractal_results)} fractal vs {len(standard_results)} standard")
+
+                # Check for overlap
+                fractal_ids = {r['id'] for r in fractal_results}
+                standard_ids = {r['id'] for r in standard_results}
+
+                common_ids = fractal_ids.intersection(standard_ids)
+                print(f"Items found by both searches: {len(common_ids)}")
+                print(f"Items unique to fractal search: {len(fractal_ids - standard_ids)}")
+                print(f"Items unique to standard search: {len(standard_ids - fractal_ids)}")
+
+            # Show detailed results
+            if fractal_results:
+                print("\nTop fractal search results:")
+                for i, result in enumerate(fractal_results[:3]):  # Show top 3
+                    print(f"  {i+1}. [{result['memory_type']}] Similarity: {result['similarity']:.3f}, Level: {result.get('level', 0)}")
+                    print(f"     Content: {result['content'][:50]}...")
+
+        except Exception as e:
+            print(f"Error during verification: {e}")
+            import traceback
+            traceback.print_exc()
+
+        print("==========================================\n")
+

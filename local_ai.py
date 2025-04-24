@@ -927,7 +927,8 @@ class TinyLlamaChat:
         # We only support streaming now, simplifies the code
 
         fallback_message_streamed = False
-
+        fd = None
+        
         try:
             # heatmap = TerminalHeatmap(self.tokenizer, use_background=False)
             heatmap = EnhancedHeatmap(self.tokenizer, use_background=False, window_size=3)
@@ -2334,6 +2335,9 @@ def main():
 
     # for debugging embed performance
     # return chat.test_embedding_performance()
+
+    # for testing fractal embedding
+    #return chat.memory_manager.print_fractal_embedding_diagnostics()
 
     try:
         # If web knowledge is enabled, configure the search engine

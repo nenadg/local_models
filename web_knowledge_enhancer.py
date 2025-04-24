@@ -1232,7 +1232,7 @@ class WebKnowledgeEnhancer:
 
     def _extract_from_fractal_memory(self, query: str) -> Optional[str]:
         """
-        Enhanced function to extract from fractal memory with retry mechanisms.
+        Extract search terms from fractal memory - fixed for UnifiedMemoryManager compatibility.
 
         Args:
             query: The current query
@@ -1267,6 +1267,9 @@ class WebKnowledgeEnhancer:
                 print(f"{self.get_time()} [Web] Store has no items to search")
                 return None
 
+            # Define min_similarity for search
+            min_similarity = 0.45  # Lower threshold to find more potential matches
+
             # Include conversation history in search
             if hasattr(self.chat, 'conversation_history') and self.chat.conversation_history:
                 # Get the last few user messages for context
@@ -1284,6 +1287,7 @@ class WebKnowledgeEnhancer:
                     # Try search with enhanced query
                     search_results = store.retrieve(
                         query=combined_query,
+                        memory_types=["web_knowledge", "knowledge"],
                         top_k=8,  # Get more results
                         min_similarity=min_similarity,
                         use_fractal=True
@@ -1292,12 +1296,33 @@ class WebKnowledgeEnhancer:
                     # If we get results with the enhanced query, use them
                     if search_results:
                         print(f"{self.get_time()} [Web] Enhanced search found {len(search_results)} results")
-                        # Process results as before
-                        # ...
-                        return processed_result
+                        # Process results right here instead of using undefined processed_result
+                        for result in search_results:
+                            metadata = result.get('metadata', {})
 
-            # Generate embedding for query
-            # query_embedding = self.memory_manager.embedding_function(query)
+                            # Check for search terms in metadata
+                            if 'search_term' in metadata:
+                                print(f"{self.get_time()} [Web] Found search term in memory: {metadata['search_term']}")
+                                return metadata['search_term']
+
+                            # Check for web knowledge memories
+                            if metadata.get('memory_type') == 'web_knowledge':
+                                content = result.get('content', '')
+                                # Extract potential search terms
+                                first_sentence = content.split('.')[0].strip()
+                                if len(first_sentence.split()) <= 10:
+                                    print(f"{self.get_time()} [Web] Extracted search term from web memory: {first_sentence}")
+                                    return first_sentence
+
+                            # Look for source queries that might be similar
+                            if 'source_query' in metadata:
+                                source_query = metadata['source_query']
+                                # Only use if reasonably short
+                                if len(source_query.split()) <= 15:
+                                    # Extract key terms from the source query instead of using it directly
+                                    extracted_terms = self._extract_key_terms(source_query, 7)
+                                    print(f"{self.get_time()} [Web] Using terms from similar query: {extracted_terms}")
+                                    return extracted_terms
 
             # Log diagnostics
             print(f"{self.get_time()} [Web] Fractal search enabled: {getattr(store, 'use_fractal', False)}")
@@ -1309,9 +1334,9 @@ class WebKnowledgeEnhancer:
 
                 search_results = self.memory_manager.retrieve(
                     query=query,
-                    memory_types=["web", "knowledge"],
+                    memory_types=["web_knowledge", "knowledge"],
                     top_k=5,  # Get more than needed for better filtering
-                    min_similarity=0.45, # Lower threshold to find more potential matches (starting was 0.6)
+                    min_similarity=min_similarity,
                     use_fractal=self.memory_manager.use_fractal
                 )
 
@@ -1334,7 +1359,7 @@ class WebKnowledgeEnhancer:
 
                 # Check for web knowledge memories
                 if metadata.get('memory_type') == 'web_knowledge':
-                    content = result.get('content', '')  # Changed from 'text' to 'content'
+                    content = result.get('content', '')
                     # Extract potential search terms
                     first_sentence = content.split('.')[0].strip()
                     if len(first_sentence.split()) <= 10:
