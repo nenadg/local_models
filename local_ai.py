@@ -131,12 +131,11 @@ class TinyLlamaChat:
         self.enable_web_knowledge = enable_web_knowledge
         if enable_web_knowledge:
             self.web_enhancer = WebKnowledgeEnhancer(
-                memory_manager=self.memory_manager,
-                chat=self,
-                confidence_threshold=confidence_threshold,
-                vector_sharpening_factor=sharpening_factor,
-                search_engine="duckduckgo",  # Use DuckDuckGo by default for fewer rate limits
-                embedding_function=self.memory_manager.embedding_function  # Direct reference to the function
+                memory_manager=self.memory_manager,  # Pass your UnifiedMemoryManager instance
+                chat=self,                       # Optional reference to chat system
+                confidence_threshold=0.65,       # When to trigger web search
+                sharpening_factor=0.3,           # For vector similarity sharpening
+                search_engine="duckduckgo"       # Or "google"
             )
             print(f"{self.get_time()} Web knowledge enhancement initialized")
         else:
@@ -571,8 +570,7 @@ class TinyLlamaChat:
             query,
             confidence_data,
             domain,
-            process_urls=False,  # Set to True to fetch full content (slower but more thorough)
-            messages=messages
+            process_urls=True
         )
 
         # Add to memory if enhancement was successful
@@ -580,8 +578,7 @@ class TinyLlamaChat:
             self.web_enhancer.add_web_results_to_memory(
                 self.current_user_id,
                 query,
-                enhancement_data,
-                min_similarity=0.5  # Minimum similarity threshold for memory storage
+                enhancement_data
             )
 
         return enhancement_data
@@ -1081,7 +1078,7 @@ class TinyLlamaChat:
                         c = sys.stdin.read(1)
                         if c == '\x03':  # Ctrl+C
                             self.stop_event.set()
-
+                            print("\n{self.get_time()} Canceled by user")
                             if torch.cuda.is_available():
                                 torch.cuda.empty_cache()
                             break
@@ -1329,7 +1326,7 @@ class TinyLlamaChat:
             return "Error in streaming setup. Please try again."
 
         finally:
-            print(f"\n{self.get_time()} -.-", end='', flush=True)
+            print(f"\n{self.get_time()} ¯\\_(ツ)_/¯", end='', flush=True)
             if show_confidence and not self.stop_event.is_set() and not fallback_message_streamed:
                 # Print the legend after the response is complete
                 print()  # Add a newline
@@ -2708,7 +2705,7 @@ def main():
                 )
 
                 # Add a newline after streaming output is complete
-                print("...")
+                # print("...")
 
                 # Report generation time and calculate tokens per second
                 end_time = time.time()
@@ -2811,6 +2808,8 @@ def main():
 
     except KeyboardInterrupt:
         print(f"\n{chat.get_time()} Exiting due to keyboard interrupt...")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     except Exception as e:
         print(f"\n{chat.get_time()} Unexpected error: {e}")
     finally:

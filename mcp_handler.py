@@ -318,7 +318,7 @@ Output files are saved to: {os.path.abspath(self.output_dir)}
             # Execute shell command immediately if enabled
             if self.allow_shell_commands:
                 try:
-                    print(f"[Executing command: {match}]")
+                    # print(f"[Executing command: {match}]")
                     result = subprocess.run(match, shell=True, capture_output=True, text=True)
                     output = result.stdout
                     error = result.stderr

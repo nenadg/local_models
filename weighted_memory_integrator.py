@@ -165,7 +165,7 @@ class WeightedMemoryIntegrator:
         store = self.memory_manager
 
         if not store or not hasattr(store, 'index') or store.index is None:
-            print("Memory store not fully initialized yet, returning empty results")
+            print(f"{self.get_time()} Memory store not fully initialized yet, returning empty results")
             return ""
 
         # Search with appropriate parameters

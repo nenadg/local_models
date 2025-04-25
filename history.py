@@ -1,6 +1,9 @@
 import os
 import readline
 
+def get_time():
+    return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+
 def setup_readline_history(memory_dir):
     """Set up readline with history file support"""
     history_file = os.path.join(memory_dir, '.phistory')
@@ -10,9 +13,9 @@ def setup_readline_history(memory_dir):
         if not os.path.exists(history_file):
             with open(history_file, 'w') as f:
                 pass
-            print(f"Created new history file: {history_file}")
+            print(f"{get_time()} Created new history file: {history_file}")
     except Exception as e:
-        print(f"Warning: Could not create history file: {e}")
+        print(f"{get_time()} Warning: Could not create history file: {e}")
         history_file = None
     
     # Set history file

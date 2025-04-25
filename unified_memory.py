@@ -134,6 +134,9 @@ class UnifiedMemoryManager:
         # Load existing memory if available
         self.load()
     
+    def get_time(self):
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+
     def add(self, 
            content: str, 
            memory_type: str = "general",
@@ -163,7 +166,7 @@ class UnifiedMemoryManager:
                 try:
                     embedding = self.embedding_function(content)
                 except Exception as e:
-                    print(f"Error generating embedding: {e}")
+                    print(f"{self.get_time()} Error generating embedding: {e}")
                     return None
             else:
                 # Random embedding if no function available (for testing)
@@ -379,7 +382,7 @@ class UnifiedMemoryManager:
         if self.index is None:
             try:
                 self._create_index(item.embedding.shape[0])
-                print(f"Created new index with dimension {item.embedding.shape[0]}")
+                print(f"{self.get_time()} Created new index with dimension {item.embedding.shape[0]}")
             except Exception as e:
                 print(f"Error creating index: {e}")
                 return None
@@ -388,12 +391,12 @@ class UnifiedMemoryManager:
         try:
             embedding_norm = np.linalg.norm(item.embedding)
             if embedding_norm < 1e-10:
-                print(f"Warning: Item {item.id} has near-zero norm embedding")
+                print(f"{self.get_time()} Warning: Item {item.id} has near-zero norm embedding")
                 embedding_norm = 1e-10
 
             normalized_embedding = item.embedding / embedding_norm
         except Exception as e:
-            print(f"Error normalizing embedding: {e}")
+            print(f"{self.get_time()} Error normalizing embedding: {e}")
             return None
 
         try:
@@ -422,19 +425,19 @@ class UnifiedMemoryManager:
                         # Ensure index exists for this level
                         if level not in self.fractal_indices:
                             self.fractal_indices[level] = faiss.IndexFlatIP(self.embedding_dim)
-                            print(f"Created new index for level {level}")
+                            print(f"{self.get_time()} Created new index for level {level}")
 
                         # Add to level-specific index
                         self.fractal_indices[level].add(np.array([normalized_level_embedding], dtype=np.float32))
                         fractal_added += 1
                     except Exception as e:
-                        print(f"Error adding fractal embedding for level {level}: {e}")
+                        print(f"{self.get_time()} Error adding fractal embedding for level {level}: {e}")
                         fractal_failed += 1
 
                 if fractal_added > 0:
-                    print(f"Added {fractal_added} fractal embeddings to indices")
+                    print(f"{self.get_time()} Added {fractal_added} fractal embeddings to indices")
                 if fractal_failed > 0:
-                    print(f"Failed to add {fractal_failed} fractal embeddings")
+                    print(f"{self.get_time()} Failed to add {fractal_failed} fractal embeddings")
             
             # Auto-save if enabled
             if self.auto_save:
@@ -443,7 +446,7 @@ class UnifiedMemoryManager:
             return item.id
         
         except Exception as e:
-            print(f"Error adding item to store: {e}")
+            print(f"{self.get_time()} Error adding item to store: {e}")
             return None
     
     def _create_index(self, dim: int = None):
@@ -465,7 +468,7 @@ class UnifiedMemoryManager:
 
         # Skip if no base embedding available
         if item.embedding is None or len(item.embedding) == 0:
-            print(f"Warning: Cannot generate fractal embeddings for item {item.id} - no base embedding")
+            print(f"{self.get_time()} Warning: Cannot generate fractal embeddings for item {item.id} - no base embedding")
             return
 
         base_embedding = item.embedding
@@ -482,15 +485,15 @@ class UnifiedMemoryManager:
                     # Verify the embedding is valid
                     embedding_norm = np.linalg.norm(level_embedding)
                     if embedding_norm < 1e-10:
-                        print(f"Warning: Generated zero-norm embedding for level {level}")
+                        print(f"{self.get_time()} Warning: Generated zero-norm embedding for level {level}")
                         continue
 
                     # Save the embedding
                     item.add_fractal_embedding(level, level_embedding)
                 else:
-                    print(f"Warning: Failed to generate embedding for level {level}")
+                    print(f"{self.get_time()} Warning: Failed to generate embedding for level {level}")
             except Exception as e:
-                print(f"Error generating fractal embedding for level {level}: {e}")
+                print(f"{self.get_time()} Error generating fractal embedding for level {level}: {e}")
                 # Continue with other levels
     
     # In UnifiedMemoryManager._generate_level_embedding
@@ -521,7 +524,7 @@ class UnifiedMemoryManager:
                 self._rotation_matrices[i] = u @ vh
 
                 # Log creation of matrix
-                print(f"Created fractal rotation matrix for level {i}")
+                print(f"{self.get_time()} Created fractal rotation matrix for level {i}")
 
         # Apply the transformation with more pronounced level-dependent changes
         if level in self._rotation_matrices:
@@ -539,7 +542,7 @@ class UnifiedMemoryManager:
             return normalized
         else:
             # Fallback if matrix isn't available
-            print(f"Warning: No rotation matrix for level {level}, using simpler transformation")
+            print(f"{self.get_time()} Warning: No rotation matrix for level {level}, using simpler transformation")
             # Apply simpler transformation
             perturbed = base_embedding + (np.random.normal(0, 0.01 * level, base_embedding.shape) * base_embedding)
             return perturbed / np.linalg.norm(perturbed)
@@ -590,7 +593,7 @@ class UnifiedMemoryManager:
                     result_dict[item_id]["cross_level_bonus"] = cross_level_bonus
                     result_dict[item_id]["sharpening_boost"] = sharpening_boost
                     result_dict[item_id]["found_in_levels"] = [lvl for lvl, _ in level_info]
-                    
+
     def retrieve(self, 
                 query: str,
                 memory_types: Optional[List[str]] = None,
@@ -613,11 +616,11 @@ class UnifiedMemoryManager:
         with self._lock:
             # If no items or no index, return empty list
             if not self.items or self.index is None:
-                print("Cannot search: No items or index not initialized")
+                print(f"{self.get_time()} Cannot search: No items or index not initialized")
                 return []
 
             if self.index.ntotal == 0:
-                print("Cannot search: Index is empty")
+                print(f"{self.get_time()} Cannot search: Index is empty")
                 return []
 
             # Generate query embedding
@@ -626,26 +629,26 @@ class UnifiedMemoryManager:
                 try:
                     query_embedding = self.embedding_function(query)
                     embedding_time = time.time() - start_time
-                    print(f"Generated query embedding in {embedding_time:.3f}s")
+                    print(f"{self.get_time()} Generated query embedding in {embedding_time:.3f}s")
                 except Exception as e:
-                    print(f"Error generating query embedding: {e}")
+                    print(f"{self.get_time()} Error generating query embedding: {e}")
                     return []
             else:
                 # Random embedding for testing
                 query_embedding = np.random.random(self.embedding_dim).astype(np.float32)
-                print("Warning: Using random embedding (no embedding function available)")
+                print(f"{self.get_time()} Warning: Using random embedding (no embedding function available)")
 
             # Normalize query embedding
             try:
                 query_norm = np.linalg.norm(query_embedding)
                 if query_norm < 1e-10:
-                    print("Warning: Query embedding has near-zero norm")
+                    print(f"{self.get_time()} Warning: Query embedding has near-zero norm")
                     query_norm = 1e-10
 
                 normalized_query = query_embedding / query_norm
                 normalized_query = np.array([normalized_query], dtype=np.float32)
             except Exception as e:
-                print(f"Error normalizing query embedding: {e}")
+                print(f"{self.get_time()} Error normalizing query embedding: {e}")
                 return []
 
             # Determine whether to use fractal search
@@ -655,7 +658,7 @@ class UnifiedMemoryManager:
             have_fractal_indices = bool(self.fractal_indices) and any(idx.ntotal > 0 for idx in self.fractal_indices.values())
             can_use_fractal = use_fractal_here and have_fractal_indices
 
-            print(f"Search config: use_fractal={use_fractal_here}, have_indices={have_fractal_indices}, can_use={can_use_fractal}")
+            print(f"{self.get_time()} Search config: use_fractal={use_fractal_here}, have_indices={have_fractal_indices}, can_use={can_use_fractal}")
 
             # Use fractal search if enabled and indices are available
             search_start = time.time()
@@ -667,11 +670,11 @@ class UnifiedMemoryManager:
                         min_similarity=min_similarity
                     )
                     search_time = time.time() - search_start
-                    print(f"Fractal search completed in {search_time:.3f}s, found {len(results)} results")
+                    print(f"{self.get_time()} Fractal search completed in {search_time:.3f}s, found {len(results)} results")
                 except Exception as e:
-                    print(f"Error in fractal search: {e}")
+                    print(f"{self.get_time()} Error in fractal search: {e}")
                     # Fall back to standard search
-                    print("Falling back to standard search")
+                    print(f"{self.get_time()} Falling back to standard search")
                     try:
                         results = self._standard_search(
                             normalized_query,
@@ -679,21 +682,21 @@ class UnifiedMemoryManager:
                             min_similarity=min_similarity
                         )
                     except Exception as inner_e:
-                        print(f"Standard search also failed: {inner_e}")
+                        print(f"{self.get_time()} Standard search also failed: {inner_e}")
                         return []
             else:
                 # Standard search
                 try:
-                    print("Using standard search")
+                    print(f"{self.get_time()} Using standard search")
                     results = self._standard_search(
                         normalized_query,
                         top_k=top_k,
                         min_similarity=min_similarity
                     )
                     search_time = time.time() - search_start
-                    print(f"Standard search completed in {search_time:.3f}s, found {len(results)} results")
+                    print(f"{self.get_time()} Standard search completed in {search_time:.3f}s, found {len(results)} results")
                 except Exception as e:
-                    print(f"Error in standard search: {e}")
+                    print(f"{self.get_time()} Error in standard search: {e}")
                     return []
 
             # Filter by memory types if specified
@@ -720,11 +723,11 @@ class UnifiedMemoryManager:
 
                     filtered_count = len(results) - len(matched_results)
                     if filtered_count > 0:
-                        print(f"Filtered {filtered_count} results by memory type")
+                        print(f"{self.get_time()} Filtered {filtered_count} results by memory type")
 
                     results = matched_results
                 except Exception as e:
-                    print(f"Error filtering by memory type: {e}")
+                    print(f"{self.get_time()} Error filtering by memory type: {e}")
                     # Continue with unfiltered results
             
             # Return only requested number
@@ -791,21 +794,21 @@ class UnifiedMemoryManager:
             level_weights.append(level_weights[-1] * 0.5)
 
         # Debug information
-        print(f"Starting fractal search with {self.index.ntotal} items in base index")
+        print(f"{self.get_time()} Starting fractal search with {self.index.ntotal} items in base index")
 
         # Start with base index search
         search_k = min(top_k * 2, self.index.ntotal)
 
         # Add error handling for empty index
         if search_k <= 0:
-            print("Warning: No items in index, cannot perform search")
+            print(f"{self.get_time()} Warning: No items in index, cannot perform search")
             return []
 
         try:
             base_similarities, base_indices = self.index.search(normalized_query, search_k)
 
             # Debug information
-            print(f"Base search returned {len(base_indices[0])} results")
+            print(f"{self.get_time()} Base search returned {len(base_indices[0])} results")
 
             # Track results to avoid duplicates
             result_dict = {}
@@ -839,20 +842,20 @@ class UnifiedMemoryManager:
                     }
 
             # Debug information
-            print(f"Found {len(result_dict)} results in base level")
+            print(f"{self.get_time()} Found {len(result_dict)} results in base level")
 
             # Search fractal indices if available
             for level in range(1, self.max_fractal_levels + 1):
                 if level not in self.fractal_indices:
-                    print(f"Skipping level {level} - no index available")
+                    print(f"{self.get_time()} Skipping level {level} - no index available")
                     continue
 
                 # Skip empty indices
                 if self.fractal_indices[level].ntotal == 0:
-                    print(f"Level {level} index is empty, skipping")
+                    print(f"{self.get_time()} Level {level} index is empty, skipping")
                     continue
 
-                print(f"Searching level {level} index with {self.fractal_indices[level].ntotal} items")
+                print(f"{self.get_time()} Searching level {level} index with {self.fractal_indices[level].ntotal} items")
 
                 # Create level-specific query variation
                 level_query = self._generate_level_embedding(normalized_query[0], level)
@@ -865,7 +868,7 @@ class UnifiedMemoryManager:
                         search_k
                     )
 
-                    print(f"Level {level} search returned {len(indices[0])} results")
+                    print(f"{self.get_time()} Level {level} search returned {len(indices[0])} results")
 
                     # Get level weight
                     weight = level_weights[min(level, len(level_weights)-1)]
@@ -909,24 +912,24 @@ class UnifiedMemoryManager:
                                     "level_weight": weight
                                 }
                 except Exception as e:
-                    print(f"Error searching fractal level {level}: {e}")
+                    print(f"{self.get_time()} Error searching fractal level {level}: {e}")
                     # Continue with other levels rather than failing completely
         except Exception as e:
-            print(f"Error in base search: {e}")
+            print(f"{self.get_time()} Error in base search: {e}")
             return []
 
         # Apply cross-level verification with enhanced sharpening
         try:
             self._apply_cross_level_verification_with_sharpening(result_dict, sharpening_factor)
         except Exception as e:
-            print(f"Error applying cross-level verification: {e}")
+            print(f"{self.get_time()} Error applying cross-level verification: {e}")
             # Continue even if verification fails
 
         # Extract values and sort
         results = list(result_dict.values())
 
         # Debug the results
-        print(f"Total results after fractal search: {len(results)}")
+        print(f"{self.get_time()} Total results after fractal search: {len(results)}")
 
         # Sort by similarity
         results.sort(key=lambda x: x["similarity"], reverse=True)
@@ -1063,7 +1066,7 @@ class UnifiedMemoryManager:
                         # Need to rebuild index
                         self._rebuild_index()
                     except Exception as e:
-                        print(f"Error updating embedding: {e}")
+                        print(f"{self.get_time()} Error updating embedding: {e}")
                         return False
 
                 item.content = updates["content"]
@@ -1177,7 +1180,7 @@ class UnifiedMemoryManager:
                 return True
 
             except Exception as e:
-                print(f"Error saving memory data: {e}")
+                print(f"{self.get_time()} Error saving memory data: {e}")
                 return False
 
     def load(self) -> bool:
@@ -1268,7 +1271,7 @@ class UnifiedMemoryManager:
                 return True
 
             except Exception as e:
-                print(f"Error loading memory data: {e}")
+                print(f"{self.get_time()} Error loading memory data: {e}")
                 # Reset to empty state
                 self.items = []
                 self.embeddings = []
@@ -1460,21 +1463,21 @@ class UnifiedMemoryManager:
         Rebuild all fractal indices to fix inconsistencies.
         Add this method to UnifiedMemoryManager.
         """
-        print("Rebuilding fractal indices...")
+        print(f"{self.get_time()} Rebuilding fractal indices...")
 
         # Clear existing fractal indices
         self.fractal_indices = {}
 
         # Skip if fractal embeddings are disabled
         if not self.use_fractal:
-            print("Fractal embeddings are disabled, skipping rebuild")
+            print(f"{self.get_time()} Fractal embeddings are disabled, skipping rebuild")
             return
 
         # Count items with fractal embeddings
         items_with_fractal = sum(1 for item in self.items if item.fractal_embeddings)
 
         if items_with_fractal == 0:
-            print("No items have fractal embeddings, regenerating...")
+            print(f"{self.get_time()} No items have fractal embeddings, regenerating...")
 
             # Regenerate fractal embeddings for all items
             for item in self.items:
@@ -1485,10 +1488,10 @@ class UnifiedMemoryManager:
             items_with_fractal = sum(1 for item in self.items if item.fractal_embeddings)
 
             if items_with_fractal == 0:
-                print("Failed to generate fractal embeddings")
+                print(f"{self.get_time()} Failed to generate fractal embeddings")
                 return
 
-        print(f"Building indices for {items_with_fractal} items with fractal embeddings")
+        print(f"{self.get_time()} Building indices for {items_with_fractal} items with fractal embeddings")
 
         # Create indices for each level
         all_levels = set()
@@ -1513,9 +1516,9 @@ class UnifiedMemoryManager:
 
             if embeddings_for_level:
                 self.fractal_indices[level].add(np.array(embeddings_for_level, dtype=np.float32))
-                print(f"Added {len(embeddings_for_level)} embeddings to level {level} index")
+                print(f"{self.get_time()} Added {len(embeddings_for_level)} embeddings to level {level} index")
 
-        print("Fractal indices rebuilt successfully")
+        print(f"{self.get_time()} Fractal indices rebuilt successfully")
 
         # Run diagnostics
         if hasattr(self, 'print_fractal_embedding_diagnostics'):
