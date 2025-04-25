@@ -471,7 +471,7 @@ class WebKnowledgeEnhancer:
         # Extract keywords (nouns and important words)
         keywords = []
         for token in doc:
-            if token.pos_ in {"NOUN", "PROPN", "ADJ", "NUM", "VERB", "X"} and token.text.lower() not in self.custom_stop_words:
+            if token.pos_ in {"ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM", "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X"} and token.text.lower() not in self.custom_stop_words:
                 if len(token.text) > 1:
                     keywords.append(token.text)
 

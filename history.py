@@ -1,5 +1,6 @@
 import os
 import readline
+from datetime import datetime
 
 def get_time():
     return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
