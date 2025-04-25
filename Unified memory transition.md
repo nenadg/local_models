@@ -25,19 +25,19 @@ The central improvement is the new unified memory system, which replaces multipl
 
 The unified system supports all previously separate memory types:
 
-- **Conversation**: User-assistant dialog history
-- **Command**: Shell command outputs with specialized tabular data handling
-- **Knowledge**: Structured information like facts, definitions, and procedures
-- **Web Knowledge**: Information retrieved from web searches
+-   **Conversation**: User-assistant dialog history
+-   **Command**: Shell command outputs with specialized tabular data handling
+-   **Knowledge**: Structured information like facts, definitions, and procedures
+-   **Web Knowledge**: Information retrieved from web searches
 
 ### Fractal Embeddings
 
 Fractal embeddings are now an optional, configurable feature:
 
-- **Clear Configuration**: Simple boolean toggle with sensible defaults
-- **Level Control**: Adjustable number of embedding levels
-- **Dynamic Usage**: Can be enabled/disabled per memory type or query
-- **Efficiency**: Only computed when beneficial for complex queries
+-   **Clear Configuration**: Simple boolean toggle with sensible defaults
+-   **Level Control**: Adjustable number of embedding levels
+-   **Dynamic Usage**: Can be enabled/disabled per memory type or query
+-   **Efficiency**: Only computed when beneficial for complex queries
 
 ## Key Improvements
 
@@ -84,10 +84,10 @@ results = memory.retrieve(query=query, memory_types=["conversation"])
 
 The unified memory system is designed to scale more efficiently:
 
-- Memory types share the same vector indices, reducing overhead
-- Fractal embeddings are only computed when beneficial
-- Improved caching reduces redundant embedding generation
-- Better cleanup of unused resources
+-   Memory types share the same vector indices, reducing overhead
+-   Fractal embeddings are only computed when beneficial
+-   Improved caching reduces redundant embedding generation
+-   Better cleanup of unused resources
 
 ## Configuration Options
 
@@ -104,3 +104,11 @@ memory = UnifiedMemoryManager(
     auto_save=True             # Automatically save changes
 )
 ```
+
+## Next steps
+
+For even better results, you could try:
+
+-   Memory pruning: Add a mechanism to occasionally review and remove low-quality or overly generalized memories
+-   Increasing the sharpening factor: Try raising it from 0.30 to 0.40 or 0.50 to create even stronger contrast between domains
+-   Cold start handling: For a clean system, consider having domain-specific "seed memories" to anchor different knowledge domains

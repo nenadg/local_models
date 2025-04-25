@@ -334,6 +334,37 @@ class UnifiedMemoryManager:
                 # Restore original auto_save setting
                 self.auto_save = original_auto_save
 
+    def _apply_sharpening(self, similarity: float, sharpening_factor: float) -> float:
+        """
+        Apply non-linear sharpening to similarity scores to increase contrast.
+
+        Args:
+            similarity: Raw similarity score (0.0-1.0)
+            sharpening_factor: Strength of sharpening effect (0.0-1.0)
+
+        Returns:
+            Sharpened similarity score
+        """
+        # Skip if no sharpening requested
+        if sharpening_factor <= 0:
+            return similarity
+
+        # Apply non-linear sharpening
+        if similarity > 0.6:
+            # Boost high similarities (more confident matches)
+            boost = (similarity - 0.6) * sharpening_factor * 2.0
+            sharpened = min(1.0, similarity + boost)
+        elif similarity < 0.4:
+            # Reduce low similarities (less confident matches)
+            reduction = (0.4 - similarity) * sharpening_factor * 2.0
+            sharpened = max(0.0, similarity - reduction)
+        else:
+            # Middle range - moderate effect
+            deviation = (similarity - 0.5) * sharpening_factor
+            sharpened = 0.5 + deviation
+
+        return sharpened
+
     def _add_item_to_store(self, item: MemoryItem) -> Optional[str]:
         """
         Add a memory item to storage and indices with improved error handling.
@@ -513,6 +544,53 @@ class UnifiedMemoryManager:
             perturbed = base_embedding + (np.random.normal(0, 0.01 * level, base_embedding.shape) * base_embedding)
             return perturbed / np.linalg.norm(perturbed)
     
+    def _apply_cross_level_verification_with_sharpening(self, result_dict: Dict[str, Dict[str, Any]], sharpening_factor: float):
+        """
+        Boost confidence for items found across multiple levels with enhanced sharpening.
+        This rewards consistent results across different semantic variations.
+
+        Args:
+            result_dict: Dictionary of search results
+            sharpening_factor: Base sharpening factor to apply
+        """
+        # Group results by item
+        item_levels = {}
+        for item_id, result in result_dict.items():
+            if item_id not in item_levels:
+                item_levels[item_id] = []
+            item_levels[item_id].append((result["level"], result["raw_similarity"]))
+
+        # Apply boost for items found in multiple levels with sharpening
+        for item_id, level_info in item_levels.items():
+            if len(level_info) > 1:
+                # Calculate cross-level verification score
+                level_count = len(level_info)
+                avg_similarity = sum(sim for _, sim in level_info) / level_count
+
+                # Apply sharpening to the average similarity
+                sharpened_avg = self._apply_sharpening(avg_similarity, sharpening_factor)
+
+                # Apply bonus based on level agreement (up to 20% boost)
+                cross_level_bonus = min(0.2, 0.05 * level_count)
+
+                # Apply an additional sharpening boost
+                sharpening_boost = 0.1 * sharpened_avg * sharpening_factor
+
+                # Apply the combined bonus
+                if item_id in result_dict:
+                    current_sim = result_dict[item_id]["similarity"]
+
+                    # Apply greater boost for cross-level consistency in high similarity results
+                    if current_sim > 0.7:
+                        boost_factor = 1.0 + cross_level_bonus + sharpening_boost
+                    else:
+                        boost_factor = 1.0 + (cross_level_bonus + sharpening_boost) * 0.5
+
+                    result_dict[item_id]["similarity"] = min(1.0, current_sim * boost_factor)
+                    result_dict[item_id]["cross_level_bonus"] = cross_level_bonus
+                    result_dict[item_id]["sharpening_boost"] = sharpening_boost
+                    result_dict[item_id]["found_in_levels"] = [lvl for lvl, _ in level_info]
+                    
     def retrieve(self, 
                 query: str,
                 memory_types: Optional[List[str]] = None,
@@ -692,7 +770,7 @@ class UnifiedMemoryManager:
                       top_k: int,
                       min_similarity: float) -> List[Dict[str, Any]]:
         """
-        Perform enhanced fractal search across multiple levels with improved error handling.
+        Perform enhanced fractal search across multiple levels with proper sharpening.
 
         Args:
             normalized_query: Normalized query embedding vector
@@ -702,6 +780,9 @@ class UnifiedMemoryManager:
         Returns:
             List of search results with similarity scores
         """
+        # Get sharpening factor from instance variable
+        sharpening_factor = getattr(self, 'sharpening_factor', 0.3)
+
         # Level weights (decreasing importance for higher levels)
         level_weights = [1.0, 0.8, 0.6, 0.4, 0.2]
 
@@ -729,21 +810,28 @@ class UnifiedMemoryManager:
             # Track results to avoid duplicates
             result_dict = {}
 
-            # Process base results
+            # Process base results with sharpening
             for i, idx in enumerate(base_indices[0]):
                 if idx != -1 and base_similarities[0][i] > min_similarity:
                     if idx in self.deleted_ids:
                         continue
 
                     item = self.items[idx]
-                    similarity = float(base_similarities[0][i]) * level_weights[0]
+
+                    # Apply sharpening to raw similarity
+                    raw_similarity = float(base_similarities[0][i])
+                    sharpened_similarity = self._apply_sharpening(raw_similarity, sharpening_factor)
+                    # Apply level weight after sharpening
+                    similarity = sharpened_similarity * level_weights[0]
 
                     result_dict[item.id] = {
                         "id": item.id,
                         "content": item.content,
                         "memory_type": item.memory_type,
                         "similarity": similarity,
-                        "base_similarity": float(base_similarities[0][i]),
+                        "raw_similarity": raw_similarity,
+                        "sharpened_similarity": sharpened_similarity,
+                        "base_similarity": raw_similarity,  # For backward compatibility
                         "metadata": item.metadata,
                         "index": idx,
                         "level": 0,
@@ -782,20 +870,28 @@ class UnifiedMemoryManager:
                     # Get level weight
                     weight = level_weights[min(level, len(level_weights)-1)]
 
-                    # Process results
+                    # Process results with sharpening
                     for i, idx in enumerate(indices[0]):
                         if idx != -1 and similarities[0][i] > min_similarity:
                             if idx in self.deleted_ids:
                                 continue
 
-                            # Calculate weighted similarity
-                            item = self.items[idx]
+                            # Apply sharpening to raw similarity
                             raw_similarity = float(similarities[0][i])
-                            weighted_similarity = raw_similarity * weight
+
+                            # Additional sharpening for higher levels to encourage diversity
+                            level_adjusted_factor = sharpening_factor * (1.0 + (level * 0.05))
+                            sharpened_similarity = self._apply_sharpening(raw_similarity, level_adjusted_factor)
+
+                            # Apply level weight after sharpening
+                            weighted_similarity = sharpened_similarity * weight
 
                             # Only consider if similarity passes threshold
                             if weighted_similarity < min_similarity:
                                 continue
+
+                            # Get item
+                            item = self.items[idx]
 
                             # Update if this is better than existing or add if new
                             if item.id not in result_dict or weighted_similarity > result_dict[item.id]["similarity"]:
@@ -804,7 +900,9 @@ class UnifiedMemoryManager:
                                     "content": item.content,
                                     "memory_type": item.memory_type,
                                     "similarity": weighted_similarity,
-                                    "base_similarity": raw_similarity,
+                                    "raw_similarity": raw_similarity,
+                                    "sharpened_similarity": sharpened_similarity,
+                                    "base_similarity": raw_similarity,  # For backward compatibility
                                     "metadata": item.metadata,
                                     "index": idx,
                                     "level": level,
@@ -817,9 +915,9 @@ class UnifiedMemoryManager:
             print(f"Error in base search: {e}")
             return []
 
-        # Apply cross-level verification (boost confidence if found in multiple levels)
+        # Apply cross-level verification with enhanced sharpening
         try:
-            self._apply_cross_level_verification(result_dict)
+            self._apply_cross_level_verification_with_sharpening(result_dict, sharpening_factor)
         except Exception as e:
             print(f"Error applying cross-level verification: {e}")
             # Continue even if verification fails
