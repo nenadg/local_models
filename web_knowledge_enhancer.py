@@ -688,16 +688,22 @@ class WebKnowledgeEnhancer:
                 if len(scored_results) == 0:  # Only for first result to avoid log spam
                     print(f"{self.get_time()} [Web] Generated result embedding shape: {result_embedding.shape if hasattr(result_embedding, 'shape') else 'N/A'}")
 
-                # Calculate cosine similarity (now handles arrays correctly)
+                # Calculate cosine similarity with safe conversion
                 similarity = self._calculate_similarity(query_embedding, result_embedding)
+
+                # Ensure similarity is a Python float, not a numpy type
+                if hasattr(similarity, 'item'):
+                    similarity = float(similarity.item())
+                else:
+                    similarity = float(similarity)
 
                 # Apply sharpening if enabled
                 if self.sharpening_factor > 0:
-                    similarity = self._apply_sharpening(similarity)
+                    similarity = self._apply_sharpening(similarity, self.sharpening_factor)
 
                 # Add similarity to result
                 result_with_score = result.copy()
-                result_with_score['similarity'] = float(similarity)
+                result_with_score['similarity'] = similarity
 
                 scored_results.append(result_with_score)
             except Exception as e:
@@ -708,7 +714,13 @@ class WebKnowledgeEnhancer:
                 scored_results.append(result_copy)
 
         # Sort by similarity
-        scored_results.sort(key=lambda x: x.get('similarity', 0), reverse=True)
+        def get_similarity(result):
+            sim = result.get('similarity', 0)
+            if hasattr(sim, 'item'):
+                return float(sim.item())
+            return float(sim)
+
+        scored_results.sort(key=get_similarity, reverse=True)
 
         return scored_results
 
@@ -723,53 +735,76 @@ class WebKnowledgeEnhancer:
         Returns:
             Cosine similarity (0-1)
         """
-        # Handle multidimensional arrays (ensure we have 1D arrays)
-        if embedding1.ndim > 1:
-            embedding1 = embedding1.reshape(-1)
-        if embedding2.ndim > 1:
-            embedding2 = embedding2.reshape(-1)
+        try:
+            # Handle multidimensional arrays (ensure we have 1D arrays)
+            if embedding1.ndim > 1:
+                embedding1 = embedding1.reshape(-1)
+            if embedding2.ndim > 1:
+                embedding2 = embedding2.reshape(-1)
 
-        # Normalize
-        norm1 = np.linalg.norm(embedding1)
-        norm2 = np.linalg.norm(embedding2)
+            # Normalize
+            norm1 = np.linalg.norm(embedding1)
+            norm2 = np.linalg.norm(embedding2)
 
-        # Avoid division by zero
-        if norm1 < 1e-10 or norm2 < 1e-10:
-            return 0.0
+            # Avoid division by zero
+            if norm1 < 1e-10 or norm2 < 1e-10:
+                return 0.0
 
-        embedding1_normalized = embedding1 / norm1
-        embedding2_normalized = embedding2 / norm2
+            embedding1_normalized = embedding1 / norm1
+            embedding2_normalized = embedding2 / norm2
 
-        # Calculate cosine similarity
-        similarity = np.dot(embedding1_normalized, embedding2_normalized)
+            # Calculate cosine similarity
+            similarity = np.dot(embedding1_normalized, embedding2_normalized)
 
-        # Convert to scalar if it's still an array
-        if isinstance(similarity, np.ndarray):
-            similarity = similarity.item()
+            # Convert to scalar if it's still an array
+            if isinstance(similarity, np.ndarray):
+                if similarity.size == 1:
+                    similarity = similarity.item()
+                else:
+                    # If we somehow got a multi-element array, use the mean
+                    similarity = similarity.mean().item()
 
-        return float(similarity)
+            # Ensure we return a Python float
+            return float(similarity)
+        except Exception as e:
+            print(f"Error calculating similarity: {e}")
+            # Return a default value on error
+            return 0.5
 
-    def _apply_sharpening(self, similarity: float) -> float:
+    def _apply_sharpening(self, similarity: float, sharpening_factor: float) -> float:
         """
-        Apply non-linear sharpening to similarity scores.
+        Apply non-linear sharpening to similarity scores to increase contrast.
 
         Args:
-            similarity: Raw similarity score (0-1)
+            similarity: Raw similarity score (0.0-1.0)
+            sharpening_factor: Strength of sharpening effect (0.0-1.0)
 
         Returns:
-            Sharpened similarity score (0-1)
+            Sharpened similarity score
         """
-        # High similarities get boosted
-        if similarity > 0.7:
-            boost = (similarity - 0.7) * self.sharpening_factor * 2.0
-            return min(1.0, similarity + boost)
-        # Low similarities get reduced
-        elif similarity < 0.3:
-            reduction = (0.3 - similarity) * self.sharpening_factor * 2.0
-            return max(0.0, similarity - reduction)
-        # Middle range - minor adjustments
-        else:
+        # Convert to scalar float if it's a numpy type
+        if hasattr(similarity, 'item'):
+            similarity = similarity.item()
+
+        # Skip if no sharpening requested
+        if sharpening_factor <= 0:
             return similarity
+
+        # Apply non-linear sharpening
+        if float(similarity) > 0.6:
+            # Boost high similarities (more confident matches)
+            boost = (float(similarity) - 0.6) * sharpening_factor * 2.0
+            sharpened = min(1.0, float(similarity) + boost)
+        elif float(similarity) < 0.4:
+            # Reduce low similarities (less confident matches)
+            reduction = (0.4 - float(similarity)) * sharpening_factor * 2.0
+            sharpened = max(0.0, float(similarity) - reduction)
+        else:
+            # Middle range - moderate effect
+            deviation = (float(similarity) - 0.5) * sharpening_factor
+            sharpened = 0.5 + deviation
+
+        return float(sharpened)
 
     def format_web_results_for_context(self, enhancement_data: Dict[str, Any]) -> str:
         """

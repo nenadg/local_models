@@ -150,71 +150,78 @@ class ResponseFilter:
         Returns:
             Tuple of (should_filter, reason)
         """
+        # Ensure metrics contains basic values
+        confidence = float(metrics.get("confidence", 0.5))
+        entropy = float(metrics.get("entropy", 2.0))
+        perplexity = float(metrics.get("perplexity", 10.0))
 
-        domain = None
+        # Set default thresholds
         domain_confidence_threshold = self.confidence_threshold
         domain_entropy_threshold = self.entropy_threshold
         domain_perplexity_threshold = self.perplexity_threshold
 
-        if query and hasattr(self, 'question_classifier'):
-            # Get domain and adjust thresholds
-            domain_settings = self.question_classifier.get_domain_settings(query)
-            domain = domain_settings.get('domain', 'unknown')
+        # Apply domain-specific thresholds if possible
+        domain = None
+        if query and hasattr(self, 'question_classifier') and self.question_classifier:
+            try:
+                # Get domain and adjust thresholds
+                domain_settings = self.question_classifier.get_domain_settings(query)
+                domain = domain_settings.get('domain', 'unknown')
 
-            # Apply domain-specific thresholds
-            if domain == 'arithmetic' or domain == 'factual':
-                # Stricter thresholds for factual/math queries
-                domain_confidence_threshold = 0.75   # Higher threshold = 0.75
-                domain_entropy_threshold = 1.8      # Lower threshold = 1.8
-                domain_perplexity_threshold = 8.0   # Lower threshold = 8.0
-            elif domain == 'translation':
-                # Stricter thresholds for translations
-                domain_confidence_threshold = 0.4
-                domain_entropy_threshold = 3.9
-                domain_perplexity_threshold = 12.0
+                # Apply domain-specific thresholds
+                if domain == 'arithmetic' or domain == 'factual':
+                    # Stricter thresholds for factual/math queries
+                    domain_confidence_threshold = 0.75   # Higher threshold = 0.75
+                    domain_entropy_threshold = 1.8      # Lower threshold = 1.8
+                    domain_perplexity_threshold = 8.0   # Lower threshold = 8.0
+                elif domain == 'translation':
+                    # Stricter thresholds for translations
+                    domain_confidence_threshold = 0.4
+                    domain_entropy_threshold = 3.9
+                    domain_perplexity_threshold = 12.0
+            except Exception as e:
+                print(f"Error detecting domain: {e}")
+                # Continue with default thresholds if domain detection fails
 
-        sharpened_metrics = self.sharpen_metrics(metrics)
+        # Apply sharpening if available
+        if hasattr(self, 'sharpen_metrics'):
+            sharpened_metrics = self.sharpen_metrics(metrics)
+        else:
+            # Fallback to original metrics
+            sharpened_metrics = metrics.copy()
 
-        # Use all sharpened metrics for filtering decision
-        # if (sharpened_metrics["confidence"] < self.confidence_threshold and
-        #     sharpened_metrics["entropy"] > self.entropy_threshold and
-        #     sharpened_metrics["perplexity"] > self.perplexity_threshold):
-        #     return True, "low_confidence"
+        # Convert any numpy values to Python primitives to avoid array truth value errors
+        for key in sharpened_metrics:
+            if hasattr(sharpened_metrics[key], 'item'):
+                sharpened_metrics[key] = sharpened_metrics[key].item()
 
         # Calculate a combined uncertainty score
         uncertainty_score = (
-            (1 - sharpened_metrics["confidence"]) * 0.5 +     # Weight confidence more
-            (sharpened_metrics["entropy"] / domain_entropy_threshold) * 0.3 +
-            (sharpened_metrics["perplexity"] / domain_perplexity_threshold) * 0.2
+            (1 - float(sharpened_metrics.get("confidence", 0.5))) * 0.5 +     # Weight confidence more
+            (float(sharpened_metrics.get("entropy", 2.0)) / float(domain_entropy_threshold)) * 0.3 +
+            (float(sharpened_metrics.get("perplexity", 10.0)) / float(domain_perplexity_threshold)) * 0.2
         )
 
+        # Check the confidence value explicitly
+        sharpened_confidence = float(sharpened_metrics.get("confidence", 0.5))
+        if sharpened_confidence < domain_confidence_threshold:
+            return True, "low_confidence"
+
+        # Check entropy value explicitly
+        sharpened_entropy = float(sharpened_metrics.get("entropy", 2.0))
+        if sharpened_entropy > domain_entropy_threshold:
+            return True, "high_entropy"
+
+        # Check perplexity value explicitly
+        sharpened_perplexity = float(sharpened_metrics.get("perplexity", 10.0))
+        if sharpened_perplexity > domain_perplexity_threshold:
+            return True, "high_perplexity"
+
         # High uncertainty score indicates problem
-        # if uncertainty_score > 0.49:  # Threshold to be tuned
-        #     return True, "high_uncertainty"
-        # print("CONFIDENCE", sharpened_metrics["confidence"] , domain_confidence_threshold)
-        # print("ENTROPY", sharpened_metrics["entropy"], domain_entropy_threshold)
-        # print("PERPLEXITY", sharpened_metrics["perplexity"], domain_perplexity_threshold)
+        if uncertainty_score > 0.65:
+            return True, "high_uncertainty"
 
-        if sharpened_metrics["confidence"] > domain_confidence_threshold:
-            return True, "very_high_confidence"
-
-        if sharpened_metrics["entropy"] > domain_entropy_threshold or sharpened_metrics["entropy"] < 1:
-            return True, "very_retarded_entropy"
-
-        if sharpened_metrics["perplexity"] > domain_perplexity_threshold:
-            return True, "very_overconfident_perplexity"
-
-
-        # Individual metrics can still trigger filtering if they're really bad
-        # if sharpened_metrics["confidence"] < domain_confidence_threshold * 0.7:
-        #     return True, "very_low_confidence"
-
-        # if sharpened_metrics["entropy"] > domain_entropy_threshold * 1.5:
-        #     return True, "very_high_entropy"
-
-        # if sharpened_metrics["perplexity"] > domain_perplexity_threshold * 1.5:
-        #     return True, "very_high_perplexity"
-
+        # If we get here, the response passes all checks
         return False, "acceptable"
 
     def check_override_instruction(self, query: str) -> bool:

@@ -48,15 +48,21 @@ class WeightedMemoryIntegrator:
         settings = self._get_settings(query)
 
         try:
-
             # Get memories with domain-specific settings
             print(f"{self.get_time()} [Debug] Starting memory retrieval for query: {query[:30]}...")
             memory_text = self._retrieve_memories(user_id, query, settings)
             print(f"{self.get_time()} [Debug]: Memory retrieval complete, got {len(memory_text)} chars")
 
             # Apply domain-specific post-processing if needed
-            if settings['post_process'] and settings['domain'] in self.post_processors:
-                memory_text = self.post_processors[settings['domain']](query, memory_text)
+            if settings.get('post_process', False) and settings.get('domain', '') in self.post_processors:
+                try:
+                    domain = settings.get('domain', '')
+                    post_processor = self.post_processors.get(domain)
+                    if post_processor and callable(post_processor):
+                        memory_text = post_processor(query, memory_text)
+                except Exception as e:
+                    print(f"{self.get_time()} Error in post-processing: {e}")
+                    # Continue with unprocessed memory text
 
             # Return both the memory text and the settings used
             return {
@@ -158,30 +164,55 @@ class WeightedMemoryIntegrator:
         """
         # Get retrieval settings
         retrieve_count = settings.get('retrieval_count', 8)
-        sharpening_factor = settings.get('sharpening_factor', 0.3)
-        apply_sharpening = self.memory_manager.use_fractal if hasattr(self.memory_manager, 'use_fractal') else True
+        sharpening_factor = float(settings.get('sharpening_factor', 0.3))
+
+        # Determine whether to apply sharpening
+        apply_sharpening = False
+        if hasattr(self.memory_manager, 'use_fractal'):
+            if isinstance(self.memory_manager.use_fractal, bool):
+                apply_sharpening = self.memory_manager.use_fractal
+            else:
+                # Handle case where use_fractal might be a numpy array or other non-bool
+                apply_sharpening = bool(self.memory_manager.use_fractal)
 
         # Get the store
         store = self.memory_manager
 
-        if not store or not hasattr(store, 'index') or store.index is None:
-            print(f"{self.get_time()} Memory store not fully initialized yet, returning empty results")
+        if not store or not hasattr(store, 'retrieve'):
+            print(f"{self.get_time()} Memory store not properly initialized, returning empty results")
             return ""
 
-        # Search with appropriate parameters
-        results = store.retrieve(
-            query=query,
-            top_k=retrieve_count*2,
-            min_similarity=0.25,
-            use_fractal=True)  # Fixed from 'use_fracta=true'
+        try:
+            # Check if index exists and is initialized
+            if hasattr(store, 'index') and store.index is None:
+                print(f"{self.get_time()} Memory index not initialized yet, returning empty results")
+                return ""
+        except Exception as e:
+            print(f"{self.get_time()} Error checking store index: {e}")
+            # Continue and let the retrieve method handle the error
 
-        # Format the results into memory text
-        memory_text = self._format_memory_results(results, retrieve_count)
+        try:
+            # Search with appropriate parameters
+            results = store.retrieve(
+                query=query,
+                top_k=int(retrieve_count * 2),  # Get more results for filtering
+                min_similarity=0.25,
+                use_fractal=apply_sharpening
+            )
 
-        # Check for domain-specific memory injection
-        memory_text = self._inject_domain_knowledge(query, memory_text, settings)
+            # Format the results into memory text
+            memory_text = self._format_memory_results(results, retrieve_count)
 
-        return memory_text
+            # Check for domain-specific memory injection
+            memory_text = self._inject_domain_knowledge(query, memory_text, settings)
+
+            return memory_text
+
+        except Exception as e:
+            print(f"{self.get_time()} Error in memory retrieval: {e}")
+            import traceback
+            traceback.print_exc()
+            return ""  # Return empty string on error
 
     def _inject_domain_knowledge(self, query: str, memory_text: str, settings: Dict[str, Any]) -> str:
         """

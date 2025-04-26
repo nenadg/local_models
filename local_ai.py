@@ -398,15 +398,15 @@ class TinyLlamaChat:
         Add this at the beginning of create_prompt_with_knowledge.
         """
         # Check if this is a continuation request
-        if hasattr(self, 'window_manager') and len(messages) > 0 and messages[-1]["role"] == "user":
+        if not messages or len(messages) == 0:
+            return messages
+
+        if hasattr(self, 'window_manager') and messages[-1]["role"] == "user":
             user_query = messages[-1]["content"]
 
             # Detect if this is a continuation request
             if self.window_manager.detect_continuation_request(user_query):
                 print("Detected continuation request, enhancing prompt...")
-
-                # Get user's vector store for fractal integration
-                user_store = self.memory_manager
 
                 # Enhance continuation context with web knowledge if available
                 if hasattr(self, 'web_enhancer') and self.web_enhancer and user_query:
@@ -421,13 +421,15 @@ class TinyLlamaChat:
                             cont_context["text"]
                         )
 
-                    # Enhance with web knowledge
-                    enhanced_context = self.web_enhancer.enhance_continuation_context(
-                        user_query, cont_context
-                    )
+                    # Check if the web_enhancer has the enhance_continuation_context method
+                    if hasattr(self.web_enhancer, 'enhance_continuation_context'):
+                        # Enhance with web knowledge
+                        enhanced_context = self.web_enhancer.enhance_continuation_context(
+                            user_query, cont_context
+                        )
 
-                    # Update the continuation context
-                    self.window_manager.continuation_context[self.current_user_id] = enhanced_context
+                        # Update the continuation context
+                        self.window_manager.continuation_context[self.current_user_id] = enhanced_context
 
                 # Prepare enhanced continuation prompt
                 enhanced_query = self.window_manager.prepare_continuation_prompt(
@@ -446,105 +448,157 @@ class TinyLlamaChat:
 
     def create_prompt_with_knowledge(self, messages, use_web_search=True):
         """Create a prompt that incorporates relevant knowledge with domain-aware weighting"""
-        # First check if this is a continuation request and enhance if needed
-        messages = self.enhance_query_for_continuation(messages)
+        try:
+            # First check if this is a continuation request and enhance if needed
+            messages = self.enhance_query_for_continuation(messages)
 
-        # Extract the user's current query
-        current_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
+            # Extract the user's current query
+            current_query = messages[-1]["content"] if len(messages) > 0 and messages[-1]["role"] == "user" else ""
 
-        # Create enhanced system message with knowledge
-        enhanced_system_content = self.system_message["content"]
+            # Create enhanced system message with knowledge
+            enhanced_system_content = self.system_message["content"]
 
-        # Use the weighted memory integrator for domain-aware memory retrieval
-        if current_query:
-            # Detect if this is a command-related query
-            command_context = extract_command_context(current_query)
+            # Use the weighted memory integrator for domain-aware memory retrieval
+            if current_query:
+                # Detect if this is a command-related query
+                command_context = None
+                try:
+                    command_context = extract_command_context(current_query)
+                except Exception as e:
+                    print(f"{self.get_time()} Error extracting command context: {e}")
 
-            # Get domain information if available
-            domain = None
-            settings = None
+                # Get domain information if available
+                domain = None
+                settings = None
 
-            if hasattr(self, 'question_classifier'):
-                settings = self.question_classifier.get_domain_settings(current_query)
-                domain = settings['domain']
+                try:
+                    if hasattr(self, 'question_classifier') and self.question_classifier is not None:
+                        settings = self.question_classifier.get_domain_settings(current_query)
+                        if isinstance(settings, dict) and 'domain' in settings:
+                            domain = settings['domain']
+                except Exception as e:
+                    print(f"{self.get_time()} Error classifying question: {e}")
+                    # Continue with domain=None
 
-            # Check confidence to determine if web enhancement is needed
-            confidence_data = self.confidence_metrics.get_metrics(apply_sharpening=True)
+                # Check confidence to determine if web enhancement is needed
+                confidence_data = {}
+                try:
+                    if hasattr(self, 'confidence_metrics') and self.confidence_metrics is not None:
+                        confidence_data = self.confidence_metrics.get_metrics(apply_sharpening=True)
+                except Exception as e:
+                    print(f"{self.get_time()} Error getting confidence metrics: {e}")
+                    # Continue with empty confidence_data
 
-            # Try to enhance with web knowledge if confidence is low
-            web_enhancement = None
-            if use_web_search and self.enable_web_knowledge and hasattr(self, 'web_enhancer'):
-                web_enhancement = self.enhance_with_web_knowledge(current_query, confidence_data, domain, messages)
+                # Try to enhance with web knowledge if confidence is low
+                web_enhancement = None
+                if use_web_search and hasattr(self, 'enable_web_knowledge') and self.enable_web_knowledge and hasattr(self, 'web_enhancer') and self.web_enhancer is not None:
+                    try:
+                        web_enhancement = self.enhance_with_web_knowledge(current_query, confidence_data, domain, messages)
+                    except Exception as e:
+                        print(f"{self.get_time()} Error enhancing with web knowledge: {e}")
+                        # Continue with web_enhancement=None
 
-            # Ensure recent memories are included by forcing a higher k value for recent queries
-            recency_boost = True
-            top_k = 8 if recency_boost else 8  # Default is 8
+                # Ensure recent memories are included by forcing a higher k value for recent queries
+                recency_boost = True
+                top_k = 8  # Default is 8
 
-            if command_context:
-                # Use specialized command memory retrieval
-                memories = self.retrieve_command_memories(
-                    current_query,
-                    command_context=command_context,
-                    top_k=top_k,
-                    recency_weight=0.3,
-                    include_tabular=True
-                )
-            else:
-                # Use standard memory retrieval for non-command queries
-                result = self.memory_integrator.retrieve_and_integrate(
-                    self.current_user_id,
-                    current_query
-                )
-                memories = result['memory_text']
-                settings = result['settings']
-                domain = settings['domain']
+                memories = ""
+                if command_context:
+                    # Use specialized command memory retrieval
+                    try:
+                        memories = self.retrieve_command_memories(
+                            current_query,
+                            command_context=command_context,
+                            top_k=top_k,
+                            recency_weight=0.3,
+                            include_tabular=True
+                        )
+                    except Exception as e:
+                        print(f"{self.get_time()} Error retrieving command memories: {e}")
+                        # Continue with memories=""
+                else:
+                    # Use standard memory retrieval for non-command queries
+                    try:
+                        if hasattr(self, 'memory_integrator') and self.memory_integrator is not None:
+                            result = self.memory_integrator.retrieve_and_integrate(
+                                self.current_user_id,
+                                current_query
+                            )
+                            if isinstance(result, dict):
+                                memories = result.get('memory_text', '')
+                                settings = result.get('settings', settings)
+                                domain = settings.get('domain', domain) if settings else domain
 
-                # Add procedural knowledge section for certain domains
-                if domain in ['translation', 'procedural']:
-                    # Retrieve specialized procedural knowledge
-                    procedures = self.retrieve_procedural_knowledge(current_query)
-                    if procedures:
-                        # Create structured procedure section
-                        procedure_section = self.create_procedural_prompt_section(procedures)
-                        if procedure_section:
-                            # Add explicit instruction for how to apply the knowledge
-                            instruction = "\nIMPORTANT: When performing tasks like translation or following procedures, " \
-                                        "use the PROCEDURAL KNOWLEDGE section below as a direct reference. " \
-                                        "For translations, apply each mapping rule precisely.\n"
+                                # Add procedural knowledge section for certain domains
+                                if domain in ['translation', 'procedural']:
+                                    # Retrieve specialized procedural knowledge
+                                    try:
+                                        procedures = self.retrieve_procedural_knowledge(current_query)
+                                        if procedures:
+                                            # Create structured procedure section
+                                            procedure_section = self.create_procedural_prompt_section(procedures)
+                                            if procedure_section:
+                                                # Add explicit instruction for how to apply the knowledge
+                                                instruction = "\nIMPORTANT: When performing tasks like translation or following procedures, " \
+                                                            "use the PROCEDURAL KNOWLEDGE section below as a direct reference. " \
+                                                            "For translations, apply each mapping rule precisely.\n"
 
-                            # Append to memories with high priority
-                            memories = instruction + procedure_section + "\n\n" + memories
+                                                # Append to memories with high priority
+                                                memories = instruction + procedure_section + "\n\n" + memories
+                                    except Exception as e:
+                                        print(f"{self.get_time()} Error retrieving procedural knowledge: {e}")
+                                        # Continue with existing memories
+                    except Exception as e:
+                        print(f"{self.get_time()} Error integrating memories: {e}")
+                        # Continue with memories=""
 
-            # Add web search results if available
-            web_context = ""
-            if web_enhancement and web_enhancement.get('enhanced', False):
-                web_context = self.web_enhancer.format_web_results_for_context(web_enhancement)
+                # Add web search results if available
+                web_context = ""
+                if web_enhancement and isinstance(web_enhancement, dict) and web_enhancement.get('enhanced', False):
+                    try:
+                        web_context = self.web_enhancer.format_web_results_for_context(web_enhancement)
+                    except Exception as e:
+                        print(f"{self.get_time()} Error formatting web results: {e}")
+                        # Continue with web_context=""
 
-            # Combine local memory and web knowledge
-            if memories and web_context:
-                enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
-                enhanced_system_content += f"\n{memories}\n"
-                enhanced_system_content += f"\n{web_context}"
-            elif memories:
-                enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
-                enhanced_system_content += f"\n{memories}"
-            elif web_context:
-                enhanced_system_content += "\n\nIMPORTANT: Use the following web search results in your response:\n"
-                enhanced_system_content += f"\n{web_context}"
+                # Combine local memory and web knowledge
+                if memories and web_context:
+                    enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
+                    enhanced_system_content += f"\n{memories}\n"
+                    enhanced_system_content += f"\n{web_context}"
+                elif memories:
+                    enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
+                    enhanced_system_content += f"\n{memories}"
+                elif web_context:
+                    enhanced_system_content += "\n\nIMPORTANT: Use the following web search results in your response:\n"
+                    enhanced_system_content += f"\n{web_context}"
 
-        # Create messages with enhanced system prompt
-        enhanced_messages = [
-            {
-                "role": "system",
-                "content": enhanced_system_content
-            }
-        ]
+            # Create messages with enhanced system prompt
+            enhanced_messages = [
+                {
+                    "role": "system",
+                    "content": enhanced_system_content
+                }
+            ]
 
-        # Add conversation history - keep more history for context
-        history_messages = messages[1:] if len(messages) > 1 else []
-        enhanced_messages.extend(history_messages[-5:])  # Keep up to 5 recent messages
+            # Add conversation history - keep more history for context
+            if len(messages) > 1:
+                history_messages = messages[1:]
+                # Keep up to 5 recent messages
+                enhanced_messages.extend(history_messages[-5:])
 
-        return enhanced_messages
+            return enhanced_messages
+
+        except Exception as e:
+            print(f"{self.get_time()} Error in create_prompt_with_knowledge: {e}")
+            import traceback
+            traceback.print_exc()
+
+            # Return basic messages on error
+            if not messages or len(messages) == 0:
+                return [{"role": "system", "content": self.system_message["content"]}]
+
+            return [{"role": "system", "content": self.system_message["content"]}] + messages[1:]
 
     def enhance_with_web_knowledge(self, query: str, confidence_data: Dict[str, float], domain: Optional[str] = None, messages: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
@@ -554,6 +608,7 @@ class TinyLlamaChat:
             query: User query
             confidence_data: Confidence metrics from the model
             domain: Optional domain classification
+            messages: Optional conversation history
 
         Returns:
             Web enhancement data
@@ -565,23 +620,47 @@ class TinyLlamaChat:
                 'web_results': []
             }
 
-        # Use the web enhancer to get relevant information
-        enhancement_data = self.web_enhancer.enhance_response(
-            query,
-            confidence_data,
-            domain,
-            process_urls=True
-        )
+        # Safety check for web_enhancer
+        if not hasattr(self.web_enhancer, 'enhance_response'):
+            print(f"{self.get_time()} Web enhancer doesn't have enhance_response method")
+            return {
+                'enhanced': False,
+                'reason': 'web_enhancer_incompatible',
+                'web_results': []
+            }
 
-        # Add to memory if enhancement was successful
-        if enhancement_data.get('enhanced', False):
-            self.web_enhancer.add_web_results_to_memory(
-                self.current_user_id,
+        try:
+            # Use the web enhancer to get relevant information
+            enhancement_data = self.web_enhancer.enhance_response(
                 query,
-                enhancement_data
+                confidence_data,
+                domain,
+                process_urls=True
             )
 
-        return enhancement_data
+            # Add to memory if enhancement was successful
+            if enhancement_data.get('enhanced', False):
+                # Check if add_web_results_to_memory method exists
+                if hasattr(self.web_enhancer, 'add_web_results_to_memory'):
+                    self.web_enhancer.add_web_results_to_memory(
+                        self.current_user_id,
+                        query,
+                        enhancement_data
+                    )
+
+            return enhancement_data
+
+        except Exception as e:
+            print(f"{self.get_time()} Error in enhance_with_web_knowledge: {e}")
+            import traceback
+            traceback.print_exc()
+
+            return {
+                'enhanced': False,
+                'reason': 'error',
+                'error_message': str(e),
+                'web_results': []
+            }
 
     def toggle_web_knowledge(self) -> bool:
         """
@@ -1323,6 +1402,11 @@ class TinyLlamaChat:
 
         except Exception as e:
             print(f"\n{self.get_time()} Streaming setup failed: {e}")
+
+            exc_type, exc_obj, exc_tb = sys.exc_info()
+            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+            print(exc_type, fname, exc_tb.tb_lineno)
+
             return "Error in streaming setup. Please try again."
 
         finally:
@@ -1928,61 +2012,85 @@ class TinyLlamaChat:
             Formatted string of relevant command memories
         """
         # Generate embedding for query
-        query_embedding = self.memory_manager.embedding_function(query) if self.memory_manager.embedding_function else None
-        
-        if not query_embedding:
+        query_embedding = None
+        if hasattr(self.memory_manager, 'embedding_function') and self.memory_manager.embedding_function:
+            try:
+                query_embedding = self.memory_manager.embedding_function(query)
+            except Exception as e:
+                print(f"{self.get_time()} Error generating embedding: {e}")
+
+        if query_embedding is None:
             return ""
 
         # Search memory for related command outputs
-        results = self.memory_manager.retrieve(
-            query=query,
-            memory_types=["command", "tabular_command"],
-            top_k=top_k*2,  # Get more than needed for better filtering
-            min_similarity=0.2,
-            use_fractal=self.memory_manager.use_fractal
-        )
-        
+        memory_types = ["command"]
+        if include_tabular:
+            memory_types.append("tabular_command")
+            memory_types.append("command_tabular")
+
+        try:
+            results = self.memory_manager.retrieve(
+                query=query,
+                memory_types=memory_types,
+                top_k=top_k*2,  # Get more than needed for better filtering
+                min_similarity=0.2,
+                use_fractal=getattr(self.memory_manager, 'use_fractal', True)
+            )
+        except Exception as e:
+            print(f"{self.get_time()} Error retrieving memories: {e}")
+            return ""
+
         # If we have specific command context, prioritize matching commands
         if command_context:
             # Sort results to prioritize command matches
             for result in results:
                 metadata = result.get("metadata", {})
                 stored_command = metadata.get("command", "")
-                
+
                 # Boost score for command matches
                 if commands_match(command_context, stored_command):
-                    result["similarity"] *= 1.2  # 20% boost
-        
+                    current_similarity = result.get("similarity", 0.0)
+                    if isinstance(current_similarity, (int, float)):
+                        result["similarity"] = min(1.0, current_similarity * 1.2)  # 20% boost
+
         # Apply recency bias
         now = datetime.now().timestamp()
         for result in results:
             metadata = result.get("metadata", {})
             timestamp_str = metadata.get("timestamp")
-            
+
             if timestamp_str:
                 try:
                     # Parse timestamp
-                    if 'T' in timestamp_str:
+                    if isinstance(timestamp_str, str) and 'T' in timestamp_str:
                         # ISO format
                         timestamp = datetime.fromisoformat(timestamp_str).timestamp()
                     else:
                         # Direct timestamp
                         timestamp = float(timestamp_str)
-                        
+
                     # Calculate hours age
                     age_hours = (now - timestamp) / 3600
-                    
+
                     # Apply recency boost (more recent = higher score)
                     recency_factor = math.exp(-0.01 * age_hours)  # Exponential decay
                     recency_boost = recency_weight * recency_factor
-                    
+
                     # Apply boost
-                    result["similarity"] = min(1.0, result["similarity"] * (1.0 + recency_boost))
-                except:
-                    pass
-        
+                    current_similarity = result.get("similarity", 0.0)
+                    if isinstance(current_similarity, (int, float)):
+                        result["similarity"] = min(1.0, current_similarity * (1.0 + recency_boost))
+                except Exception as e:
+                    print(f"{self.get_time()} Error calculating recency: {e}")
+
         # Re-sort based on adjusted scores
-        results.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+        def get_similarity(result):
+            sim = result.get("similarity", 0)
+            if hasattr(sim, 'item'):  # Convert numpy values to Python float
+                return float(sim.item())
+            return float(sim)
+
+        results.sort(key=get_similarity, reverse=True)
         
         # Format the results for display
         return self._format_command_memories(results[:top_k], query, command_context)
