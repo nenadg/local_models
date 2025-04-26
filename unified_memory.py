@@ -152,7 +152,7 @@ class UnifiedMemoryManager:
         self.load()
     
     def get_time(self):
-        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]") + ' [Memory]'
 
     def add(self, 
            content: str, 
@@ -393,7 +393,7 @@ class UnifiedMemoryManager:
             batch_size=8,  # Process 8 texts at a time
             cleanup=True   # Clean up between batches
         )
-    
+
     def _apply_sharpening(self, similarity: float, sharpening_factor: Optional[float] = None) -> float:
         """
         Apply non-linear sharpening to similarity scores to increase contrast.

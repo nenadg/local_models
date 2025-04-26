@@ -1004,7 +1004,7 @@ class TinyLlamaChat:
         # We only support streaming now, simplifies the code
 
         fallback_message_streamed = False
-        fd = None
+        # fd = None
         
         try:
             # heatmap = TerminalHeatmap(self.tokenizer, use_background=False)
@@ -1126,10 +1126,10 @@ class TinyLlamaChat:
             thread.daemon = True
             thread.start()
 
-            fd = sys.stdin.fileno()
-            self.old_settings = termios.tcgetattr(fd)
-            # tty.setraw(fd)
-            tty.setcbreak(fd)
+            # fd = sys.stdin.fileno()
+            # self.old_settings = termios.tcgetattr(fd)
+            # ## not needed - tty.setraw(fd)
+            # tty.setcbreak(fd)
 
             # Initialize response
             complete_response = ""
@@ -1154,14 +1154,14 @@ class TinyLlamaChat:
 
             try:
                 while True:
-                    if select.select([sys.stdin], [], [], 0)[0]:
-                        c = sys.stdin.read(1)
-                        if c == '\x03':  # Ctrl+C
-                            self.stop_event.set()
-                            print("\n{self.get_time()} Canceled by user")
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-                            break
+                    # if select.select([sys.stdin], [], [], 0)[0]:
+                    #     c = sys.stdin.read(1)
+                    #     if c == '\x03':  # Ctrl+C
+                    #         self.stop_event.set()
+                    #         print("\n{self.get_time()} Canceled by user")
+                    #         if torch.cuda.is_available():
+                    #             torch.cuda.empty_cache()
+                    #         break
 
                     token = next(iter(streamer), None)
 
@@ -1338,7 +1338,7 @@ class TinyLlamaChat:
 
                                 return self.mcp_handler.finalize_streaming(complete_response)
 
-                termios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
+                # termios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
                 # Handle any remaining tokens
                 if token_buffer:
                     print(token_buffer, end="", flush=True)
@@ -1401,6 +1401,11 @@ class TinyLlamaChat:
 
             self.last_token_confidences = token_confidences
 
+        except KeyboardInterrupt:
+            print(f"\n{self.get_time()} Exiting due to keyboard interrupt...")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         except Exception as e:
             print(f"\n{self.get_time()} Streaming setup failed: {e}")
 
@@ -1424,7 +1429,7 @@ class TinyLlamaChat:
                 self.confidence_metrics.add_token_score(dummy_logits, 0)
 
             self.resource_manager.clear_cache()
-            termios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
+            #ytermios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
 
 
     def ensure_metrics(self, response_length=None):
@@ -2639,7 +2644,7 @@ def main():
                 continue
 
             elif user_input.lower() == '!toggle-memory':
-                is_enabled = chat.memory_manager.toggle_auto_memorize()
+                is_enabled = chat.toggle_auto_memorize()
                 print(f"{chat.get_time()} Automatic memorization {'enabled' if is_enabled else 'disabled'}")
                 continue
 
@@ -2741,57 +2746,6 @@ def main():
                     print(f"{chat.get_time()} Usage: !compare-queries: first query | second query")
                 continue
 
-            elif user_input.lower().startswith('!create-domain:'):
-                domain_info = user_input[14:].strip()
-                parts = domain_info.split('|')
-                name = parts[0].strip()
-                description = parts[1].strip() if len(parts) > 1 else ""
-                domain_id = chat.create_knowledge_domain(name, description)
-                if domain_id:
-                    print(f"{chat.get_time()} Created domain: {name} (ID: {domain_id})")
-                else:
-                    print(f"{chat.get_time()} Failed to create domain")
-                continue
-
-            elif user_input.lower().startswith('!load-domain:'):
-                domain_id = user_input[13:].strip()
-                success = chat.load_knowledge_domain(domain_id)
-                if success:
-                    print(f"{chat.get_time()} Loaded domain: {domain_id}")
-                else:
-                    print(f"{chat.get_time()} Failed to load domain: {domain_id}")
-                continue
-
-            elif user_input.lower().startswith('!list-domains'):
-                if hasattr(chat.memory_manager, 'knowledge_registry'):
-                    domains = chat.memory_manager.knowledge_registry.list_domains()
-                    print("\nAvailable Knowledge Domains:")
-                    for domain in domains:
-                        print(f"{chat.get_time()} - {domain['name']} (ID: {domain['domain_id']})")
-                        print(f"{chat.get_time()}   Description: {domain['description']}")
-                        print(f"{chat.get_time()}   Items: {domain['stats'].get('total_items', 0)}")
-                else:
-                    print("Knowledge registry not available")
-                continue
-
-            elif user_input.lower().startswith('!extract-knowledge:'):
-                text = user_input[18:].strip()
-                if not text:
-                    print("Please provide text to extract knowledge from")
-                else:
-                    knowledge_items = chat.extract_knowledge_from_text(text, "user_input")
-                    print(f"{chat.get_time()} Extracted {len(knowledge_items)} knowledge items:")
-                    for i, item in enumerate(knowledge_items[:5]):  # Show first 5
-                        print(f"{chat.get_time()} {i+1}. Type: {item['type']}")
-                        print(f"{chat.get_time()}    Content: {item['content']}")
-                        print(f"{chat.get_time()}    Confidence: {item['metadata']['confidence']}")
-
-                    if chat.current_domain_id:
-                        add_to_domain = input(f"Add to current domain '{chat.current_domain_id}'? (y/n): ")
-                        if add_to_domain.lower() == 'y':
-                            count = chat.add_knowledge_to_domain(knowledge_items)
-                            print(f"{chat.get_time()} Added {count} knowledge items to domain {chat.current_domain_id}")
-                continue
 
             # Add user message to conversation
             user_message = {"role": "user", "content": user_input}
@@ -2915,10 +2869,10 @@ def main():
             # finally:
             #     chat.cleanup()
 
-    except KeyboardInterrupt:
-        print(f"\n{chat.get_time()} Exiting due to keyboard interrupt...")
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    # except KeyboardInterrupt:
+    #     print(f"\n{chat.get_time()} Exiting due to keyboard interrupt...")
+    #     if torch.cuda.is_available():
+    #         torch.cuda.empty_cache()
     except Exception as e:
         print(f"\n{chat.get_time()} Unexpected error: {e}")
     finally:

@@ -31,7 +31,7 @@ class WeightedMemoryIntegrator:
         }
 
     def get_time(self):
-        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]") + ' [Integrator]'
 
     def retrieve_and_integrate(self, user_id: str, query: str) -> Dict[str, Any]:
         """
@@ -51,7 +51,7 @@ class WeightedMemoryIntegrator:
             # Get memories with domain-specific settings using batch processing
             print(f"{self.get_time()} [Debug] Starting memory retrieval for query: {query[:30]}...")
             memory_text = self._retrieve_memories_with_batch(user_id, query, settings)
-            print(f"{self.get_time()} [Debug]: Memory retrieval complete, got {len(memory_text)} chars")
+            print(f"{self.get_time()} [Debug] Memory retrieval complete, got {len(memory_text)} chars")
 
             # Apply domain-specific post-processing if needed
             if settings.get('post_process', False) and settings.get('domain', '') in self.post_processors:

@@ -82,7 +82,7 @@ class WebKnowledgeEnhancer:
 
     def get_time(self):
         """Get formatted timestamp for logging"""
-        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]") + ' [Web]'
 
     def should_enhance_with_web_knowledge(self,
                                          query: str,
@@ -157,7 +157,7 @@ class WebKnowledgeEnhancer:
             timestamp, results = self.search_cache[cache_key]
             if time.time() - timestamp < self.cache_ttl:
                 self.cache_hits += 1
-                print(f"{self.get_time()} [Web] Cache hit for query: '{query}'")
+                print(f"{self.get_time()} Cache hit for query: '{query}'")
                 return results
 
         # Increment search counter
@@ -211,8 +211,10 @@ class WebKnowledgeEnhancer:
 
             # Check response
             if response.status_code != 200:
-                print(f"{self.get_time()} [Web] Error: DuckDuckGo returned status code {response.status_code}")
+                print(f"{self.get_time()} Error: DuckDuckGo returned status code {response.status_code}")
                 return []
+
+            print(f"{self.get_time()} Searching {url}")
 
             # Parse HTML
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -250,13 +252,13 @@ class WebKnowledgeEnhancer:
                         'source': 'duckduckgo'
                     })
                 except Exception as e:
-                    print(f"{self.get_time()} [Web] Error extracting result: {e}")
+                    print(f"{self.get_time()} Error extracting result: {e}")
 
-            print(f"{self.get_time()} [Web] Found {len(results)} results from DuckDuckGo for query: '{query}'")
+            print(f"{self.get_time()} Found {len(results)} results from DuckDuckGo for query: '{query}'")
             return results
 
         except Exception as e:
-            print(f"{self.get_time()} [Web] Error searching DuckDuckGo: {e}")
+            print(f"{self.get_time()} Error searching DuckDuckGo: {e}")
             return []
 
     def _search_google(self, query: str, num_results: int) -> List[Dict[str, Any]]:
@@ -294,7 +296,7 @@ class WebKnowledgeEnhancer:
 
             # Check response
             if response.status_code != 200:
-                print(f"{self.get_time()} [Web] Error: Google returned status code {response.status_code}")
+                print(f"{self.get_time()} Error: Google returned status code {response.status_code}")
                 return []
 
             # Parse HTML
@@ -338,13 +340,13 @@ class WebKnowledgeEnhancer:
                         'source': 'google'
                     })
                 except Exception as e:
-                    print(f"{self.get_time()} [Web] Error extracting result: {e}")
+                    print(f"{self.get_time()} Error extracting result: {e}")
 
-            print(f"{self.get_time()} [Web] Found {len(results)} results from Google for query: '{query}'")
+            print(f"{self.get_time()} Found {len(results)} results from Google for query: '{query}'")
             return results
 
         except Exception as e:
-            print(f"{self.get_time()} [Web] Error searching Google: {e}")
+            print(f"{self.get_time()} Error searching Google: {e}")
             return []
 
     def fetch_content(self, url: str, timeout: int = 10) -> Optional[str]:
@@ -377,7 +379,7 @@ class WebKnowledgeEnhancer:
 
             # Check response
             if response.status_code != 200:
-                print(f"{self.get_time()} [Web] Error: URL {url} returned status code {response.status_code}")
+                print(f"{self.get_time()} Error: URL {url} returned status code {response.status_code}")
                 return None
 
             # Parse HTML
@@ -400,7 +402,7 @@ class WebKnowledgeEnhancer:
             return text
 
         except Exception as e:
-            print(f"{self.get_time()} [Web] Error fetching content from {url}: {e}")
+            print(f"{self.get_time()} Error fetching content from {url}: {e}")
             return None
 
     def create_seo_friendly_query(self, query: str) -> str:
@@ -540,7 +542,7 @@ class WebKnowledgeEnhancer:
         try:
             # Check if memory manager is available
             if not self.memory_manager:
-                print(f"{self.get_time()} [Web] Memory manager not available")
+                print(f"{self.get_time()} Memory manager not available")
                 return {
                     'enhanced': False,
                     'reason': 'web_knowledge_disabled',
@@ -551,15 +553,15 @@ class WebKnowledgeEnhancer:
             has_embeddings = (hasattr(self.memory_manager, 'embedding_function') and
                              self.memory_manager.embedding_function is not None)
 
-            print(f"{self.get_time()} [Web] Embedding function available: {has_embeddings}")
+            print(f"{self.get_time()} Embedding function available: {has_embeddings}")
 
             # Create an SEO-friendly query for better search results
             seo_friendly_query = self.create_seo_friendly_query(query)
-            print(f"{self.get_time()} [Web] SEO-friendly query: {seo_friendly_query}")
+            print(f"{self.get_time()} SEO-friendly query: {seo_friendly_query}")
 
             # Search the web
             search_results = self.search_web(seo_friendly_query)
-            print(f"{self.get_time()} [Web] Search returned {len(search_results)} results")
+            print(f"{self.get_time()} Search returned {len(search_results)} results")
 
             if not search_results:
                 return {
@@ -570,7 +572,7 @@ class WebKnowledgeEnhancer:
 
             # Process results to fetch full content if requested
             if process_urls and search_results:
-                print(f"{self.get_time()} [Web] Fetching full content from URLs")
+                print(f"{self.get_time()} Fetching full content from URLs")
                 processed_results = []
 
                 # Use ThreadPoolExecutor for concurrent processing
@@ -592,28 +594,28 @@ class WebKnowledgeEnhancer:
                                 result_with_content['content'] = content
                                 processed_results.append(result_with_content)
                         except Exception as e:
-                            print(f"{self.get_time()} [Web] Error processing URL {result['url']}: {e}")
+                            print(f"{self.get_time()} Error processing URL {result['url']}: {e}")
 
                 if processed_results:
                     search_results = processed_results
-                    print(f"{self.get_time()} [Web] Processed {len(processed_results)} results with content")
+                    print(f"{self.get_time()} Processed {len(processed_results)} results with content")
 
             # Calculate relevance scores if embeddings are available
             if has_embeddings:
                 try:
-                    print(f"{self.get_time()} [Web] Ranking results by similarity")
+                    print(f"{self.get_time()} Ranking results by similarity")
                     scored_results = self._rank_results_by_similarity(query, search_results)
 
                     # Filter to top results
                     filtered_results = scored_results[:self.max_results]
-                    print(f"{self.get_time()} [Web] Ranked and filtered to {len(filtered_results)} results")
+                    print(f"{self.get_time()} Ranked and filtered to {len(filtered_results)} results")
                 except Exception as e:
-                    print(f"{self.get_time()} [Web] Error ranking results: {e}")
+                    print(f"{self.get_time()} Error ranking results: {e}")
                     # Fall back to search order
                     filtered_results = search_results[:self.max_results]
             else:
                 # If no embedding function, just use search order
-                print(f"{self.get_time()} [Web] No embedding function, using search order")
+                print(f"{self.get_time()} No embedding function, using search order")
                 filtered_results = search_results[:self.max_results]
 
                 # Add default similarity scores
@@ -638,7 +640,7 @@ class WebKnowledgeEnhancer:
             return enhancement_data
 
         except Exception as e:
-            print(f"{self.get_time()} [Web] Error in enhance_response: {e}")
+            print(f"{self.get_time()} Error in enhance_response: {e}")
             import traceback
             traceback.print_exc()
 
@@ -665,9 +667,9 @@ class WebKnowledgeEnhancer:
         try:
             query_embedding = self.memory_manager.embedding_function(query)
             # Debug info
-            print(f"{self.get_time()} [Web] Generated query embedding shape: {query_embedding.shape if hasattr(query_embedding, 'shape') else 'N/A'}")
+            print(f"{self.get_time()} Generated query embedding shape: {query_embedding.shape if hasattr(query_embedding, 'shape') else 'N/A'}")
         except Exception as e:
-            print(f"{self.get_time()} [Web] Error generating query embedding: {e}")
+            print(f"{self.get_time()} Error generating query embedding: {e}")
             # If we can't generate embeddings, just return results in original order
             for result in results:
                 result['similarity'] = 0.5
@@ -686,7 +688,7 @@ class WebKnowledgeEnhancer:
 
                 # Debug info
                 if len(scored_results) == 0:  # Only for first result to avoid log spam
-                    print(f"{self.get_time()} [Web] Generated result embedding shape: {result_embedding.shape if hasattr(result_embedding, 'shape') else 'N/A'}")
+                    print(f"{self.get_time()} Generated result embedding shape: {result_embedding.shape if hasattr(result_embedding, 'shape') else 'N/A'}")
 
                 # Calculate cosine similarity with safe conversion
                 similarity = self._calculate_similarity(query_embedding, result_embedding)
@@ -707,7 +709,7 @@ class WebKnowledgeEnhancer:
 
                 scored_results.append(result_with_score)
             except Exception as e:
-                print(f"{self.get_time()} [Web] Error ranking result: {e}")
+                print(f"{self.get_time()} Error ranking result: {e}")
                 # Add with default similarity
                 result_copy = result.copy()
                 result_copy['similarity'] = 0.5
