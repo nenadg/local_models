@@ -96,7 +96,9 @@ class UnifiedMemoryManager:
                 embedding_dim: int = 384,
                 use_fractal: bool = False,
                 max_fractal_levels: int = 3,
-                auto_save: bool = True):
+                auto_save: bool = True,
+                level_sharpening_factors: Optional[Dict[int, float]] = None,
+                enable_entity_separation: bool = True):
         """
         Initialize the unified memory manager.
         
@@ -114,7 +116,22 @@ class UnifiedMemoryManager:
         self.use_fractal = use_fractal
         self.max_fractal_levels = max_fractal_levels
         self.auto_save = auto_save
+        self.enable_entity_separation = enable_entity_separation
+
+        # Set default level sharpening factors if not provided
+        if level_sharpening_factors is None:
+            self.level_sharpening_factors = {
+                0: 0.3,  # Base level (original embeddings)
+                1: 0.4,  # Level 1 - stronger sharpening for entity type
+                2: 0.5,  # Level 2 - even stronger for domain separation
+                3: 0.6   # Level 3 - strongest for fine-grained distinctions
+            }
+        else:
+            self.level_sharpening_factors = level_sharpening_factors
         
+        # For backward compatibility, set the main sharpening factor
+        self.sharpening_factor = self.level_sharpening_factors.get(0, 0.3)
+
         # Create storage directory if it doesn't exist
         os.makedirs(storage_path, exist_ok=True)
         
@@ -226,54 +243,41 @@ class UnifiedMemoryManager:
                 if self.index is None:
                     self._create_index()
 
-            # Generate all embeddings in parallel
-            all_embeddings = []
-            all_memory_items = []
-            item_ids = []
+            # Extract content for batch embedding processing
+            contents = []
+            valid_items = []
+
+            for item_dict in items:
+                content = item_dict.get('content', '')
+                if content and content.strip():
+                    contents.append(content)
+                    valid_items.append(item_dict)
+
+            if not contents:
+                return [None] * len(items)
 
             try:
-                import concurrent.futures
+                # Generate embeddings in batch
+                print(f"{self.get_time()} Generating {len(contents)} embeddings in batch")
+                all_embeddings = self.batch_embedding_function(contents)
+                print(f"{self.get_time()} Successfully generated {len(all_embeddings)} embeddings")
 
-                # Define embedding generator function
-                def generate_embedding_for_item(item_dict):
-                    content = item_dict.get('content', '')
-                    if not content or not content.strip():
-                        return None, None
-
+                # Create memory items
+                all_memory_items = []
+                for i, (item_dict, embedding) in enumerate(zip(valid_items, all_embeddings)):
                     memory_type = item_dict.get('memory_type', 'general')
                     source = item_dict.get('source', 'conversation')
                     metadata = item_dict.get('metadata', {})
 
-                    # Generate embedding
-                    if self.embedding_function:
-                        try:
-                            embedding = self.embedding_function(content)
-                            # Create memory item
-                            item = MemoryItem(
-                                content=content,
-                                embedding=embedding,
-                                memory_type=memory_type,
-                                source=source,
-                                metadata=metadata
-                            )
-                            return item, embedding
-                        except Exception:
-                            pass
-
-                    return None, None
-
-                # Process items in parallel (up to 8 at a time)
-                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-                    futures = [executor.submit(generate_embedding_for_item, item) for item in items]
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            item, embedding = future.result()
-                            if item and embedding is not None:
-                                all_memory_items.append(item)
-                                all_embeddings.append(embedding)
-                        except Exception:
-                            # Skip failed items
-                            item_ids.append(None)
+                    # Create memory item
+                    item = MemoryItem(
+                        content=item_dict['content'],
+                        embedding=embedding,
+                        memory_type=memory_type,
+                        source=source,
+                        metadata=metadata
+                    )
+                    all_memory_items.append(item)
 
                 # Determine whether to use fractal embeddings
                 use_fractal_here = self.use_fractal if use_fractal is None else use_fractal
@@ -284,6 +288,7 @@ class UnifiedMemoryManager:
                         self._add_fractal_embeddings(item)
 
                 # Add all items to storage at once
+                item_ids = []
                 if all_memory_items:
                     # Prepare normalized embeddings for the main index
                     normalized_embeddings = []
@@ -331,39 +336,95 @@ class UnifiedMemoryManager:
                 if self.auto_save:
                     self.save()
 
-                return item_ids
+                # Make sure we return one ID (or None) for each input item
+                result_ids = [None] * len(items)
+                valid_indices = [i for i, item in enumerate(items) if item.get('content', '').strip()]
+                for i, valid_idx in enumerate(valid_indices):
+                    if i < len(item_ids):
+                        result_ids[valid_idx] = item_ids[i]
 
+                return result_ids
+
+            except Exception as e:
+                print(f"{self.get_time()} Error in batch processing: {e}")
+                import traceback
+                traceback.print_exc()
+
+                # Fall back to individual processing
+                print(f"{self.get_time()} Falling back to individual processing")
+                item_ids = []
+                for item in items:
+                    item_id = self.add(
+                        content=item.get("content", ""),
+                        memory_type=item.get("memory_type", "general"),
+                        source=item.get("source", "conversation"),
+                        metadata=item.get("metadata", {}),
+                        use_fractal=use_fractal
+                    )
+                    item_ids.append(item_id)
+
+                return item_ids
             finally:
                 # Restore original auto_save setting
                 self.auto_save = original_auto_save
 
-    def _apply_sharpening(self, similarity: float, sharpening_factor: float) -> float:
+    def batch_embedding_function(self, texts: List[str]) -> List[np.ndarray]:
+        """
+        Generate embeddings for multiple texts in batches.
+
+        Args:
+            texts: List of texts to embed
+
+        Returns:
+            List of embedding vectors
+        """
+        if not self.embedding_function:
+            print(f"{self.get_time()} No embedding function available")
+            # Return empty embeddings with correct dimensionality
+            return [np.zeros(self.embedding_dim) for _ in texts]
+
+        # Import the batch processing function
+        from batch_utils import batch_embedding_processing
+
+        # Use batch processing with our embedding function
+        return batch_embedding_processing(
+            self.embedding_function,
+            texts,
+            batch_size=8,  # Process 8 texts at a time
+            cleanup=True   # Clean up between batches
+        )
+    
+    def _apply_sharpening(self, similarity: float, sharpening_factor: Optional[float] = None) -> float:
         """
         Apply non-linear sharpening to similarity scores to increase contrast.
 
         Args:
             similarity: Raw similarity score (0.0-1.0)
-            sharpening_factor: Strength of sharpening effect (0.0-1.0)
+            sharpening_factor: Strength of sharpening effect (0.0-1.0),
+                               uses default if None
 
         Returns:
             Sharpened similarity score
         """
+        # Use provided factor or default
+        factor = sharpening_factor if sharpening_factor is not None else self.sharpening_factor
+
         # Skip if no sharpening requested
-        if sharpening_factor <= 0:
+        if factor <= 0:
             return similarity
 
         # Apply non-linear sharpening
         if similarity > 0.6:
             # Boost high similarities (more confident matches)
-            boost = (similarity - 0.6) * sharpening_factor * 2.0
+            boost = (similarity - 0.6) * factor * 2.0
             sharpened = min(1.0, similarity + boost)
         elif similarity < 0.4:
             # Reduce low similarities (less confident matches)
-            reduction = (0.4 - similarity) * sharpening_factor * 2.0
+            reduction = (0.4 - similarity) * factor * 2.0
             sharpened = max(0.0, similarity - reduction)
         else:
             # Middle range - moderate effect
-            deviation = (similarity - 0.5) * sharpening_factor
+            deviation = (similarity - 0.5) * factor
             sharpened = 0.5 + deviation
 
         return sharpened
@@ -495,11 +556,10 @@ class UnifiedMemoryManager:
             except Exception as e:
                 print(f"{self.get_time()} Error generating fractal embedding for level {level}: {e}")
                 # Continue with other levels
-    
-    # In UnifiedMemoryManager._generate_level_embedding
+
     def _generate_level_embedding(self, base_embedding: np.ndarray, level: int) -> np.ndarray:
         """
-        Generate a level-specific embedding with improved fractal transformations.
+        Generate a level-specific embedding with enhanced semantic distinctions.
 
         Args:
             base_embedding: The original embedding vector
@@ -515,13 +575,40 @@ class UnifiedMemoryManager:
         if not hasattr(self, '_rotation_matrices'):
             # Create rotation matrices once and cache them
             self._rotation_matrices = {}
+            self._level_biases = {}
+
             for i in range(1, self.max_fractal_levels + 1):
                 # Create a rotation matrix with fixed seed for determinism
                 np.random.seed(42 + i)  # Fixed seed per level
-                rotation = np.random.normal(0, 0.1 * i, (self.embedding_dim, self.embedding_dim))
+
+                # Create rotation matrix - different approach per level
+                if i == 1:
+                    # Level 1: Focus on entity type separation (person, organization, concept)
+                    # Use more structured rotation that preserves some original dimensions
+                    rotation = np.random.normal(0, 0.15 * i, (self.embedding_dim, self.embedding_dim))
+                    # Add identity matrix component to preserve some original information
+                    rotation = rotation + np.eye(self.embedding_dim) * 0.8
+                elif i == 2:
+                    # Level 2: Focus on domain separation (sports, religion, arts, etc)
+                    # Use more random rotation for different perspective
+                    rotation = np.random.normal(0, 0.2 * i, (self.embedding_dim, self.embedding_dim))
+                    # Add some structure with block patterns for domain emphasis
+                    block_size = self.embedding_dim // 4
+                    for j in range(0, self.embedding_dim, block_size):
+                        end = min(j + block_size, self.embedding_dim)
+                        rotation[j:end, j:end] += np.eye(end-j) * 0.4
+                else:
+                    # Level 3+: Focus on fine-grained distinctions
+                    # Use more aggressive transformation
+                    rotation = np.random.normal(0, 0.25 * i, (self.embedding_dim, self.embedding_dim))
+
                 # Ensure the matrix is orthogonal (proper rotation)
                 u, _, vh = np.linalg.svd(rotation, full_matrices=False)
                 self._rotation_matrices[i] = u @ vh
+
+                # Create level-specific bias vector
+                np.random.seed(137 + i)  # Different seed for bias
+                self._level_biases[i] = np.random.normal(0, 0.02 * i, base_embedding.shape)
 
                 # Log creation of matrix
                 print(f"{self.get_time()} Created fractal rotation matrix for level {i}")
@@ -531,13 +618,27 @@ class UnifiedMemoryManager:
             # Apply the cached rotation
             rotated = np.dot(base_embedding, self._rotation_matrices[level])
 
-            # Add a small level-dependent shift
-            np.random.seed(137 + level)  # Different seed for shift
-            shift = np.random.normal(0, 0.02 * level, rotated.shape)
-            shifted = rotated + shift
+            # Apply level-specific bias
+            if level in self._level_biases:
+                shifted = rotated + self._level_biases[level]
+            else:
+                shifted = rotated
+
+            # Apply non-linear transformation (different for each level)
+            if level == 1:
+                # Level 1: Enhance entity type dimensions
+                # Apply mild sigmoid-like function to increase contrast
+                transformed = np.tanh(shifted * 1.2) * 0.8
+            elif level == 2:
+                # Level 2: Enhance domain dimensions
+                # Apply stronger non-linearity
+                transformed = np.sign(shifted) * np.power(np.abs(shifted), 0.8)
+            else:
+                # Level 3+: More aggressive transformation
+                transformed = np.sign(shifted) * np.log(1 + np.abs(shifted) * 1.5)
 
             # Normalize the result
-            normalized = shifted / np.linalg.norm(shifted)
+            normalized = transformed / np.linalg.norm(transformed)
 
             return normalized
         else:
@@ -547,14 +648,156 @@ class UnifiedMemoryManager:
             perturbed = base_embedding + (np.random.normal(0, 0.01 * level, base_embedding.shape) * base_embedding)
             return perturbed / np.linalg.norm(perturbed)
     
-    def _apply_cross_level_verification_with_sharpening(self, result_dict: Dict[str, Dict[str, Any]], sharpening_factor: float):
+    def _group_results_by_entity(self, results: List[Dict[str, Any]], query_embedding: np.ndarray) -> List[Dict[str, Any]]:
         """
-        Boost confidence for items found across multiple levels with enhanced sharpening.
+        Group search results by potential entity/domain and re-rank based on coherence.
+
+        Args:
+            results: Original search results
+            query_embedding: Original query embedding
+
+        Returns:
+            Re-ranked results with better entity separation
+        """
+        if not results or len(results) < 3:
+            return results  # Not enough results to perform grouping
+
+        # Extract text content from results
+        texts = []
+        for result in results:
+            # Use content field if available, otherwise fall back to text
+            content_field = 'content' if 'content' in result else 'text'
+            texts.append(result.get(content_field, ''))
+
+        # Create embeddings for all result texts using batch processing
+        try:
+            result_embeddings = self.batch_embedding_function(texts)
+            print(f"{self.get_time()} Generated {len(result_embeddings)} result embeddings in batch")
+        except Exception as e:
+            print(f"{self.get_time()} Error in batch embedding: {e}")
+            # Fall back to individual processing
+            result_embeddings = []
+            for text in texts:
+                try:
+                    embedding = self.embedding_function(text)
+                    result_embeddings.append(embedding)
+                except Exception as inner_e:
+                    print(f"{self.get_time()} Error generating result embedding: {inner_e}")
+                    # Use a zero embedding as fallback
+                    result_embeddings.append(np.zeros(self.embedding_dim))
+
+        # Convert to numpy array for easier processing
+        result_embeddings = np.array(result_embeddings)
+
+        # Rest of the method remains the same...
+        # Simple clustering using cosine similarity
+        groups = []
+        assigned = set()
+
+        # Start with most similar to query as first group center
+        similarities = []
+        for i, emb in enumerate(result_embeddings):
+            norm_emb = emb / max(np.linalg.norm(emb), 1e-10)
+            norm_query = query_embedding / max(np.linalg.norm(query_embedding), 1e-10)
+            sim = np.dot(norm_emb, norm_query)
+            similarities.append((i, sim))
+
+        # Sort by similarity to query
+        similarities.sort(key=lambda x: x[1], reverse=True)
+
+        # Create groups around the most similar items
+        for i, sim in similarities:
+            if i in assigned:
+                continue
+
+            # Create a new group with this item as center
+            group = [i]
+            assigned.add(i)
+
+            # Find similar items to add to this group
+            center_embedding = result_embeddings[i]
+            center_norm = np.linalg.norm(center_embedding)
+            if center_norm < 1e-10:
+                center_norm = 1e-10
+            center_embedding = center_embedding / center_norm
+
+            for j, other_embedding in enumerate(result_embeddings):
+                if j in assigned or j == i:
+                    continue
+
+                # Calculate similarity
+                other_norm = np.linalg.norm(other_embedding)
+                if other_norm < 1e-10:
+                    other_norm = 1e-10
+                other_embedding = other_embedding / other_norm
+
+                similarity = np.dot(center_embedding, other_embedding)
+
+                # Apply strong sharpening to make grouping more decisive
+                if similarity > 0.7:  # High similarity threshold for grouping
+                    group.append(j)
+                    assigned.add(j)
+
+            groups.append(group)
+
+        # Make sure all items are assigned to some group
+        for i in range(len(results)):
+            if i not in assigned:
+                # Create a singleton group
+                groups.append([i])
+                assigned.add(i)
+
+        # Now rerank the results by group
+        # First, calculate group score (average similarity to query)
+        group_scores = []
+        for group in groups:
+            group_embeddings = [result_embeddings[i] for i in group]
+            group_embedding = np.mean(group_embeddings, axis=0)
+
+            # Normalize
+            group_norm = np.linalg.norm(group_embedding)
+            if group_norm < 1e-10:
+                group_norm = 1e-10
+            group_embedding = group_embedding / group_norm
+
+            # Calculate similarity to query
+            query_norm = np.linalg.norm(query_embedding)
+            if query_norm < 1e-10:
+                query_norm = 1e-10
+            query_embedding_norm = query_embedding / query_norm
+
+            similarity = np.dot(group_embedding, query_embedding_norm)
+
+            # Apply strong sharpening to group score
+            sharpened = self._apply_sharpening(similarity, 0.5)  # Strong sharpening for groups
+
+            group_scores.append((group, sharpened))
+
+        # Sort groups by score
+        group_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # Reconstruct the result list by group
+        reranked_results = []
+        for group, score in group_scores:
+            # Add items from this group
+            for i in group:
+                result = results[i].copy()
+                # Add metadata about grouping
+                result["group_score"] = float(score)
+                result["entity_group"] = len(reranked_results)  # Group identifier
+                # Apply a boost based on group score
+                result["similarity"] = result.get("similarity", 0.5) * (1.0 + score * 0.2)
+                reranked_results.append(result)
+
+        return reranked_results
+
+    def _apply_cross_level_verification_with_sharpening(self, result_dict: Dict[str, Dict[str, Any]]):
+        """
+        Boost confidence for items found across multiple levels with enhanced level-specific sharpening.
         This rewards consistent results across different semantic variations.
 
         Args:
             result_dict: Dictionary of search results
-            sharpening_factor: Base sharpening factor to apply
         """
         # Group results by item
         item_levels = {}
@@ -563,21 +806,37 @@ class UnifiedMemoryManager:
                 item_levels[item_id] = []
             item_levels[item_id].append((result["level"], result["raw_similarity"]))
 
-        # Apply boost for items found in multiple levels with sharpening
+        # Apply boost for items found in multiple levels with level-specific sharpening
         for item_id, level_info in item_levels.items():
             if len(level_info) > 1:
-                # Calculate cross-level verification score
-                level_count = len(level_info)
-                avg_similarity = sum(sim for _, sim in level_info) / level_count
+                # Calculate weighted average similarity based on level
+                weighted_sum = 0.0
+                total_weight = 0.0
 
-                # Apply sharpening to the average similarity
-                sharpened_avg = self._apply_sharpening(avg_similarity, sharpening_factor)
+                # Track levels where this item was found
+                found_in_levels = []
+
+                for level, sim in level_info:
+                    # Determine weight based on level
+                    # Give higher weight to higher levels for entity separation
+                    level_weight = 1.0 + (level * 0.2)  # Level 0: 1.0, Level 1: 1.2, Level 2: 1.4, etc.
+
+                    # Get level-specific sharpening factor
+                    level_factor = self.level_sharpening_factors.get(level, self.sharpening_factor)
+
+                    # Apply level-specific sharpening
+                    sharpened_sim = self._apply_sharpening(sim, level_factor)
+
+                    weighted_sum += sharpened_sim * level_weight
+                    total_weight += level_weight
+
+                    found_in_levels.append(level)
+
+                # Calculate weighted average
+                weighted_avg = weighted_sum / total_weight if total_weight > 0 else 0.0
 
                 # Apply bonus based on level agreement (up to 20% boost)
-                cross_level_bonus = min(0.2, 0.05 * level_count)
-
-                # Apply an additional sharpening boost
-                sharpening_boost = 0.1 * sharpened_avg * sharpening_factor
+                cross_level_bonus = min(0.2, 0.05 * len(level_info))
 
                 # Apply the combined bonus
                 if item_id in result_dict:
@@ -585,14 +844,14 @@ class UnifiedMemoryManager:
 
                     # Apply greater boost for cross-level consistency in high similarity results
                     if current_sim > 0.7:
-                        boost_factor = 1.0 + cross_level_bonus + sharpening_boost
+                        boost_factor = 1.0 + cross_level_bonus + (weighted_avg * 0.1)
                     else:
-                        boost_factor = 1.0 + (cross_level_bonus + sharpening_boost) * 0.5
+                        boost_factor = 1.0 + (cross_level_bonus + (weighted_avg * 0.1)) * 0.6
 
                     result_dict[item_id]["similarity"] = min(1.0, current_sim * boost_factor)
                     result_dict[item_id]["cross_level_bonus"] = cross_level_bonus
-                    result_dict[item_id]["sharpening_boost"] = sharpening_boost
-                    result_dict[item_id]["found_in_levels"] = [lvl for lvl, _ in level_info]
+                    result_dict[item_id]["weighted_avg"] = weighted_avg
+                    result_dict[item_id]["found_in_levels"] = found_in_levels
 
     def retrieve(self, 
                 query: str,
@@ -773,7 +1032,7 @@ class UnifiedMemoryManager:
                       top_k: int,
                       min_similarity: float) -> List[Dict[str, Any]]:
         """
-        Perform enhanced fractal search across multiple levels with proper sharpening.
+        Perform enhanced fractal search across multiple levels with entity separation.
 
         Args:
             normalized_query: Normalized query embedding vector
@@ -783,8 +1042,8 @@ class UnifiedMemoryManager:
         Returns:
             List of search results with similarity scores
         """
-        # Get sharpening factor from instance variable
-        sharpening_factor = getattr(self, 'sharpening_factor', 0.3)
+        # Use level-specific sharpening factors
+        base_sharpening_factor = self.level_sharpening_factors.get(0, self.sharpening_factor)
 
         # Level weights (decreasing importance for higher levels)
         level_weights = [1.0, 0.8, 0.6, 0.4, 0.2]
@@ -804,14 +1063,13 @@ class UnifiedMemoryManager:
             print(f"{self.get_time()} Warning: No items in index, cannot perform search")
             return []
 
+        result_dict = {}
+
         try:
             base_similarities, base_indices = self.index.search(normalized_query, search_k)
 
             # Debug information
             print(f"{self.get_time()} Base search returned {len(base_indices[0])} results")
-
-            # Track results to avoid duplicates
-            result_dict = {}
 
             # Process base results with sharpening
             for i, idx in enumerate(base_indices[0]):
@@ -821,9 +1079,9 @@ class UnifiedMemoryManager:
 
                     item = self.items[idx]
 
-                    # Apply sharpening to raw similarity
+                    # Apply sharpening to raw similarity using base level factor
                     raw_similarity = float(base_similarities[0][i])
-                    sharpened_similarity = self._apply_sharpening(raw_similarity, sharpening_factor)
+                    sharpened_similarity = self._apply_sharpening(raw_similarity, base_sharpening_factor)
                     # Apply level weight after sharpening
                     similarity = sharpened_similarity * level_weights[0]
 
@@ -857,6 +1115,9 @@ class UnifiedMemoryManager:
 
                 print(f"{self.get_time()} Searching level {level} index with {self.fractal_indices[level].ntotal} items")
 
+                # Get level-specific sharpening factor
+                level_factor = self.level_sharpening_factors.get(level, self.sharpening_factor)
+
                 # Create level-specific query variation
                 level_query = self._generate_level_embedding(normalized_query[0], level)
                 level_query = np.array([level_query], dtype=np.float32)
@@ -873,18 +1134,15 @@ class UnifiedMemoryManager:
                     # Get level weight
                     weight = level_weights[min(level, len(level_weights)-1)]
 
-                    # Process results with sharpening
+                    # Process results with level-specific sharpening
                     for i, idx in enumerate(indices[0]):
                         if idx != -1 and similarities[0][i] > min_similarity:
                             if idx in self.deleted_ids:
                                 continue
 
-                            # Apply sharpening to raw similarity
+                            # Apply level-specific sharpening to raw similarity
                             raw_similarity = float(similarities[0][i])
-
-                            # Additional sharpening for higher levels to encourage diversity
-                            level_adjusted_factor = sharpening_factor * (1.0 + (level * 0.05))
-                            sharpened_similarity = self._apply_sharpening(raw_similarity, level_adjusted_factor)
+                            sharpened_similarity = self._apply_sharpening(raw_similarity, level_factor)
 
                             # Apply level weight after sharpening
                             weighted_similarity = sharpened_similarity * weight
@@ -918,9 +1176,9 @@ class UnifiedMemoryManager:
             print(f"{self.get_time()} Error in base search: {e}")
             return []
 
-        # Apply cross-level verification with enhanced sharpening
+        # Apply enhanced cross-level verification with level-specific sharpening
         try:
-            self._apply_cross_level_verification_with_sharpening(result_dict, sharpening_factor)
+            self._apply_cross_level_verification_with_sharpening(result_dict)
         except Exception as e:
             print(f"{self.get_time()} Error applying cross-level verification: {e}")
             # Continue even if verification fails
@@ -933,6 +1191,16 @@ class UnifiedMemoryManager:
 
         # Sort by similarity
         results.sort(key=lambda x: x["similarity"], reverse=True)
+
+        # Apply entity separation if enabled
+        if self.enable_entity_separation and len(results) > 2 and normalized_query.shape[0] == 1:
+            try:
+                # Perform entity grouping and re-ranking
+                results = self._group_results_by_entity(results, normalized_query[0])
+                print(f"{self.get_time()} Applied entity separation, grouped into {len(set(r.get('entity_group', -1) for r in results))} entity groups")
+            except Exception as e:
+                print(f"{self.get_time()} Error during entity separation: {e}")
+                # Continue with original results if separation fails
 
         return results
 

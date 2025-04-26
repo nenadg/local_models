@@ -48,9 +48,9 @@ class WeightedMemoryIntegrator:
         settings = self._get_settings(query)
 
         try:
-            # Get memories with domain-specific settings
+            # Get memories with domain-specific settings using batch processing
             print(f"{self.get_time()} [Debug] Starting memory retrieval for query: {query[:30]}...")
-            memory_text = self._retrieve_memories(user_id, query, settings)
+            memory_text = self._retrieve_memories_with_batch(user_id, query, settings)
             print(f"{self.get_time()} [Debug]: Memory retrieval complete, got {len(memory_text)} chars")
 
             # Apply domain-specific post-processing if needed
@@ -78,6 +78,75 @@ class WeightedMemoryIntegrator:
                 'memory_text': "",
                 'settings': settings
             }
+
+
+    def _retrieve_memories_with_batch(self, user_id: str, query: str, settings: Dict[str, Any]) -> str:
+        """
+        Enhanced memory retrieval using batch processing.
+
+        Args:
+            user_id: The user ID
+            query: The query string
+            settings: Domain-specific settings
+
+        Returns:
+            Formatted memory text
+        """
+        # Get retrieval settings
+        retrieve_count = settings.get('retrieval_count', 8)
+        sharpening_factor = float(settings.get('sharpening_factor', 0.3))
+
+        # Determine whether to apply sharpening
+        apply_sharpening = False
+        if hasattr(self.memory_manager, 'use_fractal'):
+            if isinstance(self.memory_manager.use_fractal, bool):
+                apply_sharpening = self.memory_manager.use_fractal
+            else:
+                # Handle case where use_fractal might be a numpy array or other non-bool
+                apply_sharpening = bool(self.memory_manager.use_fractal)
+
+        # Get the store
+        store = self.memory_manager
+
+        if not store or not hasattr(store, 'retrieve'):
+            print(f"{self.get_time()} Memory store not properly initialized, returning empty results")
+            return ""
+
+        try:
+            # Check if index exists and is initialized
+            if hasattr(store, 'index') and store.index is None:
+                print(f"{self.get_time()} Memory index not initialized yet, returning empty results")
+                return ""
+        except Exception as e:
+            print(f"{self.get_time()} Error checking store index: {e}")
+            # Continue and let the retrieve method handle the error
+
+        try:
+            # Check if the memory manager has batch embedding support
+            if hasattr(self.memory_manager, 'batch_embedding_function'):
+                print(f"{self.get_time()} Using batch processing for memory retrieval")
+
+            # Search with appropriate parameters
+            results = store.retrieve(
+                query=query,
+                top_k=int(retrieve_count * 2),  # Get more results for filtering
+                min_similarity=0.25,
+                use_fractal=apply_sharpening
+            )
+
+            # Format the results into memory text
+            memory_text = self._format_memory_results(results, retrieve_count)
+
+            # Check for domain-specific memory injection
+            memory_text = self._inject_domain_knowledge(query, memory_text, settings)
+
+            return memory_text
+
+        except Exception as e:
+            print(f"{self.get_time()} Error in memory retrieval: {e}")
+            import traceback
+            traceback.print_exc()
+            return ""  # Return empty string on error
 
     def _get_settings(self, query: str) -> Dict[str, Any]:
         """Get domain-specific settings based on query classification"""

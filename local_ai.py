@@ -100,7 +100,8 @@ class TinyLlamaChat:
             embedding_dim=384,  # Set this to your model's embedding dimension
             use_fractal=fractal_enabled,
             max_fractal_levels=max_fractal_levels,
-            auto_save=True
+            auto_save=True,
+            enable_entity_separation=True
         )
 
         self.auto_memorize = auto_memorize
