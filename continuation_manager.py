@@ -1,26 +1,33 @@
 """
-Enhanced Continuation Manager with improved content type detection.
-Provides seamless continuations for code, prose, and poetry.
+Enhanced Continuation Manager integrated with UnifiedMemoryManager.
+Provides seamless continuations with knowledge integration and proper tensor handling.
 """
 
 import re
-from typing import List, Dict, Any, Tuple, Optional, Set
+import torch
+import numpy as np
+from typing import List, Dict, Tuple, Optional, Set, Any, Union
+from datetime import datetime
 
 class ContinuationTrackingWindowManager:
     """
-    Enhanced window manager that tracks generated content for continuations.
-    Handles code, prose, and poetry with specialized continuations.
+    Enhanced window manager that tracks generated content for continuations
+    and integrates with UnifiedMemoryManager for knowledge-aware context management.
     """
 
-    def __init__(self, tokenizer, max_window_size: int = 2048, memory_manager=None,
-                 safety_margin: int = 50, continuation_buffer_size: int = 200):
+    def __init__(self,
+                tokenizer,
+                max_window_size: int = 2048,
+                memory_manager=None,
+                safety_margin: int = 50,
+                continuation_buffer_size: int = 200):
         """
-        Initialize the continuation-aware window manager.
+        Initialize the enhanced continuation-aware window manager.
 
         Args:
             tokenizer: The model tokenizer for token counting
             max_window_size: Maximum allowed tokens in context window
-            memory_manager: Optional memory manager for improved context selection
+            memory_manager: UnifiedMemoryManager instance for knowledge integration
             safety_margin: Token buffer to prevent exceeding limits
             continuation_buffer_size: Number of tokens to store for continuation
         """
@@ -32,17 +39,36 @@ class ContinuationTrackingWindowManager:
 
         # Tracking for continuations
         self.last_response = ""
-        self.last_response_tokens = []
         self.continuation_context = {}  # Maps user_id to continuation context
 
+        # Debug information
+        self.debug_mode = False
+
+    def log(self, message: str) -> None:
+        """Log a message if debug mode is enabled"""
+        if self.debug_mode:
+            timestamp = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+            print(f"{timestamp} [ContinuationManager] {message}")
+
     def track_repetition_patterns(self, text: str, user_id: str = "default_user") -> bool:
-        """Track and detect repetitive patterns with code-aware exceptions"""
+        """
+        Track and detect repetitive patterns with content type awareness.
+
+        Args:
+            text: Generated text to analyze
+            user_id: User identifier
+
+        Returns:
+            Boolean indicating if repetition was detected
+        """
         repetition_detected = False
         pattern_length = 20
         min_repetitions = 3
 
         # Skip detection for specific patterns common in code
-        if self._detect_content_type(text) == "code":
+        content_type = self._detect_content_type(text)
+
+        if content_type == "code":
             # Skip detection inside array literals
             if re.search(r'\[\s*\[\s*\d+\s*,', text[-50:]):
                 return False
@@ -63,7 +89,7 @@ class ContinuationTrackingWindowManager:
                     repetition_detected = True
                     break
 
-        # Store repetition status
+        # Store repetition status for this user
         if user_id not in self.continuation_context:
             self.continuation_context[user_id] = {}
 
@@ -73,7 +99,7 @@ class ContinuationTrackingWindowManager:
 
     def optimize_messages(self, messages: List[Dict[str, str]], max_new_tokens: int = 128) -> List[Dict[str, str]]:
         """
-        Optimize message history to fit within token limits.
+        Optimize message history to fit within token limits, with proper tensor handling.
 
         Args:
             messages: List of message dictionaries with 'role' and 'content'
@@ -82,6 +108,8 @@ class ContinuationTrackingWindowManager:
         Returns:
             Optimized list of messages
         """
+        self.log(f"Optimizing messages for {len(messages)} messages, max_new_tokens={max_new_tokens}")
+
         # Calculate the available token budget
         available_budget = self.max_window_size - max_new_tokens - self.safety_margin
 
@@ -96,14 +124,18 @@ class ContinuationTrackingWindowManager:
         if not system_message or not user_message:
             return messages
 
-        # Calculate tokens for essential messages
-        system_tokens = len(self.tokenizer.encode(system_message['content']))
-        user_tokens = len(self.tokenizer.encode(user_message['content']))
+        # Calculate tokens for essential messages with proper tensor handling
+        with torch.no_grad():  # Prevent "Already borrowed" errors
+            # Use safer method for token counting
+            system_tokens = self._count_tokens_safely(system_message['content'])
+            user_tokens = self._count_tokens_safely(user_message['content'])
 
         essential_tokens = system_tokens + user_tokens
+        self.log(f"Essential tokens: {essential_tokens} (system={system_tokens}, user={user_tokens})")
 
         # If essential messages alone exceed budget, truncate the user message
         if essential_tokens > available_budget:
+            self.log(f"Essential messages exceed budget, truncating user message")
             max_user_tokens = available_budget - system_tokens
             truncated_user_content = self._truncate_text(user_message['content'], max_user_tokens)
 
@@ -115,12 +147,38 @@ class ContinuationTrackingWindowManager:
 
         # We have room for conversation history - prioritize recent messages
         history_budget = available_budget - essential_tokens
+        self.log(f"History budget: {history_budget} tokens")
         optimized_history = self._select_history_messages(messages[1:-1], history_budget)
 
         # Construct final message list
         result = [system_message] + optimized_history + [user_message]
 
+        # Log token usage
+        final_tokens = self.calculate_tokens(result)
+        self.log(f"Final optimized message count: {len(result)}, tokens: {final_tokens}/{self.max_window_size}")
+
         return result
+
+    def _count_tokens_safely(self, text: str) -> int:
+        """
+        Count tokens in text with proper error handling to prevent "Already borrowed" errors.
+
+        Args:
+            text: Text to count tokens in
+
+        Returns:
+            Number of tokens
+        """
+        try:
+            # Create a new tensor each time to avoid "Already borrowed" errors
+            with torch.no_grad():
+                # Don't add special tokens to get more accurate counts
+                token_ids = self.tokenizer.encode(text, add_special_tokens=False)
+                return len(token_ids)
+        except RuntimeError as e:
+            self.log(f"Error in token counting: {e}")
+            # Fallback to character-based estimation (not accurate but safe)
+            return len(text) // 4  # Rough estimate: ~4 chars per token
 
     def _select_history_messages(self, history: List[Dict[str, str]], token_budget: int) -> List[Dict[str, str]]:
         """
@@ -143,8 +201,8 @@ class ContinuationTrackingWindowManager:
 
         # Process messages from newest to oldest
         for msg in reversed(history):
-            # Count tokens in this message
-            msg_tokens = len(self.tokenizer.encode(msg['content']))
+            # Count tokens safely
+            msg_tokens = self._count_tokens_safely(msg['content'])
 
             # If adding this message would exceed budget, skip it
             if used_tokens + msg_tokens > token_budget:
@@ -154,11 +212,12 @@ class ContinuationTrackingWindowManager:
             selected_messages.insert(0, msg)  # Insert at beginning to maintain order
             used_tokens += msg_tokens
 
+        self.log(f"Selected {len(selected_messages)}/{len(history)} history messages using {used_tokens}/{token_budget} tokens")
         return selected_messages
 
     def _truncate_text(self, text: str, max_tokens: int) -> str:
         """
-        Truncate text to fit within token limit, attempting to break at sentence boundaries.
+        Truncate text to fit within token limit, breaking at sentence boundaries.
 
         Args:
             text: Text to truncate
@@ -170,21 +229,18 @@ class ContinuationTrackingWindowManager:
         if not text:
             return ""
 
-        # Try encoding the full text to check token count
-        encoded = self.tokenizer.encode(text)
-
-        # If already under limit, return unchanged
-        if len(encoded) <= max_tokens:
+        # Early exit if the text is already under the limit
+        if self._count_tokens_safely(text) <= max_tokens:
             return text
 
-        # Need to truncate - first try to find a good breakpoint
+        # Try to find a good breakpoint using sentence boundaries
         sentences = re.split(r'(?<=[.!?])\s+', text)
 
         truncated = ""
         for sentence in sentences:
             # Check if adding this sentence would exceed limit
             test_text = truncated + sentence
-            test_tokens = len(self.tokenizer.encode(test_text))
+            test_tokens = self._count_tokens_safely(test_text)
 
             if test_tokens <= max_tokens:
                 truncated = test_text
@@ -193,14 +249,18 @@ class ContinuationTrackingWindowManager:
 
         # If we couldn't fit even one sentence, do hard truncation
         if not truncated:
-            # Decode the first max_tokens tokens
-            truncated = self.tokenizer.decode(encoded[:max_tokens])
+            self.log("Couldn't truncate at sentence boundary, performing hard truncation")
+
+            # Tokenize and decode only max_tokens
+            with torch.no_grad():
+                token_ids = self.tokenizer.encode(text, add_special_tokens=False)
+                truncated = self.tokenizer.decode(token_ids[:max_tokens])
 
         return truncated
 
     def calculate_tokens(self, messages: List[Dict[str, str]]) -> int:
         """
-        Calculate the total number of tokens in a message list.
+        Calculate the total number of tokens in a message list safely.
 
         Args:
             messages: List of message dictionaries
@@ -210,13 +270,13 @@ class ContinuationTrackingWindowManager:
         """
         total = 0
         for msg in messages:
-            total += len(self.tokenizer.encode(msg['content']))
+            total += self._count_tokens_safely(msg['content'])
 
         return total
 
     def is_generation_complete(self, user_id: str, current_response: str) -> bool:
         """
-        Check if generation has reached completion based on target length or repetition.
+        Check if generation has reached completion based on content analysis.
 
         Args:
             user_id: User identifier
@@ -233,7 +293,11 @@ class ContinuationTrackingWindowManager:
 
         # Check if we've reached or exceeded target
         if target_length and word_count >= target_length:
+            self.log(f"Generation complete: reached target length of {target_length} words")
             return True
+
+        # Content type specific checks
+        content_type = self._detect_content_type(current_response)
 
         # Check for empty line padding (5+ consecutive newlines)
         newline_count = 0
@@ -244,79 +308,136 @@ class ContinuationTrackingWindowManager:
                 newline_count = 0
 
         if newline_count >= 5:
+            self.log("Generation complete: detected multiple consecutive empty lines")
             return True
 
-        # Check for repetition patterns in code
-        # This helps with the repeating const declarations seen in the log
-        lines = current_response.split('\n')
-        if len(lines) > 10:
-            # Get last 10 lines
-            last_lines = lines[-10:]
-            # Create a set of stripped lines
-            unique_lines = set(line.strip() for line in last_lines if line.strip())
-            # If we have fewer than 3 unique lines in the last 10, we're likely in a loop
-            if 0 < len(unique_lines) < 3 and len(last_lines) > 5:
-                return True
+        # Code-specific checks
+        if content_type == "code":
+            lines = current_response.split('\n')
+            if len(lines) > 10:
+                # Get last 10 lines
+                last_lines = lines[-10:]
+                # Create a set of stripped lines
+                unique_lines = set(line.strip() for line in last_lines if line.strip())
+                # If we have fewer than 3 unique lines in the last 10, we're likely in a loop
+                if 0 < len(unique_lines) < 3 and len(last_lines) > 5:
+                    self.log("Generation complete: detected code repetition pattern")
+                    return True
+
+            # Check for code completeness indicators
+            if current_response.count('```') >= 2:  # Opening and closing code blocks
+                # Look for function/class completeness
+                # Count braces/indentation to detect completion
+                open_braces = current_response.count('{')
+                close_braces = current_response.count('}')
+                if open_braces > 0 and open_braces == close_braces:
+                    self.log("Generation complete: matched code block structure")
+                    return True
+
+        # Text-specific checks
+        if content_type == "prose":
+            # Check for conclusion indicators
+            conclusion_markers = ["In conclusion", "To summarize", "In summary", "Thus", "Therefore"]
+
+            # Get the last few sentences
+            last_part = " ".join(current_response.split()[-30:])
+
+            if any(marker in last_part for marker in conclusion_markers):
+                # Check if we have a reasonable amount of content
+                if word_count > 100:
+                    self.log("Generation complete: detected conclusion marker with sufficient content")
+                    return True
 
         return False
 
     def _find_safe_termination_point(self, text: str) -> int:
-        """Find a good position to terminate text (after punctuation)"""
+        """
+        Find a good position to terminate text (after punctuation).
+
+        Args:
+            text: Text to analyze
+
+        Returns:
+            Index where text can be safely terminated
+        """
         # Look for sentence-ending punctuation in the last 100 characters
         for punct in ['.', '!', '?', '。', ';']:
             last_punct = text.rfind(punct, -100)
             if last_punct > 0:
                 return last_punct + 1
+
         return len(text)  # If no good breakpoint, use full text
 
-    def extract_target_length (self, query: str) -> Optional[int]:
-        """Extract target word/token length from user query."""
-        # Use regex to find patterns like "500 word" or "300 words"
+    def extract_target_length(self, query: str) -> Optional[int]:
+        """
+        Extract target word/token length from user query with enhanced pattern matching.
+
+        Args:
+            query: User query
+
+        Returns:
+            Target length or None if not found
+        """
+        # Look for common length specifications
         word_count_match = re.search(r'(\d+)\s*(?:word|words)', query.lower())
         if word_count_match:
             return int(word_count_match.group(1))
 
-        # Could add more patterns here (e.g., "2000 character", "5 pages", etc.)
+        # Look for character count requirements
+        char_count_match = re.search(r'(\d+)\s*(?:character|characters|chars)', query.lower())
+        if char_count_match:
+            # Convert approximate character count to words (roughly 5 chars per word)
+            chars = int(char_count_match.group(1))
+            return chars // 5
+
+        # Look for page requirements
+        page_count_match = re.search(r'(\d+)\s*(?:page|pages)', query.lower())
+        if page_count_match:
+            # Approximate 250 words per page
+            pages = int(page_count_match.group(1))
+            return pages * 250
+
+        # Look for paragraph counts
+        para_count_match = re.search(r'(\d+)\s*(?:paragraph|paragraphs)', query.lower())
+        if para_count_match:
+            # Approximate 75 words per paragraph
+            paras = int(para_count_match.group(1))
+            return paras * 75
 
         return None  # Return None if no target length found
 
     def set_target_length(self, user_id: str, target_length: int):
-        """Set target completion length for a user"""
-        if user_id not in self.continuation_context:
-            self.continuation_context[user_id] = {}
-        self.continuation_context[user_id]["target_length"] = target_length
-
-    def _count_words(self, text: str) -> int:
         """
-        Count the number of words in a text.
+        Set target completion length for a user.
 
         Args:
-            text: The text to count words in
-
-        Returns:
-            The word count
+            user_id: User identifier
+            target_length: Target length in words
         """
-        # Use a simple word counting approach
-        # Split by whitespace and filter out empty strings
-        words = [word for word in text.split() if word.strip()]
-        return len(words)
-        
+        if user_id not in self.continuation_context:
+            self.continuation_context[user_id] = {}
+
+        self.continuation_context[user_id]["target_length"] = target_length
+        self.log(f"Set target length for user {user_id} to {target_length} words")
+
     def track_generated_response(self, response: str, user_id: str = "default_user", target_length: int = None):
         """
         Track a generated response for potential continuation.
 
         Args:
             response: The generated response text
-            user_id: User identifier for multi-user systems
+            user_id: User identifier
+            target_length: Optional target length in words
         """
         # Store the full response
         self.last_response = response
 
-        # Tokenize the response
-        self.last_response_tokens = self.tokenizer.encode(response)
+        # Tokenize the response (safely)
+        with torch.no_grad():
+            last_response_tokens = self.tokenizer.encode(response, add_special_tokens=False)
 
         # Store the last portion for continuation context
-        continuation_tokens = self.last_response_tokens[-self.continuation_buffer_size:]
+        continuation_tokens = last_response_tokens[-min(self.continuation_buffer_size, len(last_response_tokens)):]
         continuation_text = self.tokenizer.decode(continuation_tokens)
 
         # Store continuation context for this user
@@ -324,7 +445,8 @@ class ContinuationTrackingWindowManager:
             "tokens": continuation_tokens,
             "text": continuation_text,
             "timestamp": self._get_timestamp(),
-            "full_response": response
+            "full_response": response,
+            "content_type": self._detect_content_type(response)
         }
 
         # Add completion detection
@@ -332,83 +454,14 @@ class ContinuationTrackingWindowManager:
             # Mark as complete in the continuation context
             self.continuation_context[user_id]["is_complete"] = True
             self.continuation_context[user_id]["completion_reason"] = "target_length_reached"
+            self.log(f"Response for user {user_id} marked as complete: target length reached")
 
-    def prepare_continuation_prompt(self, query: str, user_id: str = "default_user") -> str:
-        """Enhanced prompt preparation with fractal context awareness"""
-
-        # Get continuation context first (existing code)
-        if user_id not in self.continuation_context:
-            return query
-
-        continuation_ctx = self.continuation_context[user_id]
-
-        # NEW: Get content type to apply domain-specific handling
-        content_type = self._detect_content_type(continuation_ctx["text"])
-
-        # Get vector store from memory manager (if available)
-        vector_store = None
-        if self.memory_manager:
-            store = self.memory_manage
-            if store and hasattr(store, 'enhanced_fractal_search'):
-                vector_store = store
-
-        # Extract appropriate context based on content type
-        if content_type == "code":
-            last_context = self._extract_code_context(continuation_ctx["text"])
-            # Use code-specific continuation prompt - completely clean for simple continuations
-            is_simple = any(word in query.lower() for word in ["go on", "continue", "next", "more"])
-            if is_simple:
-                return f"[CODE BLOCK START]\n{last_context}\n[CODE BLOCK END]"
-            else:
-                return self._create_code_continuation_prompt(query, last_context)
-        else:
-            # Use existing prose handling
-            last_context = self._extract_last_context(continuation_ctx["text"])
-            return self._create_prose_continuation_prompt(query, last_context)
-
-    def _detect_content_type(self, text: str) -> str:
-        """Detect if content is code, table, or prose"""
-        # Code detection (existing _is_code_context logic)
-        if self._is_code_context(text):
-            return "code"
-
-        # Add other content type detection as needed
-        return "prose"
-
-    def _extract_code_context(self, text: str, vector_store=None) -> str:
-        """Extract code context with better structure awareness"""
-        # Basic extraction (similar to _extract_last_context)
-        lines = text.split('\n')
-        last_lines = lines[-20:] if len(lines) > 20 else lines
-
-        # If we have vector store, enhance context with relevant code patterns
-        if vector_store:
-            try:
-                # Create embedding for code context
-                if self.tokenizer and hasattr(self.memory_manager, 'embedding_function'):
-                    code_embedding = self.memory_manager.embedding_function("\n".join(last_lines))
-
-                    # Search for similar code patterns
-                    results = vector_store.enhanced_fractal_search(
-                        code_embedding,
-                        top_k=3,
-                        min_similarity=0.7,
-                        apply_sharpening=True
-                    )
-
-                    # Extract relevant code patterns from results
-                    for result in results:
-                        if result.get('metadata', {}).get('memory_type') == 'code':
-                            # Add comment about incorporating pattern
-                            last_lines.append(f"// Pattern based on: {result.get('text', '')[:50]}...")
-            except Exception as e:
-                print(f"Error enhancing code context: {e}")
-
-        return "\n".join(last_lines)
+        # Log continuation context preparation
+        self.log(f"Stored continuation context for user {user_id} with {len(continuation_tokens)} tokens")
 
     def detect_continuation_request(self, query: str) -> bool:
         """
-        Detect if a query is asking for continuation.
+        Detect if a query is asking for continuation with enhanced patterns.
 
         Args:
             query: User query text
@@ -420,7 +473,8 @@ class ContinuationTrackingWindowManager:
         continuation_phrases = [
             "continue", "go on", "keep going", "proceed", "what happens next",
             "continue from", "pick up where", "write more", "and then?",
-            "next part", "next section", "rest of", "finish", "complete"
+            "next part", "next section", "rest of", "finish", "complete",
+            "what's next", "keep writing", "don't stop", "go ahead", "proceed"
         ]
 
         query_lower = query.lower()
@@ -428,17 +482,19 @@ class ContinuationTrackingWindowManager:
         # Check for continuation indicators
         for phrase in continuation_phrases:
             if phrase in query_lower:
+                self.log(f"Detected continuation request: '{phrase}' in query")
                 return True
 
         # Very short queries are often continuation requests
         if len(query.strip().split()) <= 3 and any(word in query_lower for word in ["more", "next", "then"]):
+            self.log("Detected simple continuation request (short query)")
             return True
 
         return False
 
     def prepare_continuation_prompt(self, query: str, user_id: str = "default_user") -> str:
         """
-        Prepare an enhanced query for continuation requests.
+        Prepare an enhanced query for continuation requests with knowledge integration.
 
         Args:
             query: Original user query
@@ -449,6 +505,7 @@ class ContinuationTrackingWindowManager:
         """
         # Check if we have continuation context for this user
         if user_id not in self.continuation_context:
+            self.log(f"No continuation context for user {user_id}")
             return query
 
         continuation_ctx = self.continuation_context[user_id]
@@ -459,63 +516,66 @@ class ContinuationTrackingWindowManager:
         if not last_context:
             return query
 
-        # Determine content type (code, poetry, or prose)
-        is_code = self._is_code_context(last_context)
-        is_poetry = self._is_poetry_context(last_context)
+        # Determine content type (default to "prose" if not set)
+        content_type = continuation_ctx.get("content_type", self._detect_content_type(last_context))
+        self.log(f"Detected content type: {content_type}")
+
+        # Integrate with memory manager if available
+        if content_type == "code" and self.memory_manager and hasattr(self.memory_manager, 'retrieve'):
+            # Try to augment code continuation with relevant knowledge
+            try:
+                code_query = f"code {last_context.split()[-20:]}"
+                knowledge_results = self.memory_manager.retrieve(
+                    query=code_query,
+                    top_k=2,
+                    min_similarity=0.5
+                )
+
+                if knowledge_results:
+                    # Extract relevant code patterns
+                    self.log(f"Found {len(knowledge_results)} relevant code patterns")
+                    code_knowledge = "\n".join([f"// Relevant pattern: {result['content'][:100]}..."
+                                             for result in knowledge_results])
+                    # Enhance the context with the patterns
+                    last_context = f"{last_context}\n{code_knowledge}"
+            except Exception as e:
+                self.log(f"Error retrieving knowledge for code continuation: {e}")
 
         # Build a continuation prompt based on content type
-        if is_code:
+        if content_type == "code":
             return self._create_code_continuation_prompt(query, last_context)
-        elif is_poetry:
-            return self._create_poetry_continuation_prompt(query, last_context)
         else:
             return self._create_prose_continuation_prompt(query, last_context)
 
     def _create_code_continuation_prompt(self, query: str, code_context: str) -> str:
-        """Create a cleaner code-specific continuation prompt"""
-        # Simple continuations should have zero instructions
-        if any(phrase in query.lower() for phrase in ["go on", "continue", "keep going", "next", "more"]):
-            return f"""
-    [CODE BLOCK START]
-    {code_context}
-    [CODE BLOCK END]
-    """
-        # Only for specific questions add minimal guidance
-        return f"""
-    [CODE BLOCK START]
-    {code_context}
-    [CODE BLOCK END]
-    """
-
-    def _create_poetry_continuation_prompt(self, query: str, last_context: str) -> str:
         """
-        Create a continuation prompt for poetry.
+        Create a code-specific continuation prompt with clean formatting.
 
         Args:
             query: Original user query
-            last_context: Last context to continue from
+            code_context: Code context to continue from
 
         Returns:
-            Enhanced poetry continuation prompt
+            Formatted continuation prompt
         """
-        # Extract the final partial line
-        lines = last_context.strip().split('\n')
-        last_line = lines[-1] if lines else ""
+        # Simple continuations should have zero instructions
+        if any(phrase in query.lower() for phrase in ["go on", "continue", "keep going", "next", "more"]):
+            return f"""
+[CODE BLOCK START]
+{code_context}
+[CODE BLOCK END]
 
-        # Extract the last word or partial word
-        last_word = last_line.strip().split()[-1] if last_line.strip() else ""
-
-        # Create poetry-specific prompt
+Continue the code exactly from where it left off, maintaining the same style and structure.
+"""
+        # For specific requests, add minimal guidance
         return f"""
+[CODE BLOCK START]
+{code_context}
+[CODE BLOCK END]
+
 {query}
 
-[POEM CONTINUATION]
-The poem was cut off at this exact line:
-"{last_line}"
-
-The last word or partial word was: "{last_word}"
-
-Continue the poem from this exact point. Complete the unfinished line and continue with the poem's structure, style, and rhyme scheme.
+Continue the code implementation from exactly where it left off, addressing the request while maintaining the existing code structure and style.
 """
 
     def _create_prose_continuation_prompt(self, query: str, last_context: str) -> str:
@@ -531,17 +591,28 @@ Continue the poem from this exact point. Complete the unfinished line and contin
         """
         # Extract the last few words
         words = last_context.strip().split()
-        last_words = " ".join(words[-10:]) if len(words) > 10 else last_context.strip()
+        last_words = " ".join(words[-15:]) if len(words) > 15 else last_context.strip()
 
         # Create prose-specific prompt
-        return f"""
-{query}
-
+        if any(phrase in query.lower() for phrase in ["go on", "continue", "keep going", "next", "more"]):
+            # Simple continuation
+            return f"""
 [CONTINUATION POINT]
-The previous text ended with these words:
+The previous text ended with:
 "{last_words}"
 
 Continue writing from this exact point without repeating any of the content shown. Pick up precisely where the text was cut off and maintain the same style, tone, and flow.
+"""
+        else:
+            # Continuation with specific request
+            return f"""
+{query}
+
+[CONTINUATION CONTEXT]
+The previous text ended with:
+"{last_words}"
+
+Continue writing from this exact point, addressing the request while maintaining the same style and tone.
 """
 
     def _extract_last_context(self, text: str, max_lines: int = 10) -> str:
@@ -564,147 +635,108 @@ Continue writing from this exact point without repeating any of the content show
         # Rejoin into text
         return '\n'.join(last_lines)
 
-    def _is_code_context(self, text: str) -> bool:
+    def _detect_content_type(self, text: str) -> str:
         """
-        Determine if the context is code rather than prose.
+        Detect the content type (code, prose, etc.) from text.
 
         Args:
-            text: Context text to analyze
+            text: Text to analyze
 
         Returns:
-            Boolean indicating if context is code
+            Content type string
         """
         # Code indicators
         code_indicators = [
             # Symbols and patterns common in code
             "{", "}", "(", ")", ";", "==", "=>", "function", "var ", "let ", "const ",
             "if ", "for ", "while ", "class ", "import ", "export ", "return ",
-            "public ", "private ", "static ", # Common keywords
+            "public ", "private ", "static ",  # Common keywords
 
             # Common language patterns
             "def ", "async ", "await ", "try ", "catch ", "else ", "elif ",
-
-            # Indentation patterns
-            re.compile(r'^\s{2,}[a-zA-Z0-9_]'),  # Indented line starts
-            re.compile(r'[{([]$')  # Line ends with opening bracket
         ]
+
+        # Look for code block markers
+        if "```" in text:
+            return "code"
 
         # Check for code indicators
         for indicator in code_indicators:
-            if isinstance(indicator, str) and indicator in text:
-                return True
-            elif hasattr(indicator, 'search') and indicator.search(text):
-                return True
+            if indicator in text:
+                return "code"
 
         # Check for code-like line patterns (important for languages like Python)
         lines = text.strip().split('\n')
         indented_lines = sum(1 for line in lines if line.startswith('    ') or line.startswith('\t'))
         if indented_lines > len(lines) / 3:  # If more than 1/3 of lines are indented
-            return True
+            return "code"
 
-        return False
+        # If none of the above, assume prose
+        return "prose"
 
-    def _is_poetry_context(self, text: str) -> bool:
+    def _count_words(self, text: str) -> int:
         """
-        Determine if the context is poetry.
+        Count the number of words in a text.
 
         Args:
-            text: Context text to analyze
+            text: The text to count words in
 
         Returns:
-            Boolean indicating if context is poetry
+            The word count
         """
-        # Split into lines
-        lines = text.strip().split('\n')
-
-        # Too few lines can't be analyzed properly
-        if len(lines) < 3:
-            return False
-
-        # Count lines with consistent patterns
-        short_lines = 0
-        capitalized_lines = 0
-        lines_with_punctuation_at_end = 0
-
-        for line in lines:
-            clean_line = line.strip()
-
-            # Skip empty lines
-            if not clean_line:
-                continue
-
-            # Check line length (poetry tends to have shorter lines)
-            if len(clean_line.split()) < 12:
-                short_lines += 1
-
-            # Check capitalization at beginning of line (common in poetry)
-            if clean_line and clean_line[0].isupper():
-                capitalized_lines += 1
-
-            # Check for punctuation at end of line
-            if clean_line and clean_line[-1] in '.,:;!?':
-                lines_with_punctuation_at_end += 1
-
-        # Calculate percentages
-        non_empty_lines = len([l for l in lines if l.strip()])
-        if non_empty_lines == 0:
-            return False
-
-        pct_short = short_lines / non_empty_lines
-        pct_capitalized = capitalized_lines / non_empty_lines
-        pct_punctuated = lines_with_punctuation_at_end / non_empty_lines
-
-        # Poetry indicators:
-        # 1. High percentage of short lines
-        # 2. High percentage of lines starting with capital letter
-        # 3. Variable punctuation at line ends
-        if pct_short > 0.7 and pct_capitalized > 0.7:
-            return True
-
-        # Look for rhyming patterns (simplistic approach)
-        line_endings = []
-        for line in lines:
-            words = line.strip().split()
-            if words:
-                # Get last 2-3 characters of last word as crude rhyme check
-                last_word = words[-1].lower()
-                ending = last_word[-3:] if len(last_word) > 3 else last_word
-                line_endings.append(ending)
-
-        # Check for repeating patterns in endings
-        if len(line_endings) >= 4:
-            potential_rhymes = 0
-            for i in range(len(line_endings) - 2):
-                for j in range(i + 2, len(line_endings)):
-                    if line_endings[i] == line_endings[j]:
-                        potential_rhymes += 1
-
-            if potential_rhymes >= len(line_endings) / 3:
-                return True
-
-        return False
-
-    def _clean_code_context(self, code: str) -> str:
-        """
-        Clean code context for better continuation.
-
-        Args:
-            code: Code context to clean
-
-        Returns:
-            Cleaned code context
-        """
-        # Remove any code block markers
-        code = re.sub(r'^```\w*\s*', '', code)
-        code = re.sub(r'\s*```$', '', code)
-
-        # Ensure no trailing whitespace
-        lines = code.split('\n')
-        cleaned_lines = [line.rstrip() for line in lines]
-
-        return '\n'.join(cleaned_lines)
+        # Use a simple word counting approach
+        # Split by whitespace and filter out empty strings
+        words = [word for word in text.split() if word.strip()]
+        return len(words)
 
     def _get_timestamp(self) -> str:
         """Get current timestamp for tracking."""
-        from datetime import datetime
         return datetime.now().isoformat()
+
+    def set_debug_mode(self, enabled: bool = True) -> None:
+        """Enable or disable debug logging"""
+        self.debug_mode = enabled
+        self.log(f"Debug mode {'enabled' if enabled else 'disabled'}")
+
+    def enhance_with_knowledge(self, context: Dict[str, Any], query: str) -> Dict[str, Any]:
+        """
+        Enhance continuation context with knowledge retrieved from memory manager.
+
+        Args:
+            context: Current continuation context
+            query: The original user query
+
+        Returns:
+            Enhanced continuation context
+        """
+        if not self.memory_manager or not hasattr(self.memory_manager, 'retrieve'):
+            return context
+
+        enhanced_context = context.copy()
+        content_type = context.get("content_type", "prose")
+
+        try:
+            # Create a query appropriate for the content type
+            if content_type == "code":
+                knowledge_query = f"code implementation {' '.join(query.split()[:10])}"
+            else:
+                knowledge_query = f"continue writing {' '.join(query.split()[:10])}"
+
+            # Retrieve relevant knowledge
+            results = self.memory_manager.retrieve(
+                query=knowledge_query,
+                top_k=3,
+                min_similarity=0.45
+            )
+
+            if results:
+                self.log(f"Retrieved {len(results)} knowledge items for continuation")
+                # Store knowledge in context
+                enhanced_context["knowledge_items"] = [
+                    {"content": result["content"], "similarity": result.get("similarity", 0.0)}
+                    for result in results
+                ]
+        except Exception as e:
+            self.log(f"Error enhancing with knowledge: {e}")
+
+        return enhanced_context

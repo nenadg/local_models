@@ -161,8 +161,9 @@ class TerminalHeatmap:
             return result
         else:
             # Tokenize the text
-            tokens = self.tokenizer.encode(text)
-            token_texts = [self.tokenizer.decode([token]) for token in tokens]
+            with torch.no_grad():
+                tokens = self.tokenizer.encode(text)
+                token_texts = [self.tokenizer.decode([token]) for token in tokens]
 
             # Colorize each token
             result = ""
@@ -432,7 +433,9 @@ class EnhancedHeatmap(TerminalHeatmap):
             return result.rstrip()
         else:
             # With tokenizer, we can be more precise
-            tokens = self.tokenizer.encode(text)
+            with torch.no_grad():
+                tokens = self.tokenizer.encode(text)
+
             token_texts = [self.tokenizer.decode([token]) for token in tokens]
 
             result = ""
