@@ -203,6 +203,52 @@ class TinyLlamaChat:
         self.conversation_history = []
         self.system_message = DEFAULT_SYSTEM_MESSAGE
 
+    def test_batch_processing(self, operation_type='embedding'):
+        """
+        Test batch processing performance for different operations.
+
+        Args:
+            operation_type: Type of operation to test ('embedding' or 'inference')
+        """
+        from batch_utils import validate_batch_processing_performance
+
+        if operation_type == 'embedding':
+            # Generate test data for embeddings
+            test_texts = [
+                "This is a test text for batch processing benchmarking.",
+                "Here's another sample text with different content.",
+                "A third text to include in our test batch.",
+                "Let's add a fourth sample with varying length.",
+                "And a fifth one to round out our test set."
+            ] * 4  # Repeat to get 20 items
+
+            # Define test function
+            def test_func(texts, batch_size):
+                return self.memory_manager.batch_embedding_function(texts[:batch_size])
+
+            # Run benchmark
+            return validate_batch_processing_performance(test_func, test_texts)
+
+        elif operation_type == 'inference':
+            # Generate test input for inference
+            test_prompt = "Write a short poem about batch processing."
+
+            # Tokenize
+            tokens = self.tokenizer(test_prompt, return_tensors="pt").to(self.device)
+
+            # Define test function
+            def test_func(input_ids, batch_size):
+                # Simple forward pass
+                with torch.no_grad():
+                    return self.model(input_ids=input_ids, max_length=batch_size)
+
+            # Run benchmark
+            return validate_batch_processing_performance(test_func, tokens.input_ids)
+
+        else:
+            print(f"{self.get_time()} Unknown operation type: {operation_type}")
+            return None
+
     def test_embedding_performance(self):
         """Test embedding performance with minimal overhead"""
         import time
@@ -245,25 +291,43 @@ class TinyLlamaChat:
         return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
 
     def set_embedding_function(self):
-        """Optimize embedding function for GPU"""
-
+        """
+        Set up an optimized embedding function for the memory manager with batching support.
+        This improved version handles caching more efficiently and supports batched operations.
+        """
         # Ensure model is in evaluation mode
         if hasattr(self.model, 'eval'):
             self.model.eval()
 
-        # Create a cache for embeddings
+        # Create a cache for embeddings with better capacity management
         if not hasattr(self, '_embedding_cache'):
             self._embedding_cache = {}
+            self._embedding_cache_capacity = 1000  # Maximum cache entries
+
+        # Track performance metrics
+        if not hasattr(self, '_embedding_stats'):
+            self._embedding_stats = {
+                'cache_hits': 0,
+                'cache_misses': 0,
+                'batch_calls': 0,
+                'total_embeddings': 0,
+                'batch_sizes': []
+            }
 
         def generate_embedding(text):
-            """Generate embedding with caching and optimization"""
-            # Create a hash for cache key
+            """Generate a single embedding with caching and optimization."""
+            # Create hash for cache key
             import hashlib
             cache_key = hashlib.md5(text.encode()).hexdigest()
 
             # Check cache first
             if cache_key in self._embedding_cache:
+                self._embedding_stats['cache_hits'] += 1
                 return self._embedding_cache[cache_key]
+
+            # Cache miss - generate embedding
+            self._embedding_stats['cache_misses'] += 1
+            self._embedding_stats['total_embeddings'] += 1
 
             with torch.no_grad():
                 # Tokenize with efficient settings
@@ -273,10 +337,9 @@ class TinyLlamaChat:
                     truncation=True,
                     max_length=512,
                     padding=True
-                ).to(self.device)  # Removed the dtype parameter
+                ).to(self.device)
 
                 # Use more efficient forward pass
-                # For models with LM head, we can just use the model's encoder/transformer part
                 if hasattr(self.model, 'model'):
                     outputs = self.model.model(
                         input_ids=inputs.input_ids,
@@ -293,19 +356,159 @@ class TinyLlamaChat:
                 # Get mean pooled representation
                 embedding = outputs.last_hidden_state.mean(dim=1).cpu().numpy()[0]
 
-            # Cache the result (limit cache size)
-            if len(self._embedding_cache) > 1000:
-                # Random eviction policy
-                import random
-                keys_to_remove = random.sample(list(self._embedding_cache.keys()), 100)
+            # Add to cache (with capacity management)
+            self._embedding_cache[cache_key] = embedding
+
+            # If cache is at capacity, remove oldest entries
+            if len(self._embedding_cache) > self._embedding_cache_capacity:
+                # Get oldest 20% of entries to remove
+                remove_count = int(self._embedding_cache_capacity * 0.2)
+                keys_to_remove = list(self._embedding_cache.keys())[:remove_count]
                 for key in keys_to_remove:
                     del self._embedding_cache[key]
 
-            self._embedding_cache[cache_key] = embedding
             return embedding
 
-        # Set the embedding function
+        def generate_embeddings_batch(texts):
+            """Generate embeddings for multiple texts in a batch."""
+            # Track batch statistics
+            self._embedding_stats['batch_calls'] += 1
+            self._embedding_stats['total_embeddings'] += len(texts)
+            self._embedding_stats['batch_sizes'].append(len(texts))
+
+            # Check cache for each text first
+            embeddings = []
+            texts_to_embed = []
+            indices_to_embed = []
+
+            for i, text in enumerate(texts):
+                cache_key = hashlib.md5(text.encode()).hexdigest()
+                if cache_key in self._embedding_cache:
+                    embeddings.append(self._embedding_cache[cache_key])
+                    self._embedding_stats['cache_hits'] += 1
+                else:
+                    texts_to_embed.append(text)
+                    indices_to_embed.append(i)
+                    self._embedding_stats['cache_misses'] += 1
+
+            # If all texts were cached, return immediately
+            if not texts_to_embed:
+                return embeddings
+
+            # Process uncached texts in batches
+            try:
+                with torch.no_grad():
+                    # Tokenize all texts at once
+                    inputs = self.tokenizer(
+                        texts_to_embed,
+                        return_tensors="pt",
+                        truncation=True,
+                        max_length=512,
+                        padding=True
+                    ).to(self.device)
+
+                    # Get model outputs
+                    if hasattr(self.model, 'model'):
+                        outputs = self.model.model(
+                            input_ids=inputs.input_ids,
+                            attention_mask=inputs.attention_mask
+                        )
+                    else:
+                        outputs = self.model(
+                            input_ids=inputs.input_ids,
+                            attention_mask=inputs.attention_mask,
+                            output_hidden_states=True
+                        )
+
+                    # Get mean pooled representations
+                    batch_embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+
+                    # Add to cache and results
+                    for i, idx in enumerate(indices_to_embed):
+                        # Create embedding
+                        embedding = batch_embeddings[i]
+
+                        # Add to cache
+                        cache_key = hashlib.md5(texts_to_embed[i].encode()).hexdigest()
+                        self._embedding_cache[cache_key] = embedding
+
+                        # Insert at appropriate position
+                        embeddings.insert(idx, embedding)
+
+                    # Check cache capacity
+                    if len(self._embedding_cache) > self._embedding_cache_capacity:
+                        remove_count = int(self._embedding_cache_capacity * 0.2)
+                        keys_to_remove = list(self._embedding_cache.keys())[:remove_count]
+                        for key in keys_to_remove:
+                            del self._embedding_cache[key]
+
+                    return embeddings
+
+            except Exception as e:
+                print(f"{self.get_time()} Error in batch embedding: {e}")
+
+                # Fall back to individual processing
+                for i, idx in enumerate(indices_to_embed):
+                    try:
+                        embedding = generate_embedding(texts_to_embed[i])
+                        embeddings.insert(idx, embedding)
+                    except Exception as inner_e:
+                        print(f"{self.get_time()} Error generating individual embedding: {inner_e}")
+                        # Use zeros as fallback
+                        embeddings.insert(idx, np.zeros(self.memory_manager.embedding_dim))
+
+                return embeddings
+
+        # Use the improved batch_embedding_function if batch_utils is available
+        try:
+            from batch_utils import batch_embedding_processing
+
+            def optimized_batch_embedding(texts):
+                """Optimized batch embedding with performance tracking."""
+                # Use batch_utils for processing
+                return batch_embedding_processing(
+                    embedding_function=generate_embedding,
+                    texts=texts,
+                    batch_size=None,  # Use adaptive sizing
+                    cleanup=True
+                )
+
+            # Set batch function to use optimized version
+            self.memory_manager.batch_embedding_function = optimized_batch_embedding
+            print(f"{self.get_time()} Using optimized batch embedding function")
+        except ImportError:
+            # Fall back to direct implementation
+            self.memory_manager.batch_embedding_function = generate_embeddings_batch
+            print(f"{self.get_time()} Using default batch embedding function")
+
+        # Set single embedding function
         self.memory_manager.embedding_function = generate_embedding
+
+        # Add a method to get embedding stats
+        def get_embedding_stats(self):
+            """Get statistics about embedding generation."""
+            if not hasattr(self, '_embedding_stats'):
+                return {}
+
+            stats = self._embedding_stats.copy()
+
+            # Calculate cache hit ratio
+            total_requests = stats['cache_hits'] + stats['cache_misses']
+            if total_requests > 0:
+                stats['cache_hit_ratio'] = stats['cache_hits'] / total_requests
+            else:
+                stats['cache_hit_ratio'] = 0
+
+            # Calculate average batch size
+            if stats['batch_calls'] > 0:
+                stats['avg_batch_size'] = sum(stats['batch_sizes']) / stats['batch_calls']
+            else:
+                stats['avg_batch_size'] = 0
+
+            return stats
+
+        # Attach stats method
+        self.get_embedding_stats = get_embedding_stats
 
     def create_draft_model(self):
         """Create a smaller version of the model by skipping layers"""
@@ -656,7 +859,7 @@ class TinyLlamaChat:
 
     def speculative_decode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, num_draft_tokens: int = 5) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Implement speculative decoding with loop detection:
+        Implement speculative decoding with loop detection and batch processing:
         1. Generate tokens with the smaller draft model
         2. Verify with larger target model
         3. Keep tokens that match, regenerate from first mismatch
@@ -708,8 +911,10 @@ class TinyLlamaChat:
             full_sequence = torch.cat([input_ids[0], draft_ids]).unsqueeze(0)
             full_attention = torch.ones_like(full_sequence)
 
-            # Process in batches for large inputs
+            # Process in batches for large inputs using enhanced batch processing
             if full_sequence.size(1) > 1024:  # For long sequences
+                from batch_utils import tensor_batch_processing
+
                 def get_logits(batch):
                     with torch.no_grad():
                         outputs = self.model(
@@ -719,10 +924,13 @@ class TinyLlamaChat:
                         )
                     return outputs.logits
 
+                # Use enhanced batch processing with dynamic batch sizing
                 target_logits = tensor_batch_processing(
                     get_logits,
                     full_sequence,
-                    batch_size=4
+                    batch_size=None,  # Use dynamic sizing
+                    adaptive=True,
+                    handle_oom=True
                 )
             else:
                 #  Get logits from target model for the full sequence
@@ -774,7 +982,7 @@ class TinyLlamaChat:
 
     # Function for speculative decoding with streaming
     def generate_speculative(self, input_ids, streamer, max_new_tokens, generation_config, turbo_mode):
-        """Fixed implementation of speculative decoding with streaming and accurate metrics capture"""
+        """Enhanced implementation of speculative decoding with better batch processing and memory management"""
         try:
             with torch.no_grad():
                 # Reset confidence metrics for a new generation
@@ -791,11 +999,8 @@ class TinyLlamaChat:
                 remaining_tokens = max_new_tokens
 
                 # Create a separate config without max_new_tokens to avoid duplication
-                # Also remove output_scores and return_dict_in_generate if they exist
-                streaming_config = {}
-                for k, v in generation_config.items():
-                    if k not in ['max_new_tokens', 'output_scores', 'return_dict_in_generate']:
-                        streaming_config[k] = v
+                streaming_config = {k: v for k, v in generation_config.items()
+                                  if k not in ['max_new_tokens', 'output_scores', 'return_dict_in_generate']}
 
                 # Create and add our logits processor for confidence metrics
                 metrics_processor = TokenProbabilityCaptureProcessor(self.confidence_metrics)
@@ -813,6 +1018,11 @@ class TinyLlamaChat:
                     # No existing processors, create a new list
                     streaming_config['logits_processor'] = LogitsProcessorList([metrics_processor])
 
+                # Get resource manager for optimal batch sizing
+                resource_manager = None
+                if hasattr(self, 'resource_manager'):
+                    resource_manager = self.resource_manager
+
                 while remaining_tokens > 0:
                     try:
                         if self.stop_event.is_set():
@@ -828,18 +1038,20 @@ class TinyLlamaChat:
                                 print(f"{self.get_time()} Error during interrupt cleanup: {e}")
                             return
 
-
-                        # Try speculative decoding
+                        # Try speculative decoding with enhanced batch processing
                         if self.draft_model is not None and turbo_mode:
                             # Skip for short generations - less overhead
                             if remaining_tokens < 3:
                                 break
 
-                            # Call with the new return signature (3 values)
+                            # Determine optimal number of draft tokens based on remaining tokens
+                            optimal_draft_tokens = min(5, remaining_tokens)
+
+                            # Call with enhanced batch processing
                             draft_tokens, acceptance_mask, token_logits = self.speculative_decode(
                                 generated_ids,
                                 attention_mask,
-                                num_draft_tokens=min(5, remaining_tokens)
+                                num_draft_tokens=optimal_draft_tokens
                             )
 
                             if draft_tokens is not None and len(draft_tokens) > 0:
@@ -877,7 +1089,6 @@ class TinyLlamaChat:
                             # Exit to standard generation
                             break
 
-
                     except RuntimeError as e:
                         # Handle device mismatch errors specifically
                         if "expected all tensors to be on the same device" in str(e):
@@ -891,6 +1102,25 @@ class TinyLlamaChat:
                 if remaining_tokens > 0 or not using_spec_decoding:
                     # Use standard streaming mode with TokenProbabilityCaptureProcessor
                     # This will collect token probabilities during normal generation
+
+                    # Use resource manager's batch processing if available
+                    if resource_manager and hasattr(resource_manager, 'batch_process_inference'):
+                        try:
+                            # Create a modified streamer that integrates with batch processing
+                            batch_size = resource_manager.suggest_optimal_batch_size(
+                                tensor_shape=input_ids.shape,
+                                operation_type='inference'
+                            )
+                            print(f"{self.get_time()} Using optimal batch size: {batch_size} for remaining generation")
+
+                            # Add this information to config
+                            if 'batch_size' not in streaming_config:
+                                streaming_config['batch_size'] = batch_size
+                        except:
+                            # Continue with standard generation if optimization fails
+                            pass
+
+                    # Generate with standard or optimized settings
                     self.model.generate(
                         input_ids=input_ids,
                         attention_mask=torch.ones_like(input_ids),
@@ -928,6 +1158,160 @@ class TinyLlamaChat:
                 streamer.end()
             except Exception as specific_e:
                 print(f"{self.get_time()} Error ending streamer: {specific_e}")
+            """Fixed implementation of speculative decoding with streaming and accurate metrics capture"""
+            try:
+                with torch.no_grad():
+                    # Reset confidence metrics for a new generation
+                    self.confidence_metrics.reset()
+
+                    # Track speculative decoding stats
+                    using_spec_decoding = False
+                    accepted_draft_tokens = 0
+                    total_tokens = 0
+
+                    # Setup generation
+                    generated_ids = input_ids
+                    attention_mask = torch.ones_like(input_ids)
+                    remaining_tokens = max_new_tokens
+
+                    # Create a separate config without max_new_tokens to avoid duplication
+                    # Also remove output_scores and return_dict_in_generate if they exist
+                    streaming_config = {}
+                    for k, v in generation_config.items():
+                        if k not in ['max_new_tokens', 'output_scores', 'return_dict_in_generate']:
+                            streaming_config[k] = v
+
+                    # Create and add our logits processor for confidence metrics
+                    metrics_processor = TokenProbabilityCaptureProcessor(self.confidence_metrics)
+
+                    # Set up the logits processor list, preserving any existing processors
+                    if 'logits_processor' in streaming_config:
+                        # Add our processor to existing ones
+                        if isinstance(streaming_config['logits_processor'], list):
+                            streaming_config['logits_processor'].append(metrics_processor)
+                        else:
+                            # If it's already a LogitsProcessorList, we need to add to it
+                            existing_processors = streaming_config['logits_processor']
+                            streaming_config['logits_processor'] = LogitsProcessorList([*existing_processors, metrics_processor])
+                    else:
+                        # No existing processors, create a new list
+                        streaming_config['logits_processor'] = LogitsProcessorList([metrics_processor])
+
+                    while remaining_tokens > 0:
+                        try:
+                            if self.stop_event.is_set():
+                                print("\n[Generation stopped by interrupt signal]")
+                                try:
+                                    # Clean up
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                    # End the streamer
+                                    self.stop_event.clear()  # Reset the event
+                                    streamer.end()
+                                except Exception as e:
+                                    print(f"{self.get_time()} Error during interrupt cleanup: {e}")
+                                return
+
+
+                            # Try speculative decoding
+                            if self.draft_model is not None and turbo_mode:
+                                # Skip for short generations - less overhead
+                                if remaining_tokens < 3:
+                                    break
+
+                                # Call with the new return signature (3 values)
+                                draft_tokens, acceptance_mask, token_logits = self.speculative_decode(
+                                    generated_ids,
+                                    attention_mask,
+                                    num_draft_tokens=min(5, remaining_tokens)
+                                )
+
+                                if draft_tokens is not None and len(draft_tokens) > 0:
+                                    # Success! We have draft tokens to use
+                                    using_spec_decoding = True
+                                    accepted_draft_tokens += len(draft_tokens)
+                                    total_tokens += len(draft_tokens)
+
+                                    # Decode tokens to text for streaming
+                                    token_text = self.tokenizer.decode(draft_tokens, skip_special_tokens=True)
+                                    streamer.put(token_text)
+
+                                    # Add tokens to generated output
+                                    generated_ids = torch.cat([generated_ids[0], draft_tokens]).unsqueeze(0)
+                                    attention_mask = torch.ones_like(generated_ids)
+                                    remaining_tokens -= len(draft_tokens)
+
+                                    # Check for stopping conditions
+                                    stop_generation = False
+                                    for token in draft_tokens:
+                                        if token.item() == self.tokenizer.eos_token_id:
+                                            stop_generation = True
+                                            break
+
+                                    if stop_generation:
+                                        break
+
+                                    # Check for special tokens in decoded text
+                                    if "<|user|>" in token_text or "<|assistant|>" in token_text:
+                                        break
+                                else:
+                                    # Fall back to standard model for regular generation
+                                    break
+                            else:
+                                # Exit to standard generation
+                                break
+
+
+                        except RuntimeError as e:
+                            # Handle device mismatch errors specifically
+                            if "expected all tensors to be on the same device" in str(e):
+                                print("\n[Device mismatch error during interruption - stopping generation]")
+                                break
+                            else:
+                                # Re-raise if it's a different error
+                                raise
+
+                    # If we have tokens remaining or didn't use speculative, do standard generation
+                    if remaining_tokens > 0 or not using_spec_decoding:
+                        # Use standard streaming mode with TokenProbabilityCaptureProcessor
+                        # This will collect token probabilities during normal generation
+                        self.model.generate(
+                            input_ids=input_ids,
+                            attention_mask=torch.ones_like(input_ids),
+                            streamer=streamer,
+                            max_new_tokens=remaining_tokens,
+                            **streaming_config
+                        )
+
+                    # Report speculative decoding stats
+                    if using_spec_decoding and total_tokens > 0:
+                        efficiency = (accepted_draft_tokens / total_tokens) * 100
+                        print(f"{self.get_time()} Speculative decoding: {accepted_draft_tokens}/{total_tokens} tokens accepted ({efficiency:.1f}%)")
+
+                    # If we didn't collect any metrics, add fallback values
+                    # This should only happen if the generation fails completely
+                    if not self.confidence_metrics.token_probabilities:
+                        print("[Warning: No token probabilities collected, using fallback values]")
+                        # Create more realistic fallback values
+                        for i in range(5):
+                            dummy_logits = torch.zeros(self.tokenizer.vocab_size)
+                            # Vary logit values from 1.0 to 5.0
+                            max_val = 1.0 + i
+                            token_id = i % 100
+                            dummy_logits[token_id] = max_val
+                            # Add some secondary values for more realistic distribution
+                            for j in range(3):
+                                dummy_logits[(token_id + j + 1) % 100] = max_val * 0.3
+                            self.confidence_metrics.add_token_score(dummy_logits, token_id)
+
+            except Exception as e:
+                print(f"{self.get_time()} Error in generation thread: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                try:
+                    streamer.end()
+                except Exception as specific_e:
+                    print(f"{self.get_time()} Error ending streamer: {specific_e}")
 
     def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None, use_web_search=True):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
@@ -2054,6 +2438,12 @@ def main():
         top_p=args.top_p,
         top_k=args.top_k
     )
+
+    # # Test embedding batch processing
+    # chat.test_batch_processing('embedding')
+
+    # # Test inference batch processing
+    # chat.test_batch_processing('inference')
 
     # for debugging embed performance
     # return chat.test_embedding_performance()

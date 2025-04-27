@@ -3,10 +3,11 @@ Resource management utilities for local_models project.
 Handles CUDA memory management and resource cleanup.
 """
 
+import numpy as np
 import gc
 import os
 import torch
-from typing import Optional, Dict, Any, List, Union
+from typing import Optional, Dict, Any, List, Union, Callable
 
 class CUDAMemoryManager:
     """
@@ -263,6 +264,26 @@ class ResourceManager:
         self.cuda_manager = CUDAMemoryManager(device)
         self.vector_store_manager = VectorStoreManager(max_vector_stores)
 
+        # Track performance metrics
+        self.batch_performance = {}
+
+        # Default parameters for batch processing
+        self.default_batch_settings = {
+            'embedding': {
+                'batch_size': 8,
+                'cleanup': True,
+                'adaptive': True,
+                'parallel': False,
+                'max_workers': 4
+            },
+            'inference': {
+                'batch_size': 4,
+                'cleanup': True,
+                'adaptive': True,
+                'handle_oom': True
+            }
+        }
+
     def optimize_for_inference(self):
         """Apply inference optimizations."""
         self.cuda_manager.optimize_for_inference()
@@ -300,6 +321,226 @@ class ResourceManager:
         self.vector_store_manager.cleanup_all()
         self.cuda_manager.cleanup_tensors()
         self.cuda_manager.clear_cache()
+
+    def get_batch_settings(self, operation_type: str) -> dict:
+        """
+        Get the appropriate batch settings for an operation type.
+
+        Args:
+            operation_type: Type of operation ('embedding' or 'inference')
+
+        Returns:
+            Dictionary of batch settings
+        """
+        if operation_type in self.default_batch_settings:
+            return self.default_batch_settings[operation_type].copy()
+        return {
+            'batch_size': 8,
+            'cleanup': True,
+            'adaptive': True
+        }
+
+    def update_batch_settings(self, operation_type: str, settings: dict):
+        """
+        Update batch settings for an operation type.
+
+        Args:
+            operation_type: Type of operation ('embedding' or 'inference')
+            settings: Dictionary of settings to update
+        """
+        if operation_type in self.default_batch_settings:
+            self.default_batch_settings[operation_type].update(settings)
+
+    def get_memory_stats(self) -> dict:
+        """
+        Get detailed memory statistics for better batch size estimation.
+
+        Returns:
+            Dictionary of memory statistics
+        """
+        stats = {
+            'cpu': {
+                'available': 0,
+                'used': 0,
+                'percent': 0
+            }
+        }
+
+        # Get CPU memory stats if psutil is available
+        try:
+            import psutil
+            vm = psutil.virtual_memory()
+            stats['cpu'] = {
+                'available': vm.available,
+                'used': vm.used,
+                'percent': vm.percent
+            }
+        except ImportError:
+            pass
+
+        # Get GPU memory stats if CUDA is available
+        if torch.cuda.is_available():
+            device = torch.cuda.current_device()
+            stats['gpu'] = {
+                'total': torch.cuda.get_device_properties(device).total_memory,
+                'allocated': torch.cuda.memory_allocated(device),
+                'reserved': torch.cuda.memory_reserved(device),
+                'percent': (torch.cuda.memory_allocated(device) /
+                           torch.cuda.get_device_properties(device).total_memory) * 100
+            }
+
+        return stats
+
+    def suggest_optimal_batch_size(self, tensor_shape: tuple, operation_type: str = 'inference') -> int:
+        """
+        Suggest an optimal batch size based on tensor shape and memory.
+
+        Args:
+            tensor_shape: Shape of a single tensor item
+            operation_type: Type of operation ('embedding' or 'inference')
+
+        Returns:
+            Suggested batch size
+        """
+        from batch_utils import estimate_optimal_batch_size
+
+        # Get appropriate target memory usage based on operation type
+        if operation_type == 'embedding':
+            target_usage = 0.6  # Embeddings typically need less memory
+        else:
+            target_usage = 0.5  # Inference needs more headroom
+
+        # Use the utility function with appropriate parameters
+        return estimate_optimal_batch_size(
+            tensor_shape=tensor_shape,
+            dtype=torch.float16 if self.is_cuda else torch.float32,
+            target_memory_usage=target_usage
+        )
+
+    def batch_process_embeddings(self, texts: List[str], embedding_function: Callable) -> List[np.ndarray]:
+        """
+        Process embeddings in batches using the configured settings.
+
+        Args:
+            texts: List of texts to embed
+            embedding_function: Function to generate embeddings
+
+        Returns:
+            List of embeddings
+        """
+        from batch_utils import batch_embedding_processing
+
+        # Get batch settings
+        settings = self.get_batch_settings('embedding')
+
+        # Process in batches
+        embeddings = batch_embedding_processing(
+            embedding_function=embedding_function,
+            texts=texts,
+            **settings
+        )
+
+        return embeddings
+
+    def batch_process_inference(self,
+                              model: torch.nn.Module,
+                              inputs: Union[torch.Tensor, Dict[str, torch.Tensor]],
+                              batch_dim: int = 0) -> torch.Tensor:
+        """
+        Process model inference in batches.
+
+        Args:
+            model: PyTorch model to use for inference
+            inputs: Input tensor or dictionary of tensors
+            batch_dim: Dimension to batch along
+
+        Returns:
+            Output tensor
+        """
+        from batch_utils import tensor_batch_processing
+
+        # Get batch settings
+        settings = self.get_batch_settings('inference')
+
+        # Define inference function
+        def inference_op(batch):
+            with torch.no_grad():
+                if isinstance(batch, dict):
+                    return model(**batch)
+                else:
+                    return model(batch)
+
+        # Process in batches
+        if isinstance(inputs, dict):
+            # For dictionary inputs, extract the main input tensor
+            main_input = next(iter(inputs.values()))
+
+            # Process each input separately
+            results = {}
+            for key, tensor in inputs.items():
+                # Define operation for this input
+                def process_input(batch):
+                    # Create batch dictionary
+                    batch_dict = {k: v for k, v in inputs.items()}
+                    batch_dict[key] = batch
+                    return inference_op(batch_dict)
+
+                # Process this input in batches
+                results[key] = tensor_batch_processing(
+                    tensor_op=process_input,
+                    input_tensor=tensor,
+                    batch_dim=batch_dim,
+                    **settings
+                )
+
+            return results
+        else:
+            # For tensor input, process directly
+            return tensor_batch_processing(
+                tensor_op=inference_op,
+                input_tensor=inputs,
+                batch_dim=batch_dim,
+                **settings
+            )
+
+    def benchmark_batch_sizes(self,
+                             test_function: Callable,
+                             test_data: Any,
+                             operation_type: str):
+        """
+        Benchmark different batch sizes and update settings.
+
+        Args:
+            test_function: Function to test
+            test_data: Data to process
+            operation_type: Type of operation ('embedding' or 'inference')
+        """
+        from batch_utils import validate_batch_processing_performance
+
+        # Test performance with different batch sizes
+        performance = validate_batch_processing_performance(
+            test_function=test_function,
+            test_data=test_data
+        )
+
+        # Store results
+        self.batch_performance[operation_type] = performance
+
+        # Find optimal batch size
+        valid_sizes = [size for size, result in performance.items()
+                     if 'error' not in result]
+
+        if valid_sizes:
+            optimal_size = max(valid_sizes,
+                              key=lambda s: performance[s]['items_per_second'])
+
+            # Update settings
+            self.update_batch_settings(operation_type, {'batch_size': optimal_size})
+
+            print(f"Updated {operation_type} batch size to {optimal_size}")
+            return optimal_size
+
+        return None
 
     def __del__(self):
         """Cleanup on object destruction."""

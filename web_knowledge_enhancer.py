@@ -527,7 +527,7 @@ class WebKnowledgeEnhancer:
                         process_urls: bool = False,
                         messages: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
-        Enhance response generation with web knowledge when confidence is low.
+        Enhanced: Improve response generation with web knowledge using batch processing.
 
         Args:
             query: User query
@@ -549,12 +549,6 @@ class WebKnowledgeEnhancer:
                     'web_results': []
                 }
 
-            # Check embedding function
-            has_embeddings = (hasattr(self.memory_manager, 'embedding_function') and
-                             self.memory_manager.embedding_function is not None)
-
-            print(f"{self.get_time()} Embedding function available: {has_embeddings}")
-
             # Create an SEO-friendly query for better search results
             seo_friendly_query = self.create_seo_friendly_query(query)
             print(f"{self.get_time()} SEO-friendly query: {seo_friendly_query}")
@@ -572,33 +566,39 @@ class WebKnowledgeEnhancer:
 
             # Process results to fetch full content if requested
             if process_urls and search_results:
-                print(f"{self.get_time()} Fetching full content from URLs")
-                processed_results = []
+                print(f"{self.get_time()} Fetching full content from URLs in batch")
 
-                # Use ThreadPoolExecutor for concurrent processing
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                    # Submit fetching tasks
-                    future_to_result = {
-                        executor.submit(self.fetch_content, result['url']): result
-                        for result in search_results[:5]  # Process top 5 results
-                    }
+                # Get top URLs to process (limit to 5 for efficiency)
+                urls_to_process = [result['url'] for result in search_results[:5] if 'url' in result]
 
-                    # Process completed fetches
-                    for future in concurrent.futures.as_completed(future_to_result):
-                        result = future_to_result[future]
-                        try:
-                            content = future.result()
+                if urls_to_process:
+                    # Use batch fetching for better performance
+                    url_contents = self.fetch_content_batch(urls_to_process)
+
+                    # Add content to results
+                    processed_results = []
+                    for result in search_results:
+                        if 'url' in result and result['url'] in url_contents:
+                            content = url_contents[result['url']]
                             if content:
                                 # Add full content to result
                                 result_with_content = result.copy()
                                 result_with_content['content'] = content
                                 processed_results.append(result_with_content)
-                        except Exception as e:
-                            print(f"{self.get_time()} Error processing URL {result['url']}: {e}")
+                            else:
+                                # Keep original result if content fetch failed
+                                processed_results.append(result)
+                        else:
+                            # Keep results without URLs
+                            processed_results.append(result)
 
-                if processed_results:
-                    search_results = processed_results
-                    print(f"{self.get_time()} Processed {len(processed_results)} results with content")
+                    if processed_results:
+                        search_results = processed_results
+                        print(f"{self.get_time()} Processed {len(processed_results)} results with content")
+
+            # Check embedding function
+            has_embeddings = (hasattr(self.memory_manager, 'embedding_function') and
+                             self.memory_manager.embedding_function is not None)
 
             # Calculate relevance scores if embeddings are available
             if has_embeddings:
@@ -654,7 +654,7 @@ class WebKnowledgeEnhancer:
 
     def _rank_results_by_similarity(self, query: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Rank search results by semantic similarity to the query.
+        Rank search results by semantic similarity to the query with enhanced batch processing.
 
         Args:
             query: Original query
@@ -666,8 +666,6 @@ class WebKnowledgeEnhancer:
         # Generate query embedding
         try:
             query_embedding = self.memory_manager.embedding_function(query)
-            # Debug info
-            print(f"{self.get_time()} Generated query embedding shape: {query_embedding.shape if hasattr(query_embedding, 'shape') else 'N/A'}")
         except Exception as e:
             print(f"{self.get_time()} Error generating query embedding: {e}")
             # If we can't generate embeddings, just return results in original order
@@ -675,25 +673,42 @@ class WebKnowledgeEnhancer:
                 result['similarity'] = 0.5
             return results[:self.max_results]
 
-        # Score each result
-        scored_results = []
-
+        # Prepare texts for batch embedding
+        texts_to_embed = []
         for result in results:
-            # Create text for embedding (title + snippet)
             text_to_embed = f"{result['title']} {result['snippet']}"
+            texts_to_embed.append(text_to_embed)
 
-            # Generate embedding
-            try:
-                result_embedding = self.memory_manager.embedding_function(text_to_embed)
+        if not texts_to_embed:
+            return []
 
-                # Debug info
-                if len(scored_results) == 0:  # Only for first result to avoid log spam
-                    print(f"{self.get_time()} Generated result embedding shape: {result_embedding.shape if hasattr(result_embedding, 'shape') else 'N/A'}")
+        # Use batch embedding for better performance
+        try:
+            print(f"{self.get_time()} Generating {len(texts_to_embed)} result embeddings in batch")
 
-                # Calculate cosine similarity with safe conversion
-                similarity = self._calculate_similarity(query_embedding, result_embedding)
+            # Check if memory manager has batch embedding function
+            if hasattr(self.memory_manager, 'batch_embedding_function'):
+                result_embeddings = self.memory_manager.batch_embedding_function(texts_to_embed)
+            else:
+                # Fall back to individual embedding
+                result_embeddings = []
+                for text in texts_to_embed:
+                    try:
+                        embedding = self.memory_manager.embedding_function(text)
+                        result_embeddings.append(embedding)
+                    except Exception as e:
+                        print(f"{self.get_time()} Error generating result embedding: {e}")
+                        # Use a zero embedding as fallback
+                        result_embeddings.append(np.zeros(self.memory_manager.embedding_dim))
 
-                # Ensure similarity is a Python float, not a numpy type
+            # Calculate similarities and prepare scored results
+            scored_results = []
+
+            for i, (result, embedding) in enumerate(zip(results, result_embeddings)):
+                # Calculate cosine similarity
+                similarity = self._calculate_similarity(query_embedding, embedding)
+
+                # Ensure similarity is a Python float
                 if hasattr(similarity, 'item'):
                     similarity = float(similarity.item())
                 else:
@@ -706,8 +721,57 @@ class WebKnowledgeEnhancer:
                 # Add similarity to result
                 result_with_score = result.copy()
                 result_with_score['similarity'] = similarity
-
                 scored_results.append(result_with_score)
+
+            # Sort by similarity
+            scored_results.sort(key=lambda x: x.get('similarity', 0), reverse=True)
+
+            return scored_results
+
+        except Exception as e:
+            print(f"{self.get_time()} Error in batch similarity ranking: {e}")
+            # Fall back to sequential processing
+            return self._rank_results_sequentially(query_embedding, results)
+
+    def _rank_results_sequentially(self, query_embedding: np.ndarray, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Rank results sequentially as a fallback if batch processing fails.
+
+        Args:
+            query_embedding: Query embedding
+            results: Search results to rank
+
+        Returns:
+            Ranked results
+        """
+        scored_results = []
+
+        for result in results:
+            # Create text for embedding
+            text_to_embed = f"{result['title']} {result['snippet']}"
+
+            try:
+                # Generate embedding
+                result_embedding = self.memory_manager.embedding_function(text_to_embed)
+
+                # Calculate similarity
+                similarity = self._calculate_similarity(query_embedding, result_embedding)
+
+                # Ensure similarity is a Python float
+                if hasattr(similarity, 'item'):
+                    similarity = float(similarity.item())
+                else:
+                    similarity = float(similarity)
+
+                # Apply sharpening
+                if self.sharpening_factor > 0:
+                    similarity = self._apply_sharpening(similarity, self.sharpening_factor)
+
+                # Add to results
+                result_with_score = result.copy()
+                result_with_score['similarity'] = similarity
+                scored_results.append(result_with_score)
+
             except Exception as e:
                 print(f"{self.get_time()} Error ranking result: {e}")
                 # Add with default similarity
@@ -716,15 +780,89 @@ class WebKnowledgeEnhancer:
                 scored_results.append(result_copy)
 
         # Sort by similarity
-        def get_similarity(result):
-            sim = result.get('similarity', 0)
-            if hasattr(sim, 'item'):
-                return float(sim.item())
-            return float(sim)
-
-        scored_results.sort(key=get_similarity, reverse=True)
+        scored_results.sort(key=lambda x: x.get('similarity', 0), reverse=True)
 
         return scored_results
+
+    def fetch_content_batch(self, urls: List[str], timeout: int = 10) -> Dict[str, Optional[str]]:
+        """
+        Fetch content from multiple URLs in parallel.
+
+        Args:
+            urls: List of URLs to fetch content from
+            timeout: Request timeout in seconds
+
+        Returns:
+            Dictionary mapping URLs to their content (or None if failed)
+        """
+        # Import for concurrent fetching
+        import concurrent.futures
+
+        # Random user agent function
+        def get_random_user_agent():
+            return random.choice(self.user_agents)
+
+        # Function to fetch a single URL
+        def fetch_url(url):
+            try:
+                # Add random delay to avoid detection
+                time.sleep(random.uniform(0.5, 1.5))
+
+                # Random user agent
+                headers = {
+                    'User-Agent': get_random_user_agent(),
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                }
+
+                # Make request
+                response = self.session.get(url, headers=headers, timeout=timeout)
+
+                # Check response
+                if response.status_code != 200:
+                    print(f"{self.get_time()} Error: URL {url} returned status code {response.status_code}")
+                    return url, None
+
+                # Parse HTML
+                soup = BeautifulSoup(response.text, 'html.parser')
+
+                # Remove script, style elements
+                for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
+                    script.extract()
+
+                # Get text and clean it
+                text = soup.get_text(separator=' ')
+
+                # Clean whitespace
+                text = re.sub(r'\s+', ' ', text).strip()
+
+                # Truncate if too long
+                if len(text) > 10000:
+                    text = text[:10000] + "..."
+
+                return url, text
+
+            except Exception as e:
+                print(f"{self.get_time()} Error fetching content from {url}: {e}")
+                return url, None
+
+        # Process URLs in parallel
+        max_workers = min(8, len(urls))  # Limit to 8 workers maximum
+        results = {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit fetching tasks
+            future_to_url = {executor.submit(fetch_url, url): url for url in urls}
+
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_url):
+                url, content = future.result()
+                results[url] = content
+
+        return results
 
     def _calculate_similarity(self, embedding1: np.ndarray, embedding2: np.ndarray) -> float:
         """
