@@ -50,6 +50,8 @@ If you have CUDA, install the GPU version of FAISS for better performance:
 pip install faiss-gpu
 ```
 
+(for tests/fractal_visusalizer.py install seaborn plotly)
+
 For language (url search query building):
 
 ```bash

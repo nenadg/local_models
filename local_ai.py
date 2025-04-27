@@ -1008,7 +1008,18 @@ class TinyLlamaChat:
             # Encode the prompt
             try:
                 with torch.no_grad():
-                    input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+                    # input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+                    # this should fix Already borrowed problem
+                    _token_ids = self.tokenizer(
+                        prompt,
+                        return_tensors="pt",
+                        truncation=True,
+                        padding=True
+                    )
+
+                    # Move to device after tokenization
+                    _encoded_inputs = {k: v.to(self.device) for k, v in _token_ids.items()}
+                    input_ids = _encoded_inputs['input_ids']
             except Exception as e:
                 print(f"{self.get_time()} Error encoding prompt: {e}")
                 import traceback
