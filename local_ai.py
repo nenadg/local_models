@@ -1390,20 +1390,35 @@ class TinyLlamaChat:
             )
 
             # Encode the prompt
+            # try:
+            #     with torch.no_grad():
+            #         # input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+            #         # this should fix Already borrowed problem
+            #         _token_ids = self.tokenizer(
+            #             prompt,
+            #             return_tensors="pt",
+            #             truncation=True,
+            #             padding=True
+            #         )
+
+            #         # Move to device after tokenization
+            #         _encoded_inputs = {k: v.to(self.device) for k, v in _token_ids.items()}
+            #         input_ids = _encoded_inputs['input_ids']
+            # except Exception as e:
+            #     print(f"{self.get_time()} Error encoding prompt: {e}")
+            #     import traceback
+            #     traceback.print_exc()
+            #     return "Error preparing response. Please try again with a simpler query."
+
             try:
                 with torch.no_grad():
-                    # input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
-                    # this should fix Already borrowed problem
-                    _token_ids = self.tokenizer(
+                    # Use the safe tokenization function instead
+                    input_ids = self.safe_tokenize(
                         prompt,
                         return_tensors="pt",
                         truncation=True,
                         padding=True
-                    )
-
-                    # Move to device after tokenization
-                    _encoded_inputs = {k: v.to(self.device) for k, v in _token_ids.items()}
-                    input_ids = _encoded_inputs['input_ids']
+                    ).input_ids.to(self.device)
             except Exception as e:
                 print(f"{self.get_time()} Error encoding prompt: {e}")
                 import traceback
@@ -2371,6 +2386,30 @@ class TinyLlamaChat:
         except Exception as e:
             print(f"\n{self.get_time()} Error during input: {e}")
             return ""
+
+    # handles "Already borrowed" error in tokenization
+    def safe_tokenize(self, text, **kwargs):
+        """
+        Safe tokenization that avoids the 'Already borrowed' error by creating new tensors.
+        """
+        try:
+            # Try normal tokenization first
+            return self.tokenizer(text, **kwargs)
+        except RuntimeError as e:
+            if "Already borrowed" in str(e):
+                print(f"{self.get_time()} Compensating for already borrowed tensor...")
+                # Create a fresh tokenizer instance for this operation
+                import copy
+                temp_tokenizer = copy.deepcopy(self.tokenizer)
+
+                # Try with the fresh tokenizer
+                result = temp_tokenizer(text, **kwargs)
+
+                # Convert to regular Python objects before returning
+                return {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in result.items()}
+            else:
+                # Re-raise if it's a different error
+                raise
 
 def main():
     start_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
