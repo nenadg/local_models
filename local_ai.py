@@ -54,9 +54,6 @@ DEFAULT_SYSTEM_MESSAGE = {
 3. You may speculate if the user explicitly asks you to "please continue anyway" or "please speculate."
 4. When speculating, clearly indicate your uncertainty with phrases like "I'm not confident, but..."
 5. Be helpful, informative, and conversational in your responses.
-And remember - Imagine your words are like little treasure boxes. Instead of giving everyone a whole bunch of boxes at once,
-you choose just a few really cool ones to share. This way, people know you're thoughtful and your words are special.
-It's like being a superhero: you use your superpower of speaking wisely and listen to others, too!
 """
 }
 
@@ -1014,6 +1011,8 @@ class TinyLlamaChat:
                     input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
             except Exception as e:
                 print(f"{self.get_time()} Error encoding prompt: {e}")
+                import traceback
+                traceback.print_exc()
                 return "Error preparing response. Please try again with a simpler query."
 
 
@@ -2107,7 +2106,7 @@ def main():
 
             _ = chat.generate_response(
                 [{"role": "user", "content": f"Just write the result of equation {magic_number_1}{random.choice(operators)}{magic_number_2} without anything than just that the result of equation."}],
-                max_new_tokens=16,
+                max_new_tokens=30,
                 temperature=0.7,
                 use_web_search=False
             )
