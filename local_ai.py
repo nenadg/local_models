@@ -2800,6 +2800,8 @@ def main():
     #         torch.cuda.empty_cache()
     except Exception as e:
         print(f"\n{chat.get_time()} Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         # This should only happen when exiting the program
         chat.cleanup()

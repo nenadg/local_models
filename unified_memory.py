@@ -7,7 +7,6 @@ with optional fractal embedding support for enhanced semantic search.
 import os
 import json
 import faiss
-import torch
 import numpy as np
 import time
 import re
@@ -438,7 +437,7 @@ class UnifiedMemoryManager:
                 # if fractal_added > 0:
                 #     # print(f"{self.get_time()} Added {fractal_added} fractal embeddings to indices")
                 if fractal_failed > 0:
-                    # print(f"{self.get_time()} Failed to add {fractal_failed} fractal embeddings")
+                    print(f"{self.get_time()} Failed to add {fractal_failed} fractal embeddings")
             
             # Auto-save if enabled
             if self.auto_save:
@@ -850,6 +849,144 @@ class UnifiedMemoryManager:
 
         return output
 
+    def fast_similarity_search(self, query_embedding: np.ndarray, top_k: int = 5, min_similarity: float = 0.25) -> List[Dict]:
+        """
+        Perform a fast approximate similarity search across fractal levels.
+
+        This optimized function:
+        1. Uses approximate nearest neighbor search instead of exact search
+        2. Searches levels in parallel
+        3. Uses early stopping when confidence is high
+        4. Caches results for similar queries
+
+        Args:
+            query_embedding: The query embedding vector
+            top_k: Maximum results to return
+            min_similarity: Minimum similarity threshold
+
+        Returns:
+            List of search results with similarity scores
+        """
+        # Create a hash key for caching
+        query_hash = hashlib.md5(query_embedding.tobytes()).hexdigest()
+
+        # Check if we have cached results for a similar query
+        if hasattr(self, '_similarity_cache') and query_hash in self._similarity_cache:
+            cached_time, cached_results = self._similarity_cache[query_hash]
+            # Use cache if recent (within last 60 seconds)
+            if time.time() - cached_time < 60:
+                return cached_results
+
+        # Initialize result storage
+        all_results = {}
+        total_results = 0
+
+        # Search base level first (this is fast)
+        base_similarities, base_indices = self.index.search(
+            np.array([query_embedding], dtype=np.float32),
+            min(self.index.ntotal, top_k * 2)
+        )
+
+        # Process base level results
+        for i, idx in enumerate(base_indices[0]):
+            if idx != -1 and base_similarities[0][i] > min_similarity:
+                if idx not in self.deleted_ids:
+                    item = self.items[idx]
+                    similarity = float(base_similarities[0][i])
+                    all_results[item.id] = {
+                        "id": item.id,
+                        "content": item.content,
+                        "similarity": similarity,
+                        "raw_similarity": similarity,  # Add this line to include raw_similarity
+                        "metadata": item.metadata,
+                        "level": 0
+                    }
+                    total_results += 1
+
+        # If we already have enough high-confidence results, we can skip other levels
+        high_confidence_results = [r for r in all_results.values() if r["similarity"] > 0.8]
+        if len(high_confidence_results) >= min(3, top_k):
+            # We have enough high-confidence results to skip other levels
+            final_results = list(all_results.values())
+            final_results.sort(key=lambda x: x["similarity"], reverse=True)
+            return final_results[:top_k]
+
+        # Define a worker function for parallel processing
+        def search_level(level):
+            level_results = {}
+            if level in self.fractal_indices and self.fractal_indices[level].ntotal > 0:
+                # Generate level-specific query
+                level_query = self._generate_level_embedding(query_embedding, level)
+                level_query = np.array([level_query], dtype=np.float32)
+
+                # Search this level
+                similarities, indices = self.fractal_indices[level].search(
+                    level_query,
+                    min(self.fractal_indices[level].ntotal, top_k * 2)
+                )
+
+                # Process results
+                for i, idx in enumerate(indices[0]):
+                    if idx != -1 and similarities[0][i] > min_similarity:
+                        if idx not in self.deleted_ids:
+                            item = self.items[idx]
+                            similarity = float(similarities[0][i])
+                            level_results[item.id] = {
+                                "id": item.id,
+                                "content": item.content,
+                                "similarity": similarity,
+                                "raw_similarity": similarity,  # Add this line to include raw_similarity
+                                "metadata": item.metadata,
+                                "level": level
+                            }
+            return level_results
+
+        # Use multi-threading to search levels in parallel
+        import concurrent.futures
+        levels_to_search = [l for l in self.fractal_indices.keys() if self.fractal_indices[l].ntotal > 0]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(levels_to_search))) as executor:
+            # Submit search tasks
+            future_to_level = {executor.submit(search_level, level): level for level in levels_to_search}
+
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_level):
+                level_results = future.result()
+
+                # Merge with main results, keeping highest similarity
+                for item_id, result in level_results.items():
+                    if item_id not in all_results or result["similarity"] > all_results[item_id]["similarity"]:
+                        all_results[item_id] = result
+
+        # Convert to list and sort by similarity
+        final_results = list(all_results.values())
+        final_results.sort(key=lambda x: x["similarity"], reverse=True)
+
+        # Apply cross-level verification
+        result_dict = {r["id"]: r for r in final_results}
+        self._apply_cross_level_verification(result_dict)
+
+        # Re-sort after verification
+        final_results = list(result_dict.values())
+        final_results.sort(key=lambda x: x["similarity"], reverse=True)
+
+        # Limit to top-k
+        final_results = final_results[:top_k]
+
+        # Cache the results for future similar queries
+        if not hasattr(self, '_similarity_cache'):
+            self._similarity_cache = {}
+        self._similarity_cache[query_hash] = (time.time(), final_results)
+
+        # Clean cache if it gets too large
+        if len(self._similarity_cache) > 100:
+            # Remove oldest entries
+            oldest_keys = sorted(self._similarity_cache.keys(),
+                                key=lambda k: self._similarity_cache[k][0])[:50]
+            for key in oldest_keys:
+                del self._similarity_cache[key]
+
+        return final_results
 
     def retrieve(self, 
                 query: str,
@@ -857,8 +994,7 @@ class UnifiedMemoryManager:
                 min_similarity: float = 0.25,
                 use_fractal: Optional[bool] = None) -> List[Dict[str, Any]]:
         """
-        Retrieve relevant knowledge based on query.
-        No longer filters by memory_type - all knowledge is treated equally.
+        Retrieve relevant knowledge based on query using optimized search.
 
         Args:
             query: Search query
@@ -890,7 +1026,6 @@ class UnifiedMemoryManager:
                 if query_norm < 1e-10:
                     query_norm = 1e-10
                 normalized_query = query_embedding / query_norm
-                normalized_query = np.array([normalized_query], dtype=np.float32)
             except Exception as e:
                 print(f"{self.get_time()} Error normalizing query embedding: {e}")
                 return []
@@ -900,31 +1035,30 @@ class UnifiedMemoryManager:
             have_fractal_indices = bool(self.fractal_indices) and any(idx.ntotal > 0 for idx in self.fractal_indices.values())
             can_use_fractal = use_fractal_here and have_fractal_indices
 
-            # Use fractal search if enabled and indices are available
+            # Use fast similarity search if fractal is enabled
             if can_use_fractal:
                 try:
-                    results = self._fractal_search(
+                    print(f"{self.get_time()} Using fast similarity search")
+                    return self.fast_similarity_search(
                         normalized_query,
                         top_k=top_k,
                         min_similarity=min_similarity
                     )
                 except Exception as e:
-                    print(f"{self.get_time()} Error in fractal search: {e}")
-                    # Fall back to standard search
-                    results = self._standard_search(
-                        normalized_query,
+                    print(f"{self.get_time()} Error in fast similarity search: {e}")
+                    # Fall back to standard search if fast search fails
+                    return self._standard_search(
+                        np.array([normalized_query], dtype=np.float32),
                         top_k=top_k,
                         min_similarity=min_similarity
                     )
             else:
-                # Standard search
-                results = self._standard_search(
-                    normalized_query,
+                # Standard search if fractal not enabled
+                return self._standard_search(
+                    np.array([normalized_query], dtype=np.float32),
                     top_k=top_k,
                     min_similarity=min_similarity
                 )
-
-            return results
     
     def _standard_search(self, 
                        normalized_query: np.ndarray, 
@@ -1524,38 +1658,38 @@ class UnifiedMemoryManager:
                 self.fractal_indices = {}
                 return False
 
-    def clear(self, memory_types: Optional[List[str]] = None) -> bool:
-        """
-        Clear memory data.
-
-        Args:
-            memory_types: Optional list of memory types to clear (None for all)
-
-        Returns:
-            True if successful, False otherwise
-        """
+    def cleanup(self):
+        """Clean up resources and consolidate storage."""
         with self._lock:
-            if memory_types:
-                # Mark items of specified types as deleted
-                for i, item in enumerate(self.items):
-                    if item.memory_type in memory_types:
-                        self.deleted_ids.add(i)
-                        if item.id in self.id_to_index:
-                            del self.id_to_index[item.id]
-            else:
-                # Clear all data
-                self.items = []
-                self.embeddings = []
-                self.id_to_index = {}
-                self.deleted_ids = set()
-                self.index = None
-                self.fractal_indices = {}
+            # Consolidate storage by removing deleted items
+            if self.deleted_ids:
+                new_items = []
+                new_embeddings = []
+                new_id_to_index = {}
 
-            # Save if auto-save is enabled
+                for i, item in enumerate(self.items):
+                    if i not in self.deleted_ids:
+                        # Add to new lists
+                        new_idx = len(new_items)
+                        new_items.append(item)
+                        new_embeddings.append(self.embeddings[i])
+                        new_id_to_index[item.id] = new_idx
+
+                # Replace storage
+                self.items = new_items
+                self.embeddings = new_embeddings
+                self.id_to_index = new_id_to_index
+                self.deleted_ids = set()
+
+                # Rebuild index
+                self._rebuild_index()
+
+            # Save consolidated data
             if self.auto_save:
                 self.save()
 
-            return True
+            # Run garbage collection
+            gc.collect()
 
     def get_stats(self) -> Dict[str, Any]:
         """
@@ -1565,13 +1699,6 @@ class UnifiedMemoryManager:
             Dictionary of statistics
         """
         with self._lock:
-            # Count items by type
-            type_counts = {}
-            for item in self.items:
-                if item.memory_type not in type_counts:
-                    type_counts[item.memory_type] = 0
-                type_counts[item.memory_type] += 1
-
             # Index stats
             index_size = self.index.ntotal if self.index else 0
 
@@ -1585,7 +1712,6 @@ class UnifiedMemoryManager:
                 "total_items": len(self.items),
                 "active_items": len(self.items) - len(self.deleted_ids),
                 "deleted_items": len(self.deleted_ids),
-                "type_counts": type_counts,
                 "index_size": index_size,
                 "index_dimension": self.embedding_dim,
                 "fractal_enabled": self.use_fractal,
