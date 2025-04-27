@@ -415,6 +415,49 @@ class UnifiedMemoryManager:
             print(f"{self.get_time()} Warning: No rotation matrix for level {level}")
             return None
 
+    def _initialize_fractal_matrices(self):
+        """
+        Initialize rotation matrices for fractal embeddings.
+        This method ensures matrices are created before any embeddings are generated.
+        """
+        if hasattr(self, '_rotation_matrices') and self._rotation_matrices:
+            # Matrices already initialized
+            return
+
+        # Create rotation matrices for all potential levels
+        self._rotation_matrices = {}
+        self._level_biases = {}
+
+        # Create many more levels than we explicitly use to allow for natural selection
+        max_potential_levels = 20  # Support up to 20 potential levels
+        embedding_dim = self.embedding_dim
+
+        for i in range(1, max_potential_levels + 1):
+            # Create a rotation matrix with fixed seed for determinism
+            np.random.seed(42 + i)  # Fixed seed per level
+
+            # Create rotation matrix with increasing randomness by level
+            rotation_factor = 0.1 + (i * 0.03)  # Gradually increase randomness
+            rotation = np.random.normal(0, rotation_factor, (embedding_dim, embedding_dim))
+
+            # For earlier levels, preserve more of the original structure
+            if i <= 3:
+                # Add identity matrix component to preserve some original information
+                preservation_factor = 0.9 - (i * 0.15)  # Decreasing preservation
+                rotation = rotation + np.eye(embedding_dim) * preservation_factor
+
+            # Ensure the matrix is orthogonal (proper rotation)
+            u, _, vh = np.linalg.svd(rotation, full_matrices=False)
+            self._rotation_matrices[i] = u @ vh
+
+            # Create level-specific bias vector
+            np.random.seed(137 + i)  # Different seed for bias
+            bias_factor = 0.01 + (i * 0.002)  # Gradually increase bias
+            self._level_biases[i] = np.random.normal(0, bias_factor, (embedding_dim,))
+
+        # Log creation of matrices
+        print(f"{self.get_time()} Created {max_potential_levels} fractal rotation matrices of size {embedding_dim}x{embedding_dim}")
+
     def _add_fractal_embeddings_batch(self, items: List[MemoryItem]):
         """
         Generate and add fractal embeddings to multiple memory items in batch.
@@ -425,6 +468,9 @@ class UnifiedMemoryManager:
         # Skip if fractal embeddings are disabled
         if not self.use_fractal:
             return
+
+        # Ensure matrices are initialized
+        self._initialize_fractal_matrices()
 
         # Group items by embedding dimension for efficient processing
         dimension_groups = {}
@@ -603,6 +649,9 @@ class UnifiedMemoryManager:
         # Skip if fractal embeddings are disabled
         if not self.use_fractal:
             return
+
+        # Ensure matrices are initialized
+        self._initialize_fractal_matrices()
 
         # Skip if no base embedding available
         if item.embedding is None or len(item.embedding) == 0:
