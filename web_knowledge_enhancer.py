@@ -3,7 +3,7 @@ WebKnowledgeEnhancer for TinyLlama Chat
 Provides web search capabilities to augment model responses with real-time information.
 Compatible with UnifiedMemoryManager.
 """
-
+import torch
 import requests
 import re
 import time
@@ -407,23 +407,62 @@ class WebKnowledgeEnhancer:
 
     def create_seo_friendly_query(self, query: str) -> str:
         """
-        Create an SEO-friendly search query.
+    Create an SEO-friendly search query using TinyLLama to extract key terms.
 
-        Args:
-            query: The original user query
+    Args:
+        query: The original user query
 
-        Returns:
-            SEO-friendly search query
-        """
-        # Extract entities first (important terms)
-        entities = self._extract_entities(query)
+    Returns:
+        SEO-friendly search query
+    """
+        prompt = f"""
+    Extract the most important search keywords from this query.
+    Include only essential terms, entities, and operators.
+    Keep it under 7 terms. Format as comma-separated list.
 
-        # If NLP is available, use it for better extraction
-        if self.nlp_available:
-            return self._nlp_query_extraction(query, entities)
-        else:
-            # Fallback to simpler extraction
-            return self._simple_query_extraction(query, entities)
+    Query: "{query}"
+
+    Keywords:"""
+
+        # Use the model without calling web search
+        try:
+            # Create a standalone inference call to our existing model
+            with torch.no_grad():
+                input_ids = self.chat.tokenizer.encode(prompt, return_tensors="pt").to(self.chat.device)
+                outputs = self.chat.model.generate(
+                    input_ids=input_ids,
+                    max_new_tokens=30,
+                    num_return_sequences=1,
+                    do_sample=False,
+                    # temperature=0.2,
+                    # top_p=0.95
+                )
+                keywords = self.chat.tokenizer.decode(outputs[0][input_ids.shape[1]:], skip_special_tokens=True)
+
+                # Clean up the output
+                keywords = keywords.strip().split("\n")[0]  # Take only first line
+
+                # Convert to search query format
+                terms = [term.strip() for term in keywords.split(",") if term.strip()]
+
+                # Add back any math operators from original query
+                math_terms = re.findall(r'\d+\s*[\+\-\*\/]\s*\d+', query)
+                for math in math_terms:
+                    if not any(math in term for term in terms):
+                        terms.append(math)
+
+                seo_query = " ".join(terms)
+
+                # If extraction failed, fall back to original query
+                if not seo_query:
+                    return query
+
+                return seo_query
+
+        except Exception as e:
+            print(f"{self.get_time()} Error generating keywords: {e}")
+            # Fall back to original approach
+            return "" # query
 
     def _extract_entities(self, text: str) -> List[str]:
         """

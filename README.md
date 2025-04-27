@@ -225,7 +225,7 @@ export HSA_ENABLE_SDMA=0
 or try running with:
 
 ```bash
-HSA_OVERRIDE_GFX_VERSION=10.3.0 python local_ai.py --temperature 0.1 --max-tokens 512 --heatmap
+HSA_OVERRIDE_GFX_VERSION=10.3.0 python local_ai.py --max-tokens 512 --heatmap --do-sample --temperature 0.5
 ```
 
 # ROCm

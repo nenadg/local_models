@@ -31,7 +31,6 @@ from unified_memory import UnifiedMemoryManager
 
 from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
 from question_classifier import QuestionClassifier
-from weighted_memory_integrator import WeightedMemoryIntegrator
 
 from pattern_matching_utils import (
     is_command_related_query, extract_command_context, extract_command_type,
@@ -109,12 +108,6 @@ class TinyLlamaChat:
         
         # Initialize the question classifier
         self.question_classifier = QuestionClassifier()
-
-        # Initialize the weighted memory integrator
-        self.memory_integrator = WeightedMemoryIntegrator(
-            memory_manager=self.memory_manager,
-            question_classifier=self.question_classifier
-        )
 
         # Initialize from semantic reasoning finetune function
         finetuned_model_path = "./finetuned_tinyllama_reasoning_2"
@@ -448,7 +441,7 @@ class TinyLlamaChat:
         return messages
 
     def create_prompt_with_knowledge(self, messages, use_web_search=True):
-        """Create a prompt that incorporates relevant knowledge with domain-aware weighting"""
+        """Create a prompt that incorporates relevant knowledge."""
         try:
             # First check if this is a continuation request and enhance if needed
             messages = self.enhance_query_for_continuation(messages)
@@ -459,120 +452,63 @@ class TinyLlamaChat:
             # Create enhanced system message with knowledge
             enhanced_system_content = self.system_message["content"]
 
-            # Use the weighted memory integrator for domain-aware memory retrieval
+            # Retrieve knowledge using the unified approach
+            knowledge_text = ""
             if current_query:
-                # Detect if this is a command-related query
-                command_context = None
+                # Retrieve knowledge with appropriate settings
+                results = self.memory_manager.retrieve(
+                    query=current_query,
+                    top_k=8,  # Default is 8
+                    min_similarity=0.25,
+                    use_fractal=self.memory_manager.use_fractal
+                )
+
+                # Format the knowledge for the prompt
+                if results:
+                    knowledge_text = self.memory_manager.format_knowledge_for_prompt(results, current_query)
+
+            # Add web search results if available and enabled
+            web_context = ""
+            if use_web_search and self.enable_web_knowledge and self.web_enhancer is not None:
                 try:
-                    command_context = extract_command_context(current_query)
-                except Exception as e:
-                    print(f"{self.get_time()} Error extracting command context: {e}")
+                    web_enhancement = self.enhance_with_web_knowledge(current_query, {}, None, messages)
 
-                # Get domain information if available
-                domain = None
-                settings = None
-
-                try:
-                    if hasattr(self, 'question_classifier') and self.question_classifier is not None:
-                        settings = self.question_classifier.get_domain_settings(current_query)
-                        if isinstance(settings, dict) and 'domain' in settings:
-                            domain = settings['domain']
-                except Exception as e:
-                    print(f"{self.get_time()} Error classifying question: {e}")
-                    # Continue with domain=None
-
-                # Check confidence to determine if web enhancement is needed
-                confidence_data = {}
-                try:
-                    if hasattr(self, 'confidence_metrics') and self.confidence_metrics is not None:
-                        confidence_data = self.confidence_metrics.get_metrics(apply_sharpening=True)
-                except Exception as e:
-                    print(f"{self.get_time()} Error getting confidence metrics: {e}")
-                    # Continue with empty confidence_data
-
-                # Try to enhance with web knowledge if confidence is low
-                web_enhancement = None
-                if use_web_search and hasattr(self, 'enable_web_knowledge') and self.enable_web_knowledge and hasattr(self, 'web_enhancer') and self.web_enhancer is not None:
-                    try:
-                        web_enhancement = self.enhance_with_web_knowledge(current_query, confidence_data, domain, messages)
-                    except Exception as e:
-                        print(f"{self.get_time()} Error enhancing with web knowledge: {e}")
-                        # Continue with web_enhancement=None
-
-                # Ensure recent memories are included by forcing a higher k value for recent queries
-                recency_boost = True
-                top_k = 8  # Default is 8
-
-                memories = ""
-                if command_context:
-                    # Use specialized command memory retrieval
-                    try:
-                        memories = self.retrieve_command_memories(
-                            current_query,
-                            command_context=command_context,
-                            top_k=top_k,
-                            recency_weight=0.3,
-                            include_tabular=True
-                        )
-                    except Exception as e:
-                        print(f"{self.get_time()} Error retrieving command memories: {e}")
-                        # Continue with memories=""
-                else:
-                    # Use standard memory retrieval for non-command queries
-                    try:
-                        if hasattr(self, 'memory_integrator') and self.memory_integrator is not None:
-                            result = self.memory_integrator.retrieve_and_integrate(
-                                self.current_user_id,
-                                current_query
-                            )
-                            if isinstance(result, dict):
-                                memories = result.get('memory_text', '')
-                                settings = result.get('settings', settings)
-                                domain = settings.get('domain', domain) if settings else domain
-
-                                # Add procedural knowledge section for certain domains
-                                if domain in ['translation', 'procedural']:
-                                    # Retrieve specialized procedural knowledge
-                                    try:
-                                        procedures = self.retrieve_procedural_knowledge(current_query)
-                                        if procedures:
-                                            # Create structured procedure section
-                                            procedure_section = self.create_procedural_prompt_section(procedures)
-                                            if procedure_section:
-                                                # Add explicit instruction for how to apply the knowledge
-                                                instruction = "\nIMPORTANT: When performing tasks like translation or following procedures, " \
-                                                            "use the PROCEDURAL KNOWLEDGE section below as a direct reference. " \
-                                                            "For translations, apply each mapping rule precisely.\n"
-
-                                                # Append to memories with high priority
-                                                memories = instruction + procedure_section + "\n\n" + memories
-                                    except Exception as e:
-                                        print(f"{self.get_time()} Error retrieving procedural knowledge: {e}")
-                                        # Continue with existing memories
-                    except Exception as e:
-                        print(f"{self.get_time()} Error integrating memories: {e}")
-                        # Continue with memories=""
-
-                # Add web search results if available
-                web_context = ""
-                if web_enhancement and isinstance(web_enhancement, dict) and web_enhancement.get('enhanced', False):
-                    try:
+                    if web_enhancement and web_enhancement.get('enhanced', False):
                         web_context = self.web_enhancer.format_web_results_for_context(web_enhancement)
-                    except Exception as e:
-                        print(f"{self.get_time()} Error formatting web results: {e}")
-                        # Continue with web_context=""
 
-                # Combine local memory and web knowledge
-                if memories and web_context:
-                    enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
-                    enhanced_system_content += f"\n{memories}\n"
-                    enhanced_system_content += f"\n{web_context}"
-                elif memories:
-                    enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
-                    enhanced_system_content += f"\n{memories}"
-                elif web_context:
-                    enhanced_system_content += "\n\nIMPORTANT: Use the following web search results in your response:\n"
-                    enhanced_system_content += f"\n{web_context}"
+                        # Add web results to knowledge
+                        if web_enhancement.get('web_results'):
+                            for result in web_enhancement['web_results']:
+                                # Add each result to knowledge system
+                                metadata = {
+                                    "source_hint": "web",
+                                    "url": result.get('url', ''),
+                                    "title": result.get('title', ''),
+                                    "timestamp": datetime.now().timestamp()
+                                }
+
+                                content = f"{result.get('title', '')}: {result.get('snippet', '')}"
+
+                                # Add to memory asynchronously
+                                if self.auto_memorize:
+                                    threading.Thread(
+                                        target=self.memory_manager.add,
+                                        args=(content, metadata, True)
+                                    ).start()
+                except Exception as e:
+                    print(f"{self.get_time()} Error enhancing with web knowledge: {e}")
+
+            # Combine knowledge and web information
+            if knowledge_text and web_context:
+                enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
+                enhanced_system_content += f"\n{knowledge_text}\n"
+                enhanced_system_content += f"\n{web_context}"
+            elif knowledge_text:
+                enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
+                enhanced_system_content += f"\n{knowledge_text}"
+            elif web_context:
+                enhanced_system_content += "\n\nIMPORTANT: Use the following web search results in your response:\n"
+                enhanced_system_content += f"\n{web_context}"
 
             # Create messages with enhanced system prompt
             enhanced_messages = [
@@ -582,18 +518,15 @@ class TinyLlamaChat:
                 }
             ]
 
-            # Add conversation history - keep more history for context
+            # Add conversation history
             if len(messages) > 1:
                 history_messages = messages[1:]
-                # Keep up to 5 recent messages
-                enhanced_messages.extend(history_messages[-5:])
+                enhanced_messages.extend(history_messages[-5:])  # Keep up to 5 recent messages
 
             return enhanced_messages
 
         except Exception as e:
             print(f"{self.get_time()} Error in create_prompt_with_knowledge: {e}")
-            import traceback
-            traceback.print_exc()
 
             # Return basic messages on error
             if not messages or len(messages) == 0:
@@ -1004,7 +937,7 @@ class TinyLlamaChat:
         # We only support streaming now, simplifies the code
 
         fallback_message_streamed = False
-        # fd = None
+        fd = None
         
         try:
             # heatmap = TerminalHeatmap(self.tokenizer, use_background=False)
@@ -1126,10 +1059,10 @@ class TinyLlamaChat:
             thread.daemon = True
             thread.start()
 
-            # fd = sys.stdin.fileno()
-            # self.old_settings = termios.tcgetattr(fd)
-            # ## not needed - tty.setraw(fd)
-            # tty.setcbreak(fd)
+            fd = sys.stdin.fileno()
+            self.old_settings = termios.tcgetattr(fd)
+            ## not needed - tty.setraw(fd)
+            tty.setcbreak(fd)
 
             # Initialize response
             complete_response = ""
@@ -1154,14 +1087,14 @@ class TinyLlamaChat:
 
             try:
                 while True:
-                    # if select.select([sys.stdin], [], [], 0)[0]:
-                    #     c = sys.stdin.read(1)
-                    #     if c == '\x03':  # Ctrl+C
-                    #         self.stop_event.set()
-                    #         print("\n{self.get_time()} Canceled by user")
-                    #         if torch.cuda.is_available():
-                    #             torch.cuda.empty_cache()
-                    #         break
+                    if select.select([sys.stdin], [], [], 0)[0]:
+                        c = sys.stdin.read(1)
+                        if c == '\x03':  # Ctrl+C
+                            self.stop_event.set()
+                            print(f"\n{self.get_time()} Canceled by user")
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            break
 
                     token = next(iter(streamer), None)
 
@@ -1338,7 +1271,7 @@ class TinyLlamaChat:
 
                                 return self.mcp_handler.finalize_streaming(complete_response)
 
-                # termios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
+                termios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
                 # Handle any remaining tokens
                 if token_buffer:
                     print(token_buffer, end="", flush=True)
@@ -1429,7 +1362,35 @@ class TinyLlamaChat:
                 self.confidence_metrics.add_token_score(dummy_logits, 0)
 
             self.resource_manager.clear_cache()
-            #ytermios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
+            termios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
+
+    def _clean_boilerplate_messages(self, response):
+        """
+        Clean boilerplate UI messages from the response before metric calculation.
+
+        Args:
+            response: The original response text
+
+        Returns:
+            Cleaned response without boilerplate
+        """
+        # List of patterns to remove
+        patterns = [
+            r'¯\\\_\(ツ\)\_/¯',                          # Shrug emoticon
+            r'Confidence Heatmap Legend.*?\n',           # Heatmap legend
+            r'Window size for geometric mean:.*?\n',     # Window size info
+            r'Confidence range:.*?\n',                   # Confidence range info
+            r'\[Generated.*?tokens\/sec\]',              # Generation stats
+            r'\[█+░*\] Truthiness:.*?\n',                # Truthiness bar
+            r'\[Sharpening enabled:.*?\]',               # Sharpening info
+        ]
+
+        # Apply each pattern
+        cleaned = response
+        for pattern in patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.DOTALL)
+
+        return cleaned
 
 
     def ensure_metrics(self, response_length=None):
@@ -1443,8 +1404,10 @@ class TinyLlamaChat:
             # If response length is not provided, use a default
             num_tokens = 5
             if response_length:
-                # Scale the number of tokens based on response length
-                num_tokens = max(5, min(response_length, 20))
+                # First, clean the response of boilerplate messages
+                cleaned_response = self._clean_boilerplate_messages(response)
+                # Scale the number of tokens based on cleaned response length
+                num_tokens = max(5, min(len(cleaned_response.split()), 20))
 
             for i in range(num_tokens):
                 # Create dummy logits tensor
@@ -1622,7 +1585,7 @@ class TinyLlamaChat:
             print(f"{self.get_time()} [Sharpening enabled: factor={self.sharpening_factor:.2f}]")
 
     def add_conversation_to_memory(self, query, response):
-        """Add the current exchange to memory if auto-memorize is enabled"""
+        """Add the current exchange to memory if auto-memorize is enabled."""
         if not self.auto_memorize:
             return 0
 
@@ -1632,34 +1595,27 @@ class TinyLlamaChat:
         if not key_info:
             return 0
 
-        # Create batch items
-        batch_items = []
-        timestamp = datetime.now().isoformat()
+        # Add each item to memory
+        memories_added = 0
 
         for info in key_info:
             # Create metadata
             metadata = {
-                'source_query': query,
-                'source_response': response[:100] + "..." if len(response) > 100 else response,
-                'timestamp': timestamp,
-                'memory_type': "conversation"
+                'source_hint': 'conversation',
+                'query': query,
+                'timestamp': datetime.now().timestamp(),
+                'retrieval_count': 0
             }
 
-            # Add to batch
-            batch_items.append({
-                "content": info,
-                "memory_type": "conversation",
-                "source": "conversation",
-                "metadata": metadata
-            })
+            # Add to memory
+            item_id = self.memory_manager.add(
+                content=info,
+                metadata=metadata,
+                use_fractal=self.memory_manager.use_fractal
+            )
 
-        # Add all items at once
-        added_ids = self.memory_manager.add_bulk(
-            batch_items,
-            use_fractal=self.memory_manager.use_fractal
-        )
-
-        memories_added = sum(1 for item_id in added_ids if item_id is not None)
+            if item_id:
+                memories_added += 1
         
         if memories_added > 0:
             print(f"{self.get_time()} [Memory] Added {memories_added} new memories")
@@ -1723,6 +1679,7 @@ class TinyLlamaChat:
                 _ = self.confidence_metrics.get_metrics(apply_sharpening=True)
 
         print(f"{self.get_time()} Sharpening factor set to {factor}")
+
 
     def post_process_response(self, response, query, domain=None):
         """
@@ -1792,8 +1749,8 @@ class TinyLlamaChat:
         """Clean up arithmetic responses"""
         # Extract the expression from the query
         expression = None
-        if hasattr(self, 'memory_integrator'):
-            expression = extract_arithmetic_expression(query)
+        # if hasattr(self, 'memory_integrator'):
+        #     expression = extract_arithmetic_expression(query)
 
         if not expression:
             # Try a simple regex fallback
@@ -1864,83 +1821,41 @@ class TinyLlamaChat:
         return cleaned
 
     def add_command_to_memory(self, command: str, output: str, error: str = None, output_file: str = None):
-        """High-performance command memory addition"""
+        """Add command output to unified knowledge system."""
         # Skip empty outputs
         if not output and not error:
             return 0
 
-        batch_items = []
+        # Prepare content - the actual text we want to remember
+        content = f"Command '{command}' output: {output[:500]}"
+        if len(output) > 500:
+            content += "... [output truncated]"
 
-        # Detect command type and output format
-        command_type = self._detect_command_type(command, output)
-        is_tabular = is_tabular_data(output)
+        if error:
+            content += f"\nError: {error}"
 
-        # Create base metadata
-        base_metadata = {
+        # Prepare metadata
+        metadata = {
+            "source_hint": "command",
             "command": command,
-            "command_type": command_type,
-            "is_tabular": is_tabular,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().timestamp(),
+            "retrieval_count": 0
         }
 
         if output_file:
-            base_metadata["output_file"] = output_file
+            metadata["output_file"] = output_file
 
         if error:
-            base_metadata["has_error"] = True
-            base_metadata["error"] = error[:100] if len(error) > 100 else error
+            metadata["has_error"] = True
 
-        # Create main memory item
-        memory_content = f"Command '{command}' output: {output[:500]}"
-        if len(output) > 500:
-            memory_content += "... [output truncated]"
+        # Add to memory
+        item_id = self.memory_manager.add(
+            content=content,
+            metadata=metadata,
+            use_fractal=self.memory_manager.use_fractal
+        )
 
-        if error:
-            memory_content += f"\nError: {error}"
-
-        main_item = {
-            "content": memory_content,
-            "memory_type": "command",
-            "source": "shell",
-            "metadata": base_metadata.copy()
-        }
-
-        batch_items.append(main_item)
-
-        # For tabular data, add specialized entries
-        if is_tabular:
-            lines = output.strip().split('\n')
-
-            if len(lines) >= 2:
-                # Extract header and data rows
-                header_row = lines[0]
-                data_rows = lines[1:]
-
-                # Add specialized entries for specific rows (limit to 5)
-                for i, row in enumerate(data_rows[:5]):
-                    # Create row-specific metadata
-                    row_metadata = base_metadata.copy()
-                    row_metadata.update({
-                        "row_index": i,
-                        "header": header_row
-                    })
-
-                    # Create content
-                    row_content = f"Row {i+1} from command '{command}': {row}"
-
-                    # Add to batch
-                    batch_items.append({
-                        "content": row_content,
-                        "memory_type": "command_tabular",
-                        "source": "shell",
-                        "metadata": row_metadata
-                    })
-
-        # Add all items at once
-        added_ids = self.memory_manager.add_bulk(batch_items, use_fractal=self.memory_manager.use_fractal)
-
-        # Return count of added items
-        return sum(1 for item_id in added_ids if item_id is not None)
+        return 1 if item_id else 0
 
     def _detect_command_type(self, command: str, output: str) -> str:
         """Detect the type of command based on the command string and output."""
@@ -2380,6 +2295,8 @@ class TinyLlamaChat:
             return ""
 
 def main():
+    start_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+    print(f"{start_time} Let's start ...")
     parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
     parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
                       help="Model to use for chat")
@@ -2496,8 +2413,16 @@ def main():
                 print(f"{chat.get_time()} bitsandbytes not installed, using full precision")
 
             print(f"{chat.get_time()} Warming up model for maximum throughput...")
+            import random
+            from random import randrange
+
+            magic_number = 259125
+            magic_number_1 = randrange(magic_number)
+            magic_number_2 = randrange(magic_number)
+            operators = ["+", "-", "/", "*"]
+
             _ = chat.generate_response(
-                [{"role": "user", "content": "Say some nice greeting."}],
+                [{"role": "user", "content": f"Just write the result of equation {magic_number_1}{random.choice(operators)}{magic_number_2} without anything than just that the result of equation."}],
                 max_new_tokens=16,
                 temperature=0.7,
                 use_web_search=False
