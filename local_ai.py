@@ -32,13 +32,6 @@ from unified_memory import UnifiedMemoryManager
 from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
 from question_classifier import QuestionClassifier
 
-from pattern_matching_utils import (
-    is_command_related_query, extract_command_context, extract_command_type,
-    is_tabular_command, is_tabular_data, extract_columns_from_header,
-    extract_column_references, extract_row_references, extract_arithmetic_expression,
-    commands_match, extract_example_pairs, extract_mapping_category, clean_duplicate_memories
-)
-
 from batch_utils import tensor_batch_processing
 from web_knowledge_enhancer import WebKnowledgeEnhancer
 
@@ -600,7 +593,7 @@ class TinyLlamaChat:
 
             # Detect if this is a continuation request
             if self.window_manager.detect_continuation_request(user_query):
-                print(f"{get_time()} Detected continuation request, enhancing prompt...")
+                print(f"{self.get_time()} Detected continuation request, enhancing prompt...")
 
                 # Enhance continuation context with web knowledge if available
                 if hasattr(self, 'web_enhancer') and self.web_enhancer and user_query:
@@ -634,9 +627,9 @@ class TinyLlamaChat:
                 # Update the user message with enhanced query
                 if enhanced_query != user_query:
                     messages[-1]["content"] = enhanced_query
-                    print(f"{get_time()} Enhanced continuation prompt created")
+                    print(f"{self.get_time()} Enhanced continuation prompt created")
                 else:
-                    print(f"{get_time()} No continuation context available")
+                    print(f"{self.get_time()} No continuation context available")
 
         return messages
 
@@ -2163,8 +2156,6 @@ class TinyLlamaChat:
         """Clean up arithmetic responses"""
         # Extract the expression from the query
         expression = None
-        # if hasattr(self, 'memory_integrator'):
-        #     expression = extract_arithmetic_expression(query)
 
         if not expression:
             # Try a simple regex fallback
@@ -2535,7 +2526,7 @@ def main():
             try:
                 import bitsandbytes as bnb
                 chat.loading_options["load_in_4bit"] = True  # or load_in_4bit=True for even better performance
-                print(f"{chat.get_time()} Using 8-bit quantization for better performance")
+                print(f"{chat.get_time()} Using 4-bit quantization for better performance")
             except ImportError:
                 print(f"{chat.get_time()} bitsandbytes not installed, using full precision")
 
