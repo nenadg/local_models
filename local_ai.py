@@ -727,6 +727,8 @@ class TinyLlamaChat:
 
         except Exception as e:
             print(f"{self.get_time()} Error in create_prompt_with_knowledge: {e}")
+            import traceback
+            traceback.print_exc()
 
             # Return basic messages on error
             if not messages or len(messages) == 0:
@@ -1413,12 +1415,14 @@ class TinyLlamaChat:
             try:
                 with torch.no_grad():
                     # Use the safe tokenization function instead
-                    input_ids = self.safe_tokenize(
+                    tokenized = self.safe_tokenize(
                         prompt,
                         return_tensors="pt",
                         truncation=True,
                         padding=True
-                    ).input_ids.to(self.device)
+                    )
+                    # Access the input_ids from the dictionary
+                    input_ids = tokenized['input_ids'].to(self.device)
             except Exception as e:
                 print(f"{self.get_time()} Error encoding prompt: {e}")
                 import traceback

@@ -1248,6 +1248,8 @@ class UnifiedMemoryManager:
                     )
                 except Exception as e:
                     print(f"{self.get_time()} Error in fast similarity search: {e}")
+                    import traceback
+                    traceback.print_exc()
                     # Fall back to standard search
                     return self._standard_search(
                         np.array([normalized_query], dtype=np.float32),

@@ -37,10 +37,10 @@ ADVERSARIAL_MIXING_RATIO = 0.7  # How much to mix domains in a query
 # Clean test directory
 def clean_directory():
     """Clean the test directory to start fresh"""
-    import shutil
-    if os.path.exists(TEST_MEMORY_DIR):
-        shutil.rmtree(TEST_MEMORY_DIR)
-    os.makedirs(TEST_MEMORY_DIR, exist_ok=True)
+    # import shutil
+    # if os.path.exists(TEST_MEMORY_DIR):
+    #     shutil.rmtree(TEST_MEMORY_DIR)
+    # os.makedirs(TEST_MEMORY_DIR, exist_ok=True)
 
 # Generate nearly-identical but semantically distinct items
 def generate_near_duplicates():
