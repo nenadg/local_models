@@ -108,9 +108,6 @@ class TinyLlamaChat:
             except Exception as e:
                 print(f"{self.get_time()} Finetuned model not loaded: {e}")
 
-        self.knowledge_system_enabled = True  # UnifiedMemoryManager has built-in knowledge capabilities
-        self.current_domain_id = None  # Currently active domain ID
-
         # Initialize the web knowledge enhancer
         self.enable_web_knowledge = enable_web_knowledge
         if enable_web_knowledge:
@@ -191,8 +188,6 @@ class TinyLlamaChat:
         else:
             print(f"{self.get_time()} Could not create draft model, speculative decoding disabled")
 
-        # Load knowledge base
-        self.knowledge_base = self.load_knowledge()
         self.conversation_history = []
         self.system_message = DEFAULT_SYSTEM_MESSAGE
 
@@ -533,51 +528,6 @@ class TinyLlamaChat:
         except Exception as e:
             print(f"{self.get_time()} Error creating draft model: {e}")
             return None
-
-    def load_knowledge(self):
-        """Load previously stored knowledge"""
-        knowledge_file = os.path.join(self.memory_dir, "knowledge_base.json")
-        if os.path.exists(knowledge_file):
-            try:
-                with open(knowledge_file, 'r') as f:
-                    return json.load(f)
-            except:
-                print(f"{self.get_time()} Error loading knowledge base, creating new one")
-
-        # Default knowledge structure
-        return {
-            "facts": [],
-            "corrections": [],
-            "preferences": {},
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
-        }
-
-    def save_knowledge(self):
-        """Save knowledge base to disk"""
-        self.knowledge_base["updated_at"] = datetime.now().isoformat()
-        knowledge_file = os.path.join(self.memory_dir, "knowledge_base.json")
-        try:
-            with open(knowledge_file, 'w') as f:
-                json.dump(self.knowledge_base, f, indent=2)
-        except Exception as e:
-            print(f"{self.get_time()} Error saving knowledge base: {e}")
-
-    def add_to_knowledge(self, fact_or_correction, fact_type="fact"):
-        """Add new information to knowledge base"""
-        if fact_type == "fact":
-            self.knowledge_base["facts"].append({
-                "content": fact_or_correction,
-                "added_at": datetime.now().isoformat()
-            })
-        elif fact_type == "correction":
-            self.knowledge_base["corrections"].append({
-                "content": fact_or_correction,
-                "added_at": datetime.now().isoformat()
-            })
-
-        # Save updated knowledge
-        self.save_knowledge()
 
     def enhance_query_for_continuation(self, messages):
         """
@@ -1384,27 +1334,6 @@ class TinyLlamaChat:
                 add_generation_prompt=True
             )
 
-            # Encode the prompt
-            # try:
-            #     with torch.no_grad():
-            #         # input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
-            #         # this should fix Already borrowed problem
-            #         _token_ids = self.tokenizer(
-            #             prompt,
-            #             return_tensors="pt",
-            #             truncation=True,
-            #             padding=True
-            #         )
-
-            #         # Move to device after tokenization
-            #         _encoded_inputs = {k: v.to(self.device) for k, v in _token_ids.items()}
-            #         input_ids = _encoded_inputs['input_ids']
-            # except Exception as e:
-            #     print(f"{self.get_time()} Error encoding prompt: {e}")
-            #     import traceback
-            #     traceback.print_exc()
-            #     return "Error preparing response. Please try again with a simpler query."
-
             try:
                 with torch.no_grad():
                     # Use the safe tokenization function instead
@@ -1798,7 +1727,6 @@ class TinyLlamaChat:
             cleaned = re.sub(pattern, '', cleaned, flags=re.DOTALL)
 
         return cleaned
-
 
     def ensure_metrics(self, response_length=None):
         """
@@ -2493,14 +2421,8 @@ def main():
             print(f"{chat.get_time()} Web knowledge enhancement enabled using {args.search_engine}")
 
         if args.test_fractal:
-            # Initialize memory manager with fractal enabled
-            memory_manager = MemoryManager(
-                memory_dir="./memory",
-                fractal_enabled=True
-            )
-
             # Get a user store
-            store = memory_manager._get_user_store("diagnostic_user")
+            store = chat.memory_manager
 
             # Run and print diagnostics
             store.print_fractal_embedding_diagnostics()
@@ -2552,9 +2474,7 @@ def main():
         print("="*50)
         print("Type 'exit' to end the conversation")
         print("Special commands:")
-        print("  !teach: [fact] - Add knowledge to the model")
-        print("  !correct: [correction] - Correct the model's understanding")
-        print("  !save - Save the current conversation")
+
         print("  !system: [message] - Change the system message")
         print("  !mcp-help - Show MCP commands for directing output to files")
         print("  !confidence: [0.0-1.0] - Set confidence threshold")
@@ -2564,19 +2484,13 @@ def main():
         print("  !toggle-heatmap - Toggle confidence heatmap visualization on/off")
         print("  !toggle-all-metrics - Toggle between showing all metrics or just truthiness")
         print("  !toggle-sharpening - Toggle vector space sharpening on/off")
-        print("  !memorize - Force save the entire conversation to memory")
         print("  !toggle-memory - Toggle automatic memorization on/off")
         print("  !memory-stats - Display info about memories")
         print("  !toggle-web - Toggle web knowledge enhancement on/off")
         print("  !web-stats - Show web search statistics")
         print("  !search-engine: [engine] - Set search engine (duckduckgo/google)")
         print("  !fractal-diagnostics - prints fractal embedding diagnostics")
-        print("  !visualize-fractal - visual fractal embeddings")
         print("  !compare-queries: [query1] | [query2] - Compare the semantic relationship between two queries")
-        print("  !create-domain: [name] | [description] - Create a new knowledge domain")
-        print("  !load-domain: [domain_id] - Load and activate a knowledge domain")
-        print("  !list-domains - List all available knowledge domains")
-        print("  !extract-knowledge: [text] - Extract structured knowledge from text")
 
         print("\nIf the model expresses uncertainty, you can ask it to speculate")
         print("by saying 'please continue anyway' or 'please speculate'")
@@ -2599,17 +2513,6 @@ def main():
 
             # Handle special commands
             if user_input.lower() == 'exit':
-                feedback_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-                feedback = 'y' # input(f"\n{feedback_time} Was this response helpful? (y/n, or provide feedback): ")
-                if feedback.lower() != 'y' and feedback.lower() != 'yes' and feedback.strip():
-                    # If the user provided specific feedback, add it to knowledge
-                    if len(feedback) > 2:
-                        correction = f"Regarding '{user_input}', remember: {feedback}"
-                        chat.add_to_knowledge(correction, fact_type="correction")
-                        print("Feedback saved as correction. I'll try to do better next time.")
-                    else:
-                        print("Sorry the response wasn't helpful.")
-
                 store = chat.memory_manager
 
                 # Show final stats
@@ -2617,23 +2520,6 @@ def main():
                 print(f"{chat.get_time()} Memories saved this session: {stats['active_items']}")
                 print(f"{chat.get_time()} Total memories saved this: {stats['total_items']}")
                 break
-
-            elif user_input.lower().startswith('!teach:'):
-                new_fact = user_input[7:].strip()
-                chat.add_to_knowledge(new_fact, fact_type="fact")
-                print(f"{chat.get_time()} Added to knowledge base: {new_fact}")
-                continue
-
-            elif user_input.lower().startswith('!correct:'):
-                correction = user_input[9:].strip()
-                chat.add_to_knowledge(correction, fact_type="correction")
-                print(f"{chat.get_time()} Added correction: {correction}")
-                continue
-
-            elif user_input.lower() == '!save':
-                chat.save_conversation(conversation)
-                print("Conversation saved!")
-                continue
 
             elif user_input.lower().startswith('!system:'):
                 new_system = user_input[8:].strip()
@@ -2679,11 +2565,6 @@ def main():
                         print("Sharpening factor must be between 0.0 and 1.0")
                 except Exception as e:
                     print(f"{chat.get_time()} Invalid value: {str(e)}. Please specify a number between 0.0 and 1.0")
-                continue
-
-            elif user_input.lower() == '!memorize':
-                memories_added = chat.save_conversation(conversation)
-                print(f"{chat.get_time()} Conversation saved to long-term memory! Added {memories_added} memories.")
                 continue
 
             elif user_input.lower() == '!toggle-memory':
@@ -2760,14 +2641,6 @@ def main():
                     store.print_fractal_embedding_diagnostics()
                 else:
                     print(f"{chat.get_time()} Fractal diagnostics not available.")
-                continue
-
-            elif user_input.lower() == '!visualize-fractal':
-                store = chat.memory_manager
-                if hasattr(store, 'visualize_fractal_embeddings'):
-                    store.visualize_fractal_embeddings()
-                else:
-                    print(f"{chat.get_time()} Fractal visualization not available.")
                 continue
 
             elif user_input.lower().startswith('!compare-queries:'):
@@ -2891,19 +2764,6 @@ def main():
                     if args.max_tokens > 0:
                         tokens_per_second = args.max_tokens / generation_time
                         print(f"{chat.get_time()} [Generated in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f}]")
-
-                # Get feedback with timestamp
-                # feedback_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-                # feedback = input(f"\n{feedback_time} Was this response helpful? (y/n, or provide feedback): ")
-
-                # if feedback.lower() != 'y' and feedback.lower() != 'yes' and feedback.strip():
-                #     # If the user provided specific feedback, add it to knowledge
-                #     if len(feedback) > 2:
-                #         correction = f"Regarding '{user_input}', remember: {feedback}"
-                #         chat.add_to_knowledge(correction, fact_type="correction")
-                #         print("Feedback saved as correction. I'll try to do better next time.")
-                #     else:
-                #         print("Sorry the response wasn't helpful.")
 
             except Exception as e:
                 print(f"{chat.get_time()} Error generating response: {e}")
