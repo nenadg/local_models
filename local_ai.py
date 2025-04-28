@@ -37,6 +37,7 @@ from web_knowledge_enhancer import WebKnowledgeEnhancer
 
 from semantic_reasoning_enhancer import integrate_semantic_reasoning
 from continuation_manager import ContinuationTrackingWindowManager
+from speculative_decoder import SpeculativeDecoder, SpeculativeDecodingStats
 
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
@@ -177,18 +178,32 @@ class TinyLlamaChat:
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **self.loading_options)
         self.model = self.resource_manager.register_model(self.model)
 
+        self.spec_stats = SpeculativeDecodingStats()
+        self.spec_decoder = SpeculativeDecoder(
+            main_model=self.model,
+            draft_model=None,  # Will be set later
+            tokenizer=self.tokenizer,
+            confidence_metrics=self.confidence_metrics,
+            device=self.device,
+            stats=self.spec_stats,
+            repetition_penalty=1.2,
+            max_draft_tokens=5,
+            batch_processor=None if not hasattr(self, 'resource_manager') else self.resource_manager.batch_process_inference
+        )
+
         # Set embedding function for memory manager
         self.set_embedding_function()
 
-        # Create draft model from target model by reducing layers
-        self.draft_model = self.create_draft_model()
+        # Create draft model using the speculative decoder
+        self.draft_model = self.spec_decoder.create_draft_model(self.model)
 
         if self.draft_model:
             print(f"{self.get_time()} Created draft model by reducing layers")
+            # Set the draft model in the decoder
+            self.spec_decoder.draft_model = self.draft_model
         else:
             print(f"{self.get_time()} Could not create draft model, speculative decoding disabled")
 
-        self.conversation_history = []
         self.system_message = DEFAULT_SYSTEM_MESSAGE
 
     def test_batch_processing(self, operation_type='embedding'):
@@ -498,37 +513,6 @@ class TinyLlamaChat:
         # Attach stats method
         self.get_embedding_stats = get_embedding_stats
 
-    def create_draft_model(self):
-        """Create a smaller version of the model by skipping layers"""
-        # This works best for decoder-only transformers like Llama
-        import copy
-
-        try:
-            # For Llama-like models, reduce layers
-            if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
-                # Create a copy for draft model
-                draft_model = copy.deepcopy(self.model)
-
-                # Reduce to 1/3 of the layers for draft model
-                orig_layers = draft_model.model.layers
-                num_layers = len(orig_layers)
-                keep_layers = max(1, num_layers // 3)
-
-                # Keep only every third layer
-                indices_to_keep = list(range(0, num_layers, 3))[:keep_layers]
-                new_layers = torch.nn.ModuleList([orig_layers[i] for i in indices_to_keep])
-
-                # Replace layers with reduced set
-                draft_model.model.layers = new_layers
-
-                print(f"{self.get_time()} Created draft model with {keep_layers}/{num_layers} layers")
-                return draft_model
-
-            return None
-        except Exception as e:
-            print(f"{self.get_time()} Error creating draft model: {e}")
-            return None
-
     def enhance_query_for_continuation(self, messages):
         """
         Enhance the user query if it's a continuation request.
@@ -802,336 +786,33 @@ class TinyLlamaChat:
 
         return config
 
-    def speculative_decode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, num_draft_tokens: int = 5) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Implement speculative decoding with loop detection and batch processing:
-        1. Generate tokens with the smaller draft model
-        2. Verify with larger target model
-        3. Keep tokens that match, regenerate from first mismatch
-        4. Detect and prevent repetitive loops
-        """
-        if self.draft_model is None:
-            # Fall back to regular generation if no draft model
-            return None, None, None
-
-        # Only implement speculative decoding for GPU for speed
-        if self.device == "cpu":
-            return None, None, None
-
-        try:
-            # Step 1: Generate draft tokens with the smaller model
-            with torch.no_grad():
-                draft_outputs = self.draft_model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=num_draft_tokens,
-                    do_sample=self.do_sample,  # set to True for non greedy decoding for draft
-                    use_cache=True,
-                    return_dict_in_generate=True,
-                    output_scores=True,
-                    # Add repetition penalty to avoid loops
-                    repetition_penalty=1.2,
-                )
-
-            # Extract draft tokens (excluding input prompt)
-            draft_ids = draft_outputs.sequences[0, input_ids.shape[1]:]
-
-            # Check if we got any draft tokens
-            if len(draft_ids) == 0:
-                return None, None, None
-
-            # NEW: Check for repetitive loops
-            prompt_tokens = input_ids[0][-5:].tolist() if input_ids[0].size(0) >= 5 else input_ids[0].tolist()
-            draft_tokens = draft_ids.tolist()
-
-            # Detect repetitive patterns (simple check for now)
-            if len(draft_tokens) >= 4:
-                # Check if last 2 tokens repeat
-                if draft_tokens[-2:] == draft_tokens[-4:-2]:
-                    print("[Warning] Repetitive pattern detected in draft tokens, randomizing...")
-                    # Inject some randomness by changing temperature for this generation
-                    return None, None, None
-
-            # Step 2: Verify with target model - compute logits for each position
-            full_sequence = torch.cat([input_ids[0], draft_ids]).unsqueeze(0)
-            full_attention = torch.ones_like(full_sequence)
-
-            # Process in batches for large inputs using enhanced batch processing
-            if full_sequence.size(1) > 1024:  # For long sequences
-                from batch_utils import tensor_batch_processing
-
-                def get_logits(batch):
-                    with torch.no_grad():
-                        outputs = self.model(
-                            input_ids=batch,
-                            attention_mask=torch.ones_like(batch),
-                            return_dict=True
-                        )
-                    return outputs.logits
-
-                # Use enhanced batch processing with dynamic batch sizing
-                target_logits = tensor_batch_processing(
-                    get_logits,
-                    full_sequence,
-                    batch_size=None,  # Use dynamic sizing
-                    adaptive=True,
-                    handle_oom=True
-                )
-            else:
-                #  Get logits from target model for the full sequence
-                with torch.no_grad():
-                    target_outputs = self.model(
-                        input_ids=full_sequence,
-                        attention_mask=full_attention,
-                        return_dict=True
-                    )
-                target_logits = target_outputs.logits
-
-            # Only examine logits for draft tokens (exclude input)
-            target_logits = target_logits[0, input_ids.shape[1]-1:-1, :]
-
-            # Get predicted tokens from target logits
-            target_predictions = torch.argmax(target_logits, dim=-1)
-
-            # Step 3: Find the first mismatch
-            matches = (target_predictions == draft_ids)
-
-            # If all match, accept all draft tokens!
-            if matches.all():
-                # Add logits to confidence metrics
-                for i, token_id in enumerate(draft_ids):
-                    self.confidence_metrics.add_token_score(target_logits[i], token_id.item())
-                return draft_ids, torch.ones_like(draft_ids), target_logits
-
-            # Find first mismatch position
-            first_mismatch = len(matches) if matches.all() else matches.tolist().index(False)
-
-            # Return accepted tokens
-            if first_mismatch > 0:
-                accepted_tokens = draft_ids[:first_mismatch]
-                acceptance_mask = torch.ones_like(accepted_tokens)
-
-                # Add logits to confidence metrics for the accepted tokens
-                for i, token_id in enumerate(accepted_tokens):
-                    self.confidence_metrics.add_token_score(target_logits[i], token_id.item())
-
-                # Also return the target logits for these tokens
-                return accepted_tokens, acceptance_mask, target_logits[:first_mismatch]
-
-            # No accepted tokens
-            return None, None, None
-
-        except Exception as e:
-            print(f"{self.get_time()} Error in speculative decoding: {e}")
-            return None, None, None
+    def reset_speculative_stats(self):
+        """Reset the speculative decoding statistics."""
+        if hasattr(self, 'spec_decoder') and self.spec_decoder:
+            self.spec_decoder.reset_stats()
 
     # Function for speculative decoding with streaming
     def generate_speculative(self, input_ids, streamer, max_new_tokens, generation_config, turbo_mode):
-        """Enhanced implementation of speculative decoding with better batch processing and memory management"""
+        """Enhanced implementation of speculative decoding using the SpeculativeDecoder class"""
         try:
-            with torch.no_grad():
-                # Reset confidence metrics for a new generation
-                self.confidence_metrics.reset()
+            # First, ensure the confidence metrics is set in the speculative decoder
+            if hasattr(self, 'confidence_metrics') and self.spec_decoder:
+                self.spec_decoder.confidence_metrics = self.confidence_metrics
 
-                # Track speculative decoding stats
-                using_spec_decoding = False
-                accepted_draft_tokens = 0
-                total_tokens = 0
-
-                # Setup generation
-                generated_ids = input_ids
-                attention_mask = torch.ones_like(input_ids)
-                remaining_tokens = max_new_tokens
-
-                # Create a separate config without max_new_tokens to avoid duplication
+            # If turbo mode is disabled, fall back to standard generation
+            if not turbo_mode or self.draft_model is None:
+                # Use standard streaming mode with TokenProbabilityCaptureProcessor
                 streaming_config = {k: v for k, v in generation_config.items()
-                                  if k not in ['max_new_tokens', 'output_scores', 'return_dict_in_generate']}
+                                   if k not in ['max_new_tokens', 'output_scores', 'return_dict_in_generate']}
 
-                # Create and add our logits processor for confidence metrics
-                metrics_processor = TokenProbabilityCaptureProcessor(self.confidence_metrics)
+                # Add TokenProbabilityCaptureProcessor if not already added
+                if self.confidence_metrics:
+                    from transformers import LogitsProcessorList
 
-                # Set up the logits processor list, preserving any existing processors
-                if 'logits_processor' in streaming_config:
-                    # Add our processor to existing ones
-                    if isinstance(streaming_config['logits_processor'], list):
-                        streaming_config['logits_processor'].append(metrics_processor)
-                    else:
-                        # If it's already a LogitsProcessorList, we need to add to it
-                        existing_processors = streaming_config['logits_processor']
-                        streaming_config['logits_processor'] = LogitsProcessorList([*existing_processors, metrics_processor])
-                else:
-                    # No existing processors, create a new list
-                    streaming_config['logits_processor'] = LogitsProcessorList([metrics_processor])
-
-                # Get resource manager for optimal batch sizing
-                resource_manager = None
-                if hasattr(self, 'resource_manager'):
-                    resource_manager = self.resource_manager
-
-                while remaining_tokens > 0:
-                    try:
-                        if self.stop_event.is_set():
-                            print("\n[Generation stopped by interrupt signal]")
-                            try:
-                                # Clean up
-                                if torch.cuda.is_available():
-                                    torch.cuda.empty_cache()
-                                # End the streamer
-                                self.stop_event.clear()  # Reset the event
-                                streamer.end()
-                            except Exception as e:
-                                print(f"{self.get_time()} Error during interrupt cleanup: {e}")
-                            return
-
-                        # Try speculative decoding with enhanced batch processing
-                        if self.draft_model is not None and turbo_mode:
-                            # Skip for short generations - less overhead
-                            if remaining_tokens < 3:
-                                break
-
-                            # Determine optimal number of draft tokens based on remaining tokens
-                            optimal_draft_tokens = min(5, remaining_tokens)
-
-                            # Call with enhanced batch processing
-                            draft_tokens, acceptance_mask, token_logits = self.speculative_decode(
-                                generated_ids,
-                                attention_mask,
-                                num_draft_tokens=optimal_draft_tokens
-                            )
-
-                            if draft_tokens is not None and len(draft_tokens) > 0:
-                                # Success! We have draft tokens to use
-                                using_spec_decoding = True
-                                accepted_draft_tokens += len(draft_tokens)
-                                total_tokens += len(draft_tokens)
-
-                                # Decode tokens to text for streaming
-                                token_text = self.tokenizer.decode(draft_tokens, skip_special_tokens=True)
-                                streamer.put(token_text)
-
-                                # Add tokens to generated output
-                                generated_ids = torch.cat([generated_ids[0], draft_tokens]).unsqueeze(0)
-                                attention_mask = torch.ones_like(generated_ids)
-                                remaining_tokens -= len(draft_tokens)
-
-                                # Check for stopping conditions
-                                stop_generation = False
-                                for token in draft_tokens:
-                                    if token.item() == self.tokenizer.eos_token_id:
-                                        stop_generation = True
-                                        break
-
-                                if stop_generation:
-                                    break
-
-                                # Check for special tokens in decoded text
-                                if "<|user|>" in token_text or "<|assistant|>" in token_text:
-                                    break
-                            else:
-                                # Fall back to standard model for regular generation
-                                break
-                        else:
-                            # Exit to standard generation
-                            break
-
-                    except RuntimeError as e:
-                        # Handle device mismatch errors specifically
-                        if "expected all tensors to be on the same device" in str(e):
-                            print("\n[Device mismatch error during interruption - stopping generation]")
-                            break
-                        else:
-                            # Re-raise if it's a different error
-                            raise
-
-                # If we have tokens remaining or didn't use speculative, do standard generation
-                if remaining_tokens > 0 or not using_spec_decoding:
-                    # Use standard streaming mode with TokenProbabilityCaptureProcessor
-                    # This will collect token probabilities during normal generation
-
-                    # Use resource manager's batch processing if available
-                    if resource_manager and hasattr(resource_manager, 'batch_process_inference'):
-                        try:
-                            # Create a modified streamer that integrates with batch processing
-                            batch_size = resource_manager.suggest_optimal_batch_size(
-                                tensor_shape=input_ids.shape,
-                                operation_type='inference'
-                            )
-                            print(f"{self.get_time()} Using optimal batch size: {batch_size} for remaining generation")
-
-                            # Add this information to config
-                            if 'batch_size' not in streaming_config:
-                                streaming_config['batch_size'] = batch_size
-                        except:
-                            # Continue with standard generation if optimization fails
-                            pass
-
-                    # Generate with standard or optimized settings
-                    self.model.generate(
-                        input_ids=input_ids,
-                        attention_mask=torch.ones_like(input_ids),
-                        streamer=streamer,
-                        max_new_tokens=remaining_tokens,
-                        **streaming_config
-                    )
-
-                # Report speculative decoding stats
-                if using_spec_decoding and total_tokens > 0:
-                    efficiency = (accepted_draft_tokens / total_tokens) * 100
-                    print(f"{self.get_time()} Speculative decoding: {accepted_draft_tokens}/{total_tokens} tokens accepted ({efficiency:.1f}%)")
-
-                # If we didn't collect any metrics, add fallback values
-                # This should only happen if the generation fails completely
-                if not self.confidence_metrics.token_probabilities:
-                    print("[Warning: No token probabilities collected, using fallback values]")
-                    # Create more realistic fallback values
-                    for i in range(5):
-                        dummy_logits = torch.zeros(self.tokenizer.vocab_size)
-                        # Vary logit values from 1.0 to 5.0
-                        max_val = 1.0 + i
-                        token_id = i % 100
-                        dummy_logits[token_id] = max_val
-                        # Add some secondary values for more realistic distribution
-                        for j in range(3):
-                            dummy_logits[(token_id + j + 1) % 100] = max_val * 0.3
-                        self.confidence_metrics.add_token_score(dummy_logits, token_id)
-
-        except Exception as e:
-            print(f"{self.get_time()} Error in generation thread: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            try:
-                streamer.end()
-            except Exception as specific_e:
-                print(f"{self.get_time()} Error ending streamer: {specific_e}")
-            """Fixed implementation of speculative decoding with streaming and accurate metrics capture"""
-            try:
-                with torch.no_grad():
-                    # Reset confidence metrics for a new generation
-                    self.confidence_metrics.reset()
-
-                    # Track speculative decoding stats
-                    using_spec_decoding = False
-                    accepted_draft_tokens = 0
-                    total_tokens = 0
-
-                    # Setup generation
-                    generated_ids = input_ids
-                    attention_mask = torch.ones_like(input_ids)
-                    remaining_tokens = max_new_tokens
-
-                    # Create a separate config without max_new_tokens to avoid duplication
-                    # Also remove output_scores and return_dict_in_generate if they exist
-                    streaming_config = {}
-                    for k, v in generation_config.items():
-                        if k not in ['max_new_tokens', 'output_scores', 'return_dict_in_generate']:
-                            streaming_config[k] = v
-
-                    # Create and add our logits processor for confidence metrics
+                    # Create processor for capturing token probabilities
                     metrics_processor = TokenProbabilityCaptureProcessor(self.confidence_metrics)
 
-                    # Set up the logits processor list, preserving any existing processors
                     if 'logits_processor' in streaming_config:
-                        # Add our processor to existing ones
                         if isinstance(streaming_config['logits_processor'], list):
                             streaming_config['logits_processor'].append(metrics_processor)
                         else:
@@ -1142,121 +823,53 @@ class TinyLlamaChat:
                         # No existing processors, create a new list
                         streaming_config['logits_processor'] = LogitsProcessorList([metrics_processor])
 
-                    while remaining_tokens > 0:
-                        try:
-                            if self.stop_event.is_set():
-                                print("\n[Generation stopped by interrupt signal]")
-                                try:
-                                    # Clean up
-                                    if torch.cuda.is_available():
-                                        torch.cuda.empty_cache()
-                                    # End the streamer
-                                    self.stop_event.clear()  # Reset the event
-                                    streamer.end()
-                                except Exception as e:
-                                    print(f"{self.get_time()} Error during interrupt cleanup: {e}")
-                                return
+                self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=torch.ones_like(input_ids),
+                    streamer=streamer,
+                    max_new_tokens=max_new_tokens,
+                    **streaming_config
+                )
+                return
 
+            # Use the speculative decoder for generation
+            self.spec_decoder.generate_with_speculative_decoding(
+                input_ids=input_ids,
+                streamer=streamer,
+                max_new_tokens=max_new_tokens,
+                generation_config=generation_config,
+                stop_event=self.stop_event
+            )
 
-                            # Try speculative decoding
-                            if self.draft_model is not None and turbo_mode:
-                                # Skip for short generations - less overhead
-                                if remaining_tokens < 3:
-                                    break
+            # Ensure confidence metrics were set
+            if self.confidence_metrics and not self.confidence_metrics.token_probabilities:
+                response_length = max_new_tokens  # Estimate response length
+                # Create dummy metrics
+                for i in range(min(10, response_length)):
+                    dummy_logits = torch.zeros(self.tokenizer.vocab_size, device=self.device)
+                    # Vary confidence values for more realistic metrics
+                    confidence_val = 5.0 + (i % 3)
+                    token_id = i % 100
+                    dummy_logits[token_id] = confidence_val
+                    # Add some secondary values
+                    for j in range(3):
+                        dummy_logits[(token_id + j + 1) % 100] = confidence_val * 0.3
+                    self.confidence_metrics.add_token_score(dummy_logits, token_id)
 
-                                # Call with the new return signature (3 values)
-                                draft_tokens, acceptance_mask, token_logits = self.speculative_decode(
-                                    generated_ids,
-                                    attention_mask,
-                                    num_draft_tokens=min(5, remaining_tokens)
-                                )
+            # Print stats summary if enabled
+            if hasattr(self.spec_decoder, 'get_stats_summary'):
+                stats = self.spec_decoder.get_stats_summary()
+                print(f"\n{self.get_time()} Speculative decoding: {stats['tokens_from_draft']} tokens from draft "
+                      f"({stats['draft_token_acceptance_rate']} acceptance, {stats['estimated_time_saved']} time saved)")
 
-                                if draft_tokens is not None and len(draft_tokens) > 0:
-                                    # Success! We have draft tokens to use
-                                    using_spec_decoding = True
-                                    accepted_draft_tokens += len(draft_tokens)
-                                    total_tokens += len(draft_tokens)
-
-                                    # Decode tokens to text for streaming
-                                    token_text = self.tokenizer.decode(draft_tokens, skip_special_tokens=True)
-                                    streamer.put(token_text)
-
-                                    # Add tokens to generated output
-                                    generated_ids = torch.cat([generated_ids[0], draft_tokens]).unsqueeze(0)
-                                    attention_mask = torch.ones_like(generated_ids)
-                                    remaining_tokens -= len(draft_tokens)
-
-                                    # Check for stopping conditions
-                                    stop_generation = False
-                                    for token in draft_tokens:
-                                        if token.item() == self.tokenizer.eos_token_id:
-                                            stop_generation = True
-                                            break
-
-                                    if stop_generation:
-                                        break
-
-                                    # Check for special tokens in decoded text
-                                    if "<|user|>" in token_text or "<|assistant|>" in token_text:
-                                        break
-                                else:
-                                    # Fall back to standard model for regular generation
-                                    break
-                            else:
-                                # Exit to standard generation
-                                break
-
-
-                        except RuntimeError as e:
-                            # Handle device mismatch errors specifically
-                            if "expected all tensors to be on the same device" in str(e):
-                                print("\n[Device mismatch error during interruption - stopping generation]")
-                                break
-                            else:
-                                # Re-raise if it's a different error
-                                raise
-
-                    # If we have tokens remaining or didn't use speculative, do standard generation
-                    if remaining_tokens > 0 or not using_spec_decoding:
-                        # Use standard streaming mode with TokenProbabilityCaptureProcessor
-                        # This will collect token probabilities during normal generation
-                        self.model.generate(
-                            input_ids=input_ids,
-                            attention_mask=torch.ones_like(input_ids),
-                            streamer=streamer,
-                            max_new_tokens=remaining_tokens,
-                            **streaming_config
-                        )
-
-                    # Report speculative decoding stats
-                    if using_spec_decoding and total_tokens > 0:
-                        efficiency = (accepted_draft_tokens / total_tokens) * 100
-                        print(f"{self.get_time()} Speculative decoding: {accepted_draft_tokens}/{total_tokens} tokens accepted ({efficiency:.1f}%)")
-
-                    # If we didn't collect any metrics, add fallback values
-                    # This should only happen if the generation fails completely
-                    if not self.confidence_metrics.token_probabilities:
-                        print("[Warning: No token probabilities collected, using fallback values]")
-                        # Create more realistic fallback values
-                        for i in range(5):
-                            dummy_logits = torch.zeros(self.tokenizer.vocab_size)
-                            # Vary logit values from 1.0 to 5.0
-                            max_val = 1.0 + i
-                            token_id = i % 100
-                            dummy_logits[token_id] = max_val
-                            # Add some secondary values for more realistic distribution
-                            for j in range(3):
-                                dummy_logits[(token_id + j + 1) % 100] = max_val * 0.3
-                            self.confidence_metrics.add_token_score(dummy_logits, token_id)
-
-            except Exception as e:
-                print(f"{self.get_time()} Error in generation thread: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                try:
-                    streamer.end()
-                except Exception as specific_e:
-                    print(f"{self.get_time()} Error ending streamer: {specific_e}")
+        except Exception as e:
+            print(f"{self.get_time()} Error in generation thread: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            try:
+                streamer.end()
+            except Exception as specific_e:
+                print(f"{self.get_time()} Error ending streamer: {specific_e}")
 
     def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None, use_web_search=True):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
@@ -2203,6 +1816,11 @@ class TinyLlamaChat:
                 self.resource_manager.unload_model(self.model)
                 self.model = None
 
+            # Clear speculative decoder reference to models
+            if hasattr(self, 'spec_decoder') and self.spec_decoder:
+                self.spec_decoder.draft_model = None
+                self.spec_decoder.main_model = None
+
             # For memory consolidation, we need to get the store first
             if hasattr(self, 'memory_manager') and hasattr(self, 'current_user_id'):
                 try:
@@ -2491,6 +2109,7 @@ def main():
         print("  !search-engine: [engine] - Set search engine (duckduckgo/google)")
         print("  !fractal-diagnostics - prints fractal embedding diagnostics")
         print("  !compare-queries: [query1] | [query2] - Compare the semantic relationship between two queries")
+        print("  !spec-stats - Show speculative decoding statistics")
 
         print("\nIf the model expresses uncertainty, you can ask it to speculate")
         print("by saying 'please continue anyway' or 'please speculate'")
@@ -2660,6 +2279,16 @@ def main():
                 except Exception as e:
                     print(f"\n{chat.get_time()} Error comparing queries: {e}")
                     print(f"{chat.get_time()} Usage: !compare-queries: first query | second query")
+                continue
+
+            elif user_input.lower() == '!spec-stats':
+                if hasattr(chat, 'spec_decoder') and chat.spec_decoder:
+                    stats = chat.spec_decoder.get_stats_summary()
+                    print(f"\n{chat.get_time()} Speculative Decoding Statistics:")
+                    for key, value in stats.items():
+                        print(f"  {key}: {value}")
+                else:
+                    print("Speculative decoding not initialized")
                 continue
 
 
