@@ -266,7 +266,7 @@ class SpeculativeDecoder:
                 target_logits = self.batch_processor(
                     get_logits,
                     full_sequence,
-                    batch_size=None,  # Use dynamic sizing
+                    # batch_size=None,  # Use dynamic sizing
                     adaptive=True,
                     handle_oom=True
                 )

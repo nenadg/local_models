@@ -16,10 +16,9 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from datetime import datetime
 from threading import Thread
-from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
+from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer, BitsAndBytesConfig, LogitsProcessor, LogitsProcessorList
 import numpy as np
 from typing import List, Dict, Tuple, Optional
-from transformers import LogitsProcessor, LogitsProcessorList
 from history import setup_readline_history
 
 from resource_manager import ResourceManager
@@ -66,7 +65,8 @@ class TinyLlamaChat:
              max_fractal_levels=3,
              do_sample=False,
              top_p=1, # initial top_p = 1.0
-             top_k=50   # initial top_k = 50
+             top_k=50,   # initial top_k = 50
+             use_draft_model=False
              ):
         self.model_name = model_name
         self.memory_dir = memory_dir
@@ -74,6 +74,7 @@ class TinyLlamaChat:
         self.top_p = top_p
         self.top_k = top_k
         self._query_embedding_cache = {}
+
 
         self.stop_event = threading.Event()
 
@@ -154,6 +155,7 @@ class TinyLlamaChat:
         # Load model and tokenizer
         print(f"{self.get_time()} Loading target model: {model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+        self.tokenizer.model_max_length = 2048 # should be 1024 or lower for performance
 
         # Initialize the window manager with our tokenizer
         self.window_manager = ContinuationTrackingWindowManager(
@@ -166,17 +168,31 @@ class TinyLlamaChat:
 
         print(f"{self.get_time()} Context window and continuation tracking initialized")
 
+        # AMD only
+        # quantization_config = BitsAndBytesConfig(
+        #     load_in_4bit=True,
+        #     bnb_4bit_compute_dtype=torch.float16,
+        #     bnb_4bit_use_double_quant=True,
+        #     bnb_4bit_quant_type="nf4"
+        # )
+
         # Main model loading
         self.loading_options = {
             "torch_dtype": self.torch_dtype,
             "device_map": "auto" if self.device != "cpu" else None,
             "low_cpu_mem_usage": True,
+            # "quantization_config": quantization_config
+            # "load_in_8bit": True # Nvidia
         }
 
         # Load model
         print(f"{self.get_time()} Loading model...")
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **self.loading_options)
         self.model = self.resource_manager.register_model(self.model)
+
+        if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "enable_flash_sdp"):
+            torch.backends.cuda.enable_flash_sdp = True
+            print(f"{self.get_time()} FlashAttention enabled")
 
         self.spec_stats = SpeculativeDecodingStats()
         self.spec_decoder = SpeculativeDecoder(
@@ -194,15 +210,24 @@ class TinyLlamaChat:
         # Set embedding function for memory manager
         self.set_embedding_function()
 
-        # Create draft model using the speculative decoder
-        self.draft_model = self.spec_decoder.create_draft_model(self.model)
+        # Store the setting
+        self.use_draft_model = use_draft_model
 
-        if self.draft_model:
-            print(f"{self.get_time()} Created draft model by reducing layers")
-            # Set the draft model in the decoder
-            self.spec_decoder.draft_model = self.draft_model
+        # Only create draft model if explicitly enabled
+        if self.use_draft_model:
+            print(f"{self.get_time()} Creating draft model for speculative decoding...")
+            self.draft_model = self.spec_decoder.create_draft_model(self.model)
+            if self.draft_model:
+                print(f"{self.get_time()} Successfully created draft model")
+                # Set the draft model in the decoder
+                self.spec_decoder.draft_model = self.draft_model
+            else:
+                print(f"{self.get_time()} Could not create draft model, speculative decoding disabled")
+                self.use_draft_model = False
         else:
-            print(f"{self.get_time()} Could not create draft model, speculative decoding disabled")
+            print(f"{self.get_time()} Draft model disabled, using standard generation")
+            self.draft_model = None
+
 
         self.system_message = DEFAULT_SYSTEM_MESSAGE
 
@@ -472,7 +497,7 @@ class TinyLlamaChat:
                 return batch_embedding_processing(
                     embedding_function=generate_embedding,
                     texts=texts,
-                    batch_size=None,  # Use adaptive sizing
+                    batch_size=4, # batch_size=None for adaptive
                     cleanup=True
                 )
 
@@ -725,6 +750,36 @@ class TinyLlamaChat:
                 'web_results': []
             }
 
+    def toggle_draft_model(self):
+        """Toggle draft model on/off for speculative decoding."""
+        if self.use_draft_model and self.draft_model is not None:
+            # Disable draft model
+            self.use_draft_model = False
+            print(f"{self.get_time()} Draft model disabled")
+            return False
+        elif not self.use_draft_model and self.draft_model is None:
+            # Try to create draft model
+            print(f"{self.get_time()} Creating draft model...")
+            self.draft_model = self.spec_decoder.create_draft_model(self.model)
+            if self.draft_model:
+                self.use_draft_model = True
+                self.spec_decoder.draft_model = self.draft_model
+                print(f"{self.get_time()} Draft model enabled")
+                return True
+            else:
+                print(f"{self.get_time()} Failed to create draft model")
+                return False
+        elif not self.use_draft_model and self.draft_model is not None:
+            # Re-enable existing draft model
+            self.use_draft_model = True
+            self.spec_decoder.draft_model = self.draft_model
+            print(f"{self.get_time()} Draft model re-enabled")
+            return True
+        else:
+            # Shouldn't happen, but just in case
+            print(f"{self.get_time()} Draft model status unchanged")
+            return self.use_draft_model
+
     def toggle_web_knowledge(self) -> bool:
         """
         Toggle web knowledge enhancement on/off.
@@ -799,8 +854,11 @@ class TinyLlamaChat:
             if hasattr(self, 'confidence_metrics') and self.spec_decoder:
                 self.spec_decoder.confidence_metrics = self.confidence_metrics
 
-            # If turbo mode is disabled, fall back to standard generation
-            if not turbo_mode or self.draft_model is None:
+            # Use standard generation if:
+            # 1. Turbo mode is disabled, OR
+            # 2. Draft model is disabled, OR
+            # 3. Draft model doesn't exist
+            if not turbo_mode or not self.use_draft_model or self.draft_model is None:
                 # Use standard streaming mode with TokenProbabilityCaptureProcessor
                 streaming_config = {k: v for k, v in generation_config.items()
                                    if k not in ['max_new_tokens', 'output_scores', 'return_dict_in_generate']}
@@ -808,6 +866,7 @@ class TinyLlamaChat:
                 # Add TokenProbabilityCaptureProcessor if not already added
                 if self.confidence_metrics:
                     from transformers import LogitsProcessorList
+                    from enhanced_confidence_metrics import TokenProbabilityCaptureProcessor
 
                     # Create processor for capturing token probabilities
                     metrics_processor = TokenProbabilityCaptureProcessor(self.confidence_metrics)
@@ -832,7 +891,7 @@ class TinyLlamaChat:
                 )
                 return
 
-            # Use the speculative decoder for generation
+            # Use the speculative decoder for generation (only if we get here with draft model enabled)
             self.spec_decoder.generate_with_speculative_decoding(
                 input_ids=input_ids,
                 streamer=streamer,
@@ -1313,33 +1372,7 @@ class TinyLlamaChat:
             self.resource_manager.clear_cache()
             termios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
 
-    def _clean_boilerplate_messages(self, response):
-        """
-        Clean boilerplate UI messages from the response before metric calculation.
 
-        Args:
-            response: The original response text
-
-        Returns:
-            Cleaned response without boilerplate
-        """
-        # List of patterns to remove
-        patterns = [
-            r'¯\\\_\(ツ\)\_/¯',                          # Shrug emoticon
-            r'Confidence Heatmap Legend.*?\n',           # Heatmap legend
-            r'Window size for geometric mean:.*?\n',     # Window size info
-            r'Confidence range:.*?\n',                   # Confidence range info
-            r'\[Generated.*?tokens\/sec\]',              # Generation stats
-            r'\[█+░*\] Truthiness:.*?\n',                # Truthiness bar
-            r'\[Sharpening enabled:.*?\]',               # Sharpening info
-        ]
-
-        # Apply each pattern
-        cleaned = response
-        for pattern in patterns:
-            cleaned = re.sub(pattern, '', cleaned, flags=re.DOTALL)
-
-        return cleaned
 
     def ensure_metrics(self, response_length=None):
         """
@@ -1394,6 +1427,36 @@ class TinyLlamaChat:
 
         return len(conversation)
 
+    def calculate_response_metrics(self, response, generation_time):
+        """
+        Calculate metrics for the response, excluding boilerplate text.
+
+        Args:
+            response: The generated response text
+            generation_time: Time taken to generate the response
+
+        Returns:
+            Tuple of (token_count, tokens_per_second)
+        """
+        # Clean the response first
+        cleaned_response = self._clean_boilerplate_messages(response)
+
+        # Calculate tokens based on clean response
+        try:
+            response_tokens = len(self.tokenizer.encode(cleaned_response))
+        except Exception as e:
+            print(f"{self.get_time()} Error encoding response: {e}")
+            # Fallback to rough estimation
+            response_tokens = len(cleaned_response.split()) * 1.3  # Approximate token count
+
+        # Calculate tokens per second
+        if generation_time > 0:
+            tokens_per_second = response_tokens / generation_time
+        else:
+            tokens_per_second = 0
+
+        return response_tokens, tokens_per_second
+
     def quality_score(self, confidence, perplexity=None, entropy=None, max_perplexity=10, max_entropy=3, w1=0.4, w2=0.4, w3=0.2):
          # If all metrics are available
         if perplexity is not None and entropy is not None:
@@ -1445,7 +1508,6 @@ class TinyLlamaChat:
         # Format the output
         return f"[{bar}] {label}: {value:.2f}"
 
-    # This patch fixes the sharpening metrics display issue in tiny_llama_6_memory.py
     def print_generation_metrics(self, metrics, generation_time, response_tokens, show_all_metrics=False):
         """
         Print generation metrics with sharpening information if available.
@@ -1628,7 +1690,6 @@ class TinyLlamaChat:
 
         print(f"{self.get_time()} Sharpening factor set to {factor}")
 
-
     def post_process_response(self, response, query, domain=None):
         """
         Clean up the response after generation.
@@ -1765,6 +1826,42 @@ class TinyLlamaChat:
         cleaned = re.sub(r'(?:relevance|similarity)\s+(?:increased|decreased)\s+by\s+[\d\.]+%.*?$', '', cleaned, flags=re.MULTILINE)
 
         return cleaned
+
+    def _clean_boilerplate_messages(self, response):
+        """
+        Clean boilerplate UI messages from the response before metric calculation.
+
+        Args:
+            response: The original response text
+
+        Returns:
+            Cleaned response without boilerplate
+        """
+        # Extract timestamp pattern that starts boilerplate section
+        timestamp_pattern = r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] ¯\\\_\(ツ\)\_/¯'
+
+        # Split at the timestamp if it exists
+        parts = re.split(timestamp_pattern, response, 1)
+
+        # If split occurred, return just the content part
+        if len(parts) > 1:
+            return parts[0].strip()
+
+        # Additional patterns to clean if needed
+        patterns = [
+            r'Confidence Heatmap Legend.*?Confidence range:.*?\d+\.\d+',  # Entire legend block
+            r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Memory\] Added \d+ new',  # Memory adding info
+            r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Generated.*?tokens\/sec\]',  # Generation stats
+            r'\[█+░*\] Truthiness:.*?\d+\.\d+',                           # Truthiness bar
+            r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Sharpening enabled:.*?\]',  # Sharpening info
+        ]
+
+        # Apply each pattern
+        cleaned = response
+        for pattern in patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.DOTALL|re.MULTILINE)
+
+        return cleaned.strip()
 
     def add_command_to_memory(self, command: str, output: str, error: str = None, output_file: str = None):
         """Add command output to unified knowledge system."""
@@ -1994,6 +2091,8 @@ def main():
     parser.add_argument("--do-sample", action="store_true", help="Enable sampling-based generation")
     parser.add_argument("--top-p", type=float, default=1.0, help="Top-p (nucleus) sampling parameter")
     parser.add_argument("--top-k", type=int, default=0, help="Top-k sampling parameter")
+    parser.add_argument("--draft-model", action="store_true", default=False,
+                      help="Enable draft model for speculative decoding")
 
     args = parser.parse_args()
 
@@ -2016,7 +2115,8 @@ def main():
         max_fractal_levels=3,
         do_sample=args.do_sample,
         top_p=args.top_p,
-        top_k=args.top_k
+        top_k=args.top_k,
+        use_draft_model=args.draft_model
     )
 
     # # Test embedding batch processing
@@ -2110,6 +2210,7 @@ def main():
         print("  !fractal-diagnostics - prints fractal embedding diagnostics")
         print("  !compare-queries: [query1] | [query2] - Compare the semantic relationship between two queries")
         print("  !spec-stats - Show speculative decoding statistics")
+        print("  !toggle-draft - Toggle draft model for speculative decoding on/off")
 
         print("\nIf the model expresses uncertainty, you can ask it to speculate")
         print("by saying 'please continue anyway' or 'please speculate'")
@@ -2291,6 +2392,11 @@ def main():
                     print("Speculative decoding not initialized")
                 continue
 
+            elif user_input.lower() == '!toggle-draft':
+                is_enabled = chat.toggle_draft_model()
+                print(f"{chat.get_time()} Draft model {'enabled' if is_enabled else 'disabled'}")
+                continue
+
 
             # Add user message to conversation
             user_message = {"role": "user", "content": user_input}
@@ -2366,14 +2472,21 @@ def main():
 
                 # Estimate tokens generated
                 try:
-                    response_tokens = len(chat.tokenizer.encode(response))
-                    # tokens_per_second = response_tokens / generation_time
-                    tokens_per_second = response_tokens / max(0.01, generation_time)
-                    quality = chat.quality_score(
-                        confidence_data.get('confidence', 0),
-                        confidence_data.get('perplexity', 0),
-                        confidence_data.get('entropy', 0)
-                    )
+                    # response_tokens = len(chat.tokenizer.encode(response))
+                    # # tokens_per_second = response_tokens / generation_time
+                    # tokens_per_second = response_tokens / max(0.01, generation_time)
+                    # quality = chat.quality_score(
+                    #     confidence_data.get('confidence', 0),
+                    #     confidence_data.get('perplexity', 0),
+                    #     confidence_data.get('entropy', 0)
+                    # )
+
+                    # Get generation time
+                    end_time = time.time()
+                    generation_time = max(0.01, end_time - start_time)
+
+                    # Calculate metrics on the clean response
+                    response_tokens, tokens_per_second = chat.calculate_response_metrics(response, generation_time)
 
                     chat.print_generation_metrics(
                         # {
