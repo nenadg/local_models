@@ -1241,11 +1241,14 @@ class UnifiedMemoryManager:
             if can_use_fractal:
                 try:
                     print(f"{self.get_time()} Using enhanced fast similarity search")
-                    return self.fast_similarity_search(
+                    found_out = self.fast_similarity_search(
                         normalized_query,
                         top_k=top_k,
                         min_similarity=min_similarity
                     )
+
+                    print(f"{self.get_time()} Using enhanced fast similarity search found out.")
+                    return found_out
                 except Exception as e:
                     print(f"{self.get_time()} Error in fast similarity search: {e}")
                     import traceback

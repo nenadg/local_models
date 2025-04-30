@@ -1627,7 +1627,7 @@ class TinyLlamaChat:
                 memories_added += 1
         
         if memories_added > 0:
-            print(f"\n{self.get_time()} [Memory] Added {memories_added} new memories")
+            print(f"{self.get_time()} [Memory] Added {memories_added} new memories")
             
         return memories_added
 
@@ -1977,7 +1977,7 @@ class TinyLlamaChat:
         # Create a history file for persistent input history
         history_file = os.path.join(self.memory_dir, '.multiline_history')
 
-        print("(Multiline input mode. Use Ctrl+D or Alt+Enter to submit, Ctrl+C to cancel)")
+        print("\n(Multiline input mode. Use Ctrl+D or Alt+Enter to submit, Ctrl+C to cancel)")
 
         try:
             style = Style.from_dict({
@@ -2457,8 +2457,6 @@ def main():
                 assistant_message = {"role": "assistant", "content": filtered_response}
                 conversation.append(assistant_message)
 
-                chat.add_conversation_to_memory(user_input, filtered_response)
-
                 # Estimate tokens generated
                 try:
                     # response_tokens = len(chat.tokenizer.encode(response))
@@ -2491,6 +2489,8 @@ def main():
                     if args.max_tokens > 0:
                         tokens_per_second = args.max_tokens / generation_time
                         print(f"{chat.get_time()} [Generated in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f}]")
+
+                chat.add_conversation_to_memory(user_input, filtered_response)
 
             except Exception as e:
                 print(f"{chat.get_time()} Error generating response: {e}")
