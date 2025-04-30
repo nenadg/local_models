@@ -1357,7 +1357,6 @@ class TinyLlamaChat:
             return "Error in streaming setup. Please try again."
 
         finally:
-            print(f"\n{self.get_time()} ¯\\_(ツ)_/¯", end='', flush=True)
             if show_confidence and not self.stop_event.is_set() and not fallback_message_streamed:
                 # Print the legend after the response is complete
                 print()  # Add a newline
@@ -1522,7 +1521,7 @@ class TinyLlamaChat:
         tokens_per_second = response_tokens / max(0.01, generation_time)
 
         # Print header
-        print(f"\n{self.get_time()} [Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec]")
+        print(f"{self.get_time()} [Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec]")
 
         # Get confidence metrics with sharpening applied
         confidence_data = self.confidence_metrics.get_metrics(apply_sharpening=True)
@@ -1628,7 +1627,7 @@ class TinyLlamaChat:
                 memories_added += 1
         
         if memories_added > 0:
-            print(f"{self.get_time()} [Memory] Added {memories_added} new memories")
+            print(f"\n{self.get_time()} [Memory] Added {memories_added} new memories")
             
         return memories_added
 
@@ -1837,16 +1836,6 @@ class TinyLlamaChat:
         Returns:
             Cleaned response without boilerplate
         """
-        # Extract timestamp pattern that starts boilerplate section
-        timestamp_pattern = r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] ¯\\\_\(ツ\)\_/¯'
-
-        # Split at the timestamp if it exists
-        parts = re.split(timestamp_pattern, response, 1)
-
-        # If split occurred, return just the content part
-        if len(parts) > 1:
-            return parts[0].strip()
-
         # Additional patterns to clean if needed
         patterns = [
             r'Confidence Heatmap Legend.*?Confidence range:.*?\d+\.\d+',  # Entire legend block
@@ -2450,7 +2439,7 @@ def main():
                             # Show confidence legend and add separator for clarity
                             heatmap = TerminalHeatmap(tokenizer=None, use_background=False, color_scheme="sepia-red")
                             heatmap.print_legend()
-                            print(f"\n{chat.get_time()} Filtered response:")
+                            # print(f"\n{chat.get_time()} Filtered response:")
 
                     else:
                         # If not filtered, print the original response
@@ -2480,10 +2469,6 @@ def main():
                     #     confidence_data.get('perplexity', 0),
                     #     confidence_data.get('entropy', 0)
                     # )
-
-                    # Get generation time
-                    end_time = time.time()
-                    generation_time = max(0.01, end_time - start_time)
 
                     # Calculate metrics on the clean response
                     response_tokens, tokens_per_second = chat.calculate_response_metrics(response, generation_time)
