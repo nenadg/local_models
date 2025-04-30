@@ -38,6 +38,8 @@ from semantic_reasoning_enhancer import integrate_semantic_reasoning
 from continuation_manager import ContinuationTrackingWindowManager
 from speculative_decoder import SpeculativeDecoder, SpeculativeDecodingStats
 
+from retrocausal_embeddings import RetrocausalEmbeddingSystem, integrate_retrocausal_embeddings
+
 # Default system message with uncertainty guidelines
 DEFAULT_SYSTEM_MESSAGE = {
     "role": "system",
@@ -230,6 +232,39 @@ class TinyLlamaChat:
 
 
         self.system_message = DEFAULT_SYSTEM_MESSAGE
+
+    def initialize_retrocausal_embeddings(self, enable=True):
+        """
+        Initialize retrocausal embeddings system for improved memory retrieval.
+
+        Args:
+            enable: Whether to enable retrocausal embeddings by default
+        """
+        if not hasattr(self, 'memory_manager'):
+            print(f"{self.get_time()} Cannot initialize retrocausal embeddings: memory manager not found")
+            return
+
+        try:
+            # Get embedding dimension from memory manager
+            embedding_dim = self.memory_manager.embedding_dim
+
+            # Integrate retrocausal embeddings with memory manager
+            integrate_retrocausal_embeddings(
+                self.memory_manager,
+                embedding_dim=embedding_dim,
+                feedback_strength=0.3,  # Default feedback strength
+                causal_dims=min(32, embedding_dim // 4),  # Use up to 1/4 of dimensions for causal feedback
+                contrast_factor=0.4  # Default contrast factor
+            )
+
+            # Set active state based on enable parameter
+            if not enable:
+                self.memory_manager.toggle_retrocausal_embeddings()
+
+            print(f"{self.get_time()} Retrocausal embedding system initialized")
+
+        except Exception as e:
+            print(f"{self.get_time()} Error initializing retrocausal embeddings: {e}")
 
     def test_batch_processing(self, operation_type='embedding'):
         """
@@ -2108,6 +2143,8 @@ def main():
         use_draft_model=args.draft_model
     )
 
+    chat.initialize_retrocausal_embeddings(enable=True)
+
     # # Test embedding batch processing
     # chat.test_batch_processing('embedding')
 
@@ -2200,6 +2237,9 @@ def main():
         print("  !compare-queries: [query1] | [query2] - Compare the semantic relationship between two queries")
         print("  !spec-stats - Show speculative decoding statistics")
         print("  !toggle-draft - Toggle draft model for speculative decoding on/off")
+        print("  !toggle-retrocausal - Toggle retrocausal embeddings on/off")
+        print("  !retrocausal-stats - Show retrocausal embedding diagnostics")
+        print("  !set-feedback: [0.0-1.0] - Set retrocausal feedback strength")
 
         print("\nIf the model expresses uncertainty, you can ask it to speculate")
         print("by saying 'please continue anyway' or 'please speculate'")
@@ -2386,6 +2426,36 @@ def main():
                 print(f"{chat.get_time()} Draft model {'enabled' if is_enabled else 'disabled'}")
                 continue
 
+            elif user_input.lower() == '!toggle-retrocausal':
+                if hasattr(chat.memory_manager, 'toggle_retrocausal_embeddings'):
+                    is_enabled = chat.memory_manager.toggle_retrocausal_embeddings()
+                    print(f"{chat.get_time()} Retrocausal embeddings {'enabled' if is_enabled else 'disabled'}")
+                else:
+                    print(f"{chat.get_time()} Retrocausal embeddings not available")
+                continue
+
+            elif user_input.lower() == '!retrocausal-stats':
+                if hasattr(chat.memory_manager, 'retrocausal_diagnostics'):
+                    chat.memory_manager.retrocausal_diagnostics()
+                else:
+                    print(f"{chat.get_time()} Retrocausal embeddings not available")
+                continue
+
+            elif user_input.lower().startswith('!set-feedback:'):
+                if hasattr(chat.memory_manager, 'retrocausal_system'):
+                    try:
+                        feedback = float(user_input.split(':')[1].strip())
+                        if 0.0 <= feedback <= 1.0:
+                            chat.memory_manager.retrocausal_system.feedback_strength = feedback
+                            print(f"{chat.get_time()} Retrocausal feedback strength set to {feedback}")
+                        else:
+                            print(f"{chat.get_time()} Feedback strength must be between 0.0 and 1.0")
+                    except Exception as e:
+                        print(f"{chat.get_time()} Invalid value: {str(e)}. Please specify a number between 0.0 and 1.0")
+                else:
+                    print(f"{chat.get_time()} Retrocausal embeddings not available")
+                continue
+
 
             # Add user message to conversation
             user_message = {"role": "user", "content": user_input}
@@ -2457,8 +2527,6 @@ def main():
                 assistant_message = {"role": "assistant", "content": filtered_response}
                 conversation.append(assistant_message)
 
-                chat.add_conversation_to_memory(user_input, filtered_response)
-
                 # Estimate tokens generated
                 try:
                     # response_tokens = len(chat.tokenizer.encode(response))
@@ -2491,6 +2559,8 @@ def main():
                     if args.max_tokens > 0:
                         tokens_per_second = args.max_tokens / generation_time
                         print(f"{chat.get_time()} [Generated in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f}]")
+
+                chat.add_conversation_to_memory(user_input, filtered_response)
 
             except Exception as e:
                 print(f"{chat.get_time()} Error generating response: {e}")
