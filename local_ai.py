@@ -35,7 +35,7 @@ from batch_utils import tensor_batch_processing
 from web_knowledge_enhancer import WebKnowledgeEnhancer
 
 from semantic_reasoning_enhancer import integrate_semantic_reasoning
-from continuation_manager import ContinuationTrackingWindowManager
+
 from speculative_decoder import SpeculativeDecoder, SpeculativeDecodingStats
 
 # Default system message with uncertainty guidelines
@@ -99,7 +99,7 @@ class TinyLlamaChat:
 
         self.auto_memorize = auto_memorize
         self.sharpening_factor = sharpening_factor
-        
+
         # Initialize the question classifier
         self.question_classifier = QuestionClassifier()
 
@@ -158,17 +158,6 @@ class TinyLlamaChat:
         print(f"{self.get_time()} Loading target model: {model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
         self.tokenizer.model_max_length = 2048 # should be 1024 or lower for performance
-
-        # Initialize the window manager with our tokenizer
-        self.window_manager = ContinuationTrackingWindowManager(
-            tokenizer=self.tokenizer,
-            max_window_size=2048,
-            memory_manager=self.memory_manager,
-            safety_margin=50,
-            continuation_buffer_size=200  # Store the last 200 tokens for continuation
-        )
-
-        print(f"{self.get_time()} Context window and continuation tracking initialized")
 
         # AMD only
         # quantization_config = BitsAndBytesConfig(
@@ -540,381 +529,6 @@ class TinyLlamaChat:
         # Attach stats method
         self.get_embedding_stats = get_embedding_stats
 
-    def enhance_query_for_continuation(self, messages):
-        """
-        Enhance the user query if it's a continuation request.
-        Add this at the beginning of create_prompt_with_knowledge.
-        """
-        # Check if this is a continuation request
-        if not messages or len(messages) == 0:
-            return messages
-
-        if hasattr(self, 'window_manager') and messages[-1]["role"] == "user":
-            user_query = messages[-1]["content"]
-
-            # Detect if this is a continuation request
-            if self.window_manager.detect_continuation_request(user_query):
-                print(f"{self.get_time()} Detected continuation request, enhancing prompt...")
-
-                # Enhance continuation context with web knowledge if available
-                if hasattr(self, 'web_enhancer') and self.web_enhancer and user_query:
-                    # Get current continuation context
-                    cont_context = self.window_manager.continuation_context.get(
-                        self.current_user_id, {}
-                    )
-
-                    # Add content type detection if not present
-                    if "content_type" not in cont_context and "text" in cont_context:
-                        cont_context["content_type"] = self.window_manager._detect_content_type(
-                            cont_context["text"]
-                        )
-
-                    # Check if the web_enhancer has the enhance_continuation_context method
-                    if hasattr(self.web_enhancer, 'enhance_continuation_context'):
-                        # Enhance with web knowledge
-                        enhanced_context = self.web_enhancer.enhance_continuation_context(
-                            user_query, cont_context
-                        )
-
-                        # Update the continuation context
-                        self.window_manager.continuation_context[self.current_user_id] = enhanced_context
-
-                # Prepare enhanced continuation prompt
-                enhanced_query = self.window_manager.prepare_continuation_prompt(
-                    query=user_query,
-                    user_id=self.current_user_id
-                )
-
-                # Update the user message with enhanced query
-                if enhanced_query != user_query:
-                    messages[-1]["content"] = enhanced_query
-                    print(f"{self.get_time()} Enhanced continuation prompt created")
-                else:
-                    print(f"{self.get_time()} No continuation context available")
-
-        return messages
-
-    def create_prompt_with_extended_context(self, messages, use_web_search=True):
-        """
-        Create a prompt with extended context using fractal memory to simulate a larger context window.
-
-        This method enhances the standard create_prompt_with_knowledge by:
-        1. Using hierarchical fractal levels to provide broader context
-        2. Organizing context from specific to general for better semantic continuity
-        3. Optimizing for continuation scenarios
-
-        Args:
-            messages: The conversation history as a list of message dicts
-            use_web_search: Whether to enhance with web search results
-
-        Returns:
-            List of enhanced messages with extended context
-        """
-        try:
-            # First check if this is a continuation request and enhance if needed
-            if hasattr(self, 'enhance_query_for_continuation'):
-                messages = self.enhance_query_for_continuation(messages)
-
-            # Extract the user's current query
-            current_query = messages[-1]["content"] if len(messages) > 0 and messages[-1]["role"] == "user" else ""
-
-            # Create enhanced system message with knowledge
-            enhanced_system_content = self.system_message["content"]
-
-            # Get hierarchical context using fractal memory
-            hierarchical_context = {}
-
-            if current_query and hasattr(self.memory_manager, 'retrieve') and self.memory_manager.use_fractal:
-                print(f"{self.get_time()} Building hierarchical context using fractal memory...")
-
-                # Retrieve for each level with adjusted parameters
-                for level in range(self.memory_manager.max_fractal_levels + 1):
-                    # Adjust parameters by level
-                    level_top_k = 5 * (1 + level // 2)  # Get more items at higher levels
-                    level_similarity = max(0.1, 0.25 - (0.05 * level))  # Lower threshold for higher levels
-
-                    print(f"{self.get_time()} Retrieving level {level} context (top_k={level_top_k}, min_similarity={level_similarity:.2f})")
-
-                    # Use existing retrieve method
-                    level_results = self.memory_manager.retrieve(
-                        query=current_query,
-                        top_k=level_top_k,
-                        min_similarity=level_similarity,
-                        use_fractal=True
-                    )
-
-                    # Store results by level
-                    hierarchical_context[f"context_level_{level}"] = level_results
-
-                    print(f"{self.get_time()} Found {len(level_results)} items for level {level}")
-
-                # Format context by levels (from specific to general)
-                if any(hierarchical_context.values()):
-                    enhanced_system_content += "\n\nHIERARCHICAL CONTEXT:\n"
-
-                    # Add level 0 (most specific, direct matches)
-                    if "context_level_0" in hierarchical_context and hierarchical_context["context_level_0"]:
-                        enhanced_system_content += "\nDIRECT CONTEXT:\n"
-                        for item in hierarchical_context["context_level_0"][:3]:
-                            enhanced_system_content += f"- {item['content']}\n"
-
-                    # Add higher levels (broader context)
-                    for level in range(1, self.memory_manager.max_fractal_levels + 1):
-                        key = f"context_level_{level}"
-                        if key in hierarchical_context and hierarchical_context[key]:
-                            enhanced_system_content += f"\nBROADER CONTEXT (Level {level}):\n"
-                            for item in hierarchical_context[key][:2]:  # Fewer items for broader context
-                                enhanced_system_content += f"- {item['content']}\n"
-
-                    print(f"{self.get_time()} Added hierarchical context to prompt")
-
-            # Add standard knowledge retrieval (original implementation)
-            knowledge_text = ""
-            if current_query:
-                # Retrieve knowledge with appropriate settings
-                results = self.memory_manager.retrieve(
-                    query=current_query,
-                    top_k=8,  # Default is 8
-                    min_similarity=0.25,
-                    use_fractal=self.memory_manager.use_fractal
-                )
-
-                # Format the knowledge for the prompt
-                if results:
-                    knowledge_text = self.memory_manager.format_knowledge_for_prompt(results, current_query)
-
-            # Add web search results if available and enabled
-            web_context = ""
-            if use_web_search and hasattr(self, 'enable_web_knowledge') and self.enable_web_knowledge and hasattr(self, 'web_enhancer') and self.web_enhancer is not None:
-                try:
-                    web_enhancement = self.enhance_with_web_knowledge(current_query, {}, None, messages)
-
-                    if web_enhancement and web_enhancement.get('enhanced', False):
-                        web_context = self.web_enhancer.format_web_results_for_context(web_enhancement)
-                except Exception as e:
-                    print(f"{self.get_time()} Error enhancing with web knowledge: {e}")
-
-            # Combine knowledge and web information
-            if knowledge_text and web_context:
-                enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
-                enhanced_system_content += f"\n{knowledge_text}\n"
-                enhanced_system_content += f"\n{web_context}"
-            elif knowledge_text:
-                enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
-                enhanced_system_content += f"\n{knowledge_text}"
-            elif web_context:
-                enhanced_system_content += "\n\nIMPORTANT: Use the following web search results in your response:\n"
-                enhanced_system_content += f"\n{web_context}"
-
-            # Create messages with enhanced system prompt
-            enhanced_messages = [
-                {
-                    "role": "system",
-                    "content": enhanced_system_content
-                }
-            ]
-
-            # Add conversation history - use window manager for optimization if available
-            if len(messages) > 1:
-                history_messages = messages[1:]
-                if hasattr(self, 'window_manager') and hasattr(self.window_manager, 'optimize_messages'):
-                    # Get history messages optimized by window manager
-                    max_tokens = getattr(self, 'max_new_tokens', 128)
-                    history = self.window_manager.optimize_messages(history_messages, max_tokens)
-                    enhanced_messages.extend(history)
-                else:
-                    # Fall back to simple approach - keep last few messages
-                    enhanced_messages.extend(history_messages[-5:])
-
-            if hasattr(self, 'window_manager') and hasattr(self.window_manager, 'reduce_context_when_exceeding_limits'):
-                # Estimate the total tokens in the enhanced messages
-                token_estimate = 0
-                for msg in enhanced_messages:
-                    if hasattr(self.window_manager, '_count_tokens_safely'):
-                        token_estimate += self.window_manager._count_tokens_safely(msg["content"])
-                    else:
-                        # Rough estimate if proper counting not available
-                        token_estimate += len(msg["content"].split()) * 1.3
-
-                # If we're likely to exceed limits, proactively reduce
-                if token_estimate > 2048:  # Typical limit for small models
-                    print(f"{self.get_time()} Preemptively reducing context (estimated {token_estimate} tokens)")
-                    enhanced_messages = self.window_manager.reduce_context_when_exceeding_limits(
-                        enhanced_messages,
-                        2048  # Target maximum tokens (adjust based on your model)
-                    )
-                    
-            return enhanced_messages
-
-        except Exception as e:
-            print(f"{self.get_time()} Error in create_prompt_with_extended_context: {e}")
-            import traceback
-            traceback.print_exc()
-
-            # Return basic messages on error
-            if not messages or len(messages) == 0:
-                return [{"role": "system", "content": self.system_message["content"]}]
-
-            return [{"role": "system", "content": self.system_message["content"]}] + messages[1:]
-
-    def create_prompt_with_knowledge(self, messages, use_web_search=True):
-        """Create a prompt that incorporates relevant knowledge."""
-        try:
-            # First check if this is a continuation request and enhance if needed
-            messages = self.enhance_query_for_continuation(messages)
-
-            # Extract the user's current query
-            current_query = messages[-1]["content"] if len(messages) > 0 and messages[-1]["role"] == "user" else ""
-
-            # Create enhanced system message with knowledge
-            enhanced_system_content = self.system_message["content"]
-
-            # Retrieve knowledge using the unified approach
-            knowledge_text = ""
-            if current_query:
-                # Retrieve knowledge with appropriate settings
-                results = self.memory_manager.retrieve(
-                    query=current_query,
-                    top_k=8,  # Default is 8
-                    min_similarity=0.25,
-                    use_fractal=self.memory_manager.use_fractal
-                )
-
-                # Format the knowledge for the prompt
-                if results:
-                    knowledge_text = self.memory_manager.format_knowledge_for_prompt(results, current_query)
-
-            # Add web search results if available and enabled
-            web_context = ""
-            if use_web_search and self.enable_web_knowledge and self.web_enhancer is not None:
-                try:
-                    web_enhancement = self.enhance_with_web_knowledge(current_query, {}, None, messages)
-
-                    if web_enhancement and web_enhancement.get('enhanced', False):
-                        web_context = self.web_enhancer.format_web_results_for_context(web_enhancement)
-
-                        # Add web results to knowledge
-                        if web_enhancement.get('web_results'):
-                            for result in web_enhancement['web_results']:
-                                # Add each result to knowledge system
-                                metadata = {
-                                    "source_hint": "web",
-                                    "url": result.get('url', ''),
-                                    "title": result.get('title', ''),
-                                    "timestamp": datetime.now().timestamp()
-                                }
-
-                                content = f"{result.get('title', '')}: {result.get('snippet', '')}"
-
-                                # Add to memory asynchronously
-                                if self.auto_memorize:
-                                    threading.Thread(
-                                        target=self.memory_manager.add,
-                                        args=(content, metadata, True)
-                                    ).start()
-                except Exception as e:
-                    print(f"{self.get_time()} Error enhancing with web knowledge: {e}")
-
-            # Combine knowledge and web information
-            if knowledge_text and web_context:
-                enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
-                enhanced_system_content += f"\n{knowledge_text}\n"
-                enhanced_system_content += f"\n{web_context}"
-            elif knowledge_text:
-                enhanced_system_content += "\n\nIMPORTANT: Apply the following information in your response:\n"
-                enhanced_system_content += f"\n{knowledge_text}"
-            elif web_context:
-                enhanced_system_content += "\n\nIMPORTANT: Use the following web search results in your response:\n"
-                enhanced_system_content += f"\n{web_context}"
-
-            # Create messages with enhanced system prompt
-            enhanced_messages = [
-                {
-                    "role": "system",
-                    "content": enhanced_system_content
-                }
-            ]
-
-            # Add conversation history
-            if len(messages) > 1:
-                history_messages = messages[1:]
-                enhanced_messages.extend(history_messages[-5:])  # Keep up to 5 recent messages
-
-            return enhanced_messages
-
-        except Exception as e:
-            print(f"{self.get_time()} Error in create_prompt_with_knowledge: {e}")
-            import traceback
-            traceback.print_exc()
-
-            # Return basic messages on error
-            if not messages or len(messages) == 0:
-                return [{"role": "system", "content": self.system_message["content"]}]
-
-            return [{"role": "system", "content": self.system_message["content"]}] + messages[1:]
-
-    def enhance_with_web_knowledge(self, query: str, confidence_data: Dict[str, float], domain: Optional[str] = None, messages: Optional[List[Dict]] = None) -> Dict[str, Any]:
-        """
-        Enhance response generation with web knowledge when confidence is low.
-
-        Args:
-            query: User query
-            confidence_data: Confidence metrics from the model
-            domain: Optional domain classification
-            messages: Optional conversation history
-
-        Returns:
-            Web enhancement data
-        """
-        if not self.enable_web_knowledge or self.web_enhancer is None:
-            return {
-                'enhanced': False,
-                'reason': 'web_knowledge_disabled',
-                'web_results': []
-            }
-
-        # Safety check for web_enhancer
-        if not hasattr(self.web_enhancer, 'enhance_response'):
-            print(f"{self.get_time()} Web enhancer doesn't have enhance_response method")
-            return {
-                'enhanced': False,
-                'reason': 'web_enhancer_incompatible',
-                'web_results': []
-            }
-
-        try:
-            # Use the web enhancer to get relevant information
-            enhancement_data = self.web_enhancer.enhance_response(
-                query,
-                confidence_data,
-                domain,
-                process_urls=True
-            )
-
-            # Add to memory if enhancement was successful
-            if enhancement_data.get('enhanced', False):
-                # Check if add_web_results_to_memory method exists
-                if hasattr(self.web_enhancer, 'add_web_results_to_memory'):
-                    self.web_enhancer.add_web_results_to_memory(
-                        self.current_user_id,
-                        query,
-                        enhancement_data
-                    )
-
-            return enhancement_data
-
-        except Exception as e:
-            print(f"{self.get_time()} Error in enhance_with_web_knowledge: {e}")
-            import traceback
-            traceback.print_exc()
-
-            return {
-                'enhanced': False,
-                'reason': 'error',
-                'error_message': str(e),
-                'web_results': []
-            }
-
     def toggle_draft_model(self):
         """Toggle draft model on/off for speculative decoding."""
         if self.use_draft_model and self.draft_model is not None:
@@ -1104,7 +718,7 @@ class TinyLlamaChat:
         self.old_settings = termios.tcgetattr(fd)
         ## not needed - tty.setraw(fd)
         tty.setcbreak(fd)
-        
+
         try:
             # heatmap = TerminalHeatmap(self.tokenizer, use_background=False)
             heatmap = EnhancedHeatmap(self.tokenizer, use_background=False, window_size=3)
@@ -1119,10 +733,6 @@ class TinyLlamaChat:
 
                 # Extract target length and set it in window manager
                 user_query = messages[-1]["content"]
-                # Extract target length from user query if specified (e.g., "write a 500 word essay")
-                target_length = self.window_manager.extract_target_length(user_query)
-                # Store the target in the window manager for later use
-                self.window_manager.set_target_length(self.current_user_id, target_length)
 
                 if cleaned_input == "_COMMAND_ONLY_":
                     # This was just a shell command, don't generate a response
@@ -1153,28 +763,9 @@ class TinyLlamaChat:
                         files_info = ", ".join(successful)
                         print(f"{self.get_time()} [User content saved to: {files_info}]")
 
-
-            # Choose which context building method to use based on the setting
-            if hasattr(self, 'use_extended_context') and self.use_extended_context:
-                print(f"{self.get_time()} Using extended context window")
-                enhanced_messages = self.create_prompt_with_extended_context(messages, use_web_search)
-            else:
-                enhanced_messages = self.create_prompt_with_knowledge(messages, use_web_search)
-
-            # Use the window manager to optimize messages to fit token limits
-            optimized_messages = self.window_manager.optimize_messages(enhanced_messages, max_new_tokens)
-
-            # Log token counts to help with debugging
-            original_tokens = self.window_manager.calculate_tokens(enhanced_messages)
-            optimized_tokens = self.window_manager.calculate_tokens(optimized_messages)
-
-            if original_tokens != optimized_tokens:
-                print(f"{self.get_time()} Context window optimized: {original_tokens} → {optimized_tokens} tokens " +
-                      f"(saved {original_tokens - optimized_tokens} tokens)")
-
             # Apply chat template
             prompt = self.tokenizer.apply_chat_template(
-                optimized_messages,
+                messages,
                 tokenize=False,
                 add_generation_prompt=True
             )
@@ -1287,33 +878,6 @@ class TinyLlamaChat:
                     # Add token to response
                     complete_response += token
 
-                    detected_repetition = False
-                    if hasattr(self, 'window_manager'):
-                        detected_repetition = self.window_manager.track_repetition_patterns(
-                            complete_response, self.current_user_id
-                        )
-
-                    # If repetition detected and web enhancer is available, get correction suggestion
-                    if detected_repetition and hasattr(self, 'web_enhancer') and self.web_enhancer:
-                        try:
-                            print(f"\n{self.get_time()} [Repetitive pattern detected, getting correction suggestions...]")
-
-                            # Get a fresh perspective from the web
-                            correction_query = f"{complete_response[-150:]}"
-                            web_results = self.web_enhancer.search_web(correction_query, num_results=1)
-
-                            if web_results:
-                                # Store correction suggestion for next continuation
-                                if self.current_user_id not in self.window_manager.continuation_context:
-                                    self.window_manager.continuation_context[self.current_user_id] = {}
-
-                                self.window_manager.continuation_context[self.current_user_id]["correction_suggestion"] = web_results[0].get('snippet', '')
-
-                                # Add note about available correction
-                                complete_response += "\n\n// Note: Repetitive pattern detected. Use 'fix code' to get correction suggestions."
-                        except Exception as e:
-                            print(f"{self.get_time()} Error getting correction suggestions: {e}")
-
                     # Get confidence for latest token
                     if self.confidence_metrics.token_probabilities:
                         latest_confidence = self.confidence_metrics.token_probabilities[-1]
@@ -1332,19 +896,6 @@ class TinyLlamaChat:
                         # Default if no confidence available
                         latest_confidence = 0.8
                         token_confidences.append(latest_confidence)
-
-                    if hasattr(self, 'window_manager') and hasattr(self.window_manager, 'is_generation_complete'):
-                        if self.window_manager.is_generation_complete(self.current_user_id, complete_response):
-                            # End generation and clean up
-                            print(f"\n{self.get_time()} [Generation complete: target length reached]")
-                            self.stop_event.set()  # Signal to stop generation
-
-                            # Ensure response is properly terminated at a sentence boundary
-                            if hasattr(self.window_manager, '_find_safe_termination_point'):
-                                termination_point = self.window_manager._find_safe_termination_point(complete_response)
-                                complete_response = complete_response[:termination_point]
-
-                            break
 
                     # Check confidence early enough to stop generation if needed
                     # But only if we have a response filter and after receiving some tokens
@@ -1438,13 +989,6 @@ class TinyLlamaChat:
 
                                         self.confidence_metrics.add_token_score(dummy_logits, max_index)
 
-                                # Track the generated response for continuation
-                                if hasattr(self, 'window_manager') and hasattr(self.window_manager, 'track_generated_response'):
-                                    self.window_manager.track_generated_response(
-                                        response=complete_response,
-                                        user_id=self.current_user_id,
-                                        target_length=target_length)
-
                                 return self.mcp_handler.finalize_streaming(complete_response)
 
                 termios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
@@ -1486,13 +1030,6 @@ class TinyLlamaChat:
                                 print(f"{self.get_time()} [Response saved to: {filename}]")
                             else:
                                 print(f"{self.get_time()} [Failed to save response to: {filename}]")
-
-                # Track the generated response for continuation
-                if hasattr(self, 'window_manager') and hasattr(self.window_manager, 'track_generated_response'):
-                    self.window_manager.track_generated_response(
-                        response=complete_response,
-                        user_id=self.current_user_id,
-                        target_length=target_length)
 
                 return complete_response
 
