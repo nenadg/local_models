@@ -1223,7 +1223,7 @@ class TinyLlamaChat:
         quality = metrics.get('quality', (confidence * 0.25) + (perplexity_score * 0.25) + (entropy_score * 0.25) + 0.25)
 
         # Combine all metrics with equal weights for truthiness
-        truthiness = (quality * 0.25) + (confidence * 0.25) + (perplexity_score * 0.25) + (entropy_score * 0.25)
+        truthiness = quality / 2
 
         # If all metrics are toggled on, show individual metrics
         if show_all_metrics:
@@ -2111,8 +2111,7 @@ def main():
                 chat.add_conversation_to_memory(user_input, filtered_response)
 
             except Exception as e:
-                print(f"{chat.get_time()} Error generating response: {e}")
-                print(f"{chat.get_time()} Please try again with a different question.")
+                print(f"{chat.get_time()} Error generating response (probably cancelled): {e}")
 
             # finally:
             #     chat.cleanup()
