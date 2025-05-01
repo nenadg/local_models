@@ -32,7 +32,6 @@ from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
 from question_classifier import QuestionClassifier
 
 from batch_utils import tensor_batch_processing
-from web_knowledge_enhancer import WebKnowledgeEnhancer
 
 from semantic_reasoning_enhancer import integrate_semantic_reasoning
 
@@ -60,14 +59,12 @@ class TinyLlamaChat:
              auto_memorize=True,
              enable_sharpening=True,
              sharpening_factor=0.3,
-             enable_web_knowledge=True,
              fractal_enabled=True,
              max_fractal_levels=3,
              do_sample=False,
              top_p=1, # initial top_p = 1.0
              top_k=50,   # initial top_k = 50
-             use_draft_model=False,
-             use_extended_context=True
+             use_draft_model=False
              ):
         self.model_name = model_name
         self.memory_dir = memory_dir
@@ -75,7 +72,6 @@ class TinyLlamaChat:
         self.top_p = top_p
         self.top_k = top_k
         self._query_embedding_cache = {}
-        self.use_extended_context = use_extended_context
 
 
         self.stop_event = threading.Event()
@@ -111,20 +107,6 @@ class TinyLlamaChat:
                 integrate_semantic_reasoning(self, finetuned_model_path)
             except Exception as e:
                 print(f"{self.get_time()} Finetuned model not loaded: {e}")
-
-        # Initialize the web knowledge enhancer
-        self.enable_web_knowledge = enable_web_knowledge
-        if enable_web_knowledge:
-            self.web_enhancer = WebKnowledgeEnhancer(
-                memory_manager=self.memory_manager,  # Pass your UnifiedMemoryManager instance
-                chat=self,                       # Optional reference to chat system
-                confidence_threshold=0.65,       # When to trigger web search
-                sharpening_factor=0.3,           # For vector similarity sharpening
-                search_engine="duckduckgo"       # Or "google"
-            )
-            print(f"{self.get_time()} Web knowledge enhancement initialized")
-        else:
-            self.web_enhancer = None
 
         self.current_user_id = "default_user"
 
@@ -559,28 +541,6 @@ class TinyLlamaChat:
             print(f"{self.get_time()} Draft model status unchanged")
             return self.use_draft_model
 
-    def toggle_web_knowledge(self) -> bool:
-        """
-        Toggle web knowledge enhancement on/off.
-
-        Returns:
-            New web_knowledge state
-        """
-        self.enable_web_knowledge = not self.enable_web_knowledge
-
-        # Initialize web enhancer if needed
-        if self.enable_web_knowledge and self.web_enhancer is None:
-            self.web_enhancer = WebKnowledgeEnhancer(
-                memory_manager=self.memory_manager,
-                chat=self,
-                confidence_threshold=confidence_threshold,
-                vector_sharpening_factor=sharpening_factor,
-                search_engine="duckduckgo",  # Use DuckDuckGo by default for fewer rate limits
-                embedding_function=self.memory_manager.embedding_function  # Direct reference to the function
-            )
-
-        return self.enable_web_knowledge
-
     def get_domain_specific_generation_config(self, query, base_config):
         """
         Get domain-specific generation configuration.
@@ -709,7 +669,7 @@ class TinyLlamaChat:
             except Exception as specific_e:
                 print(f"{self.get_time()} Error ending streamer: {specific_e}")
 
-    def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None, use_web_search=True):
+    def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
         # We only support streaming now, simplifies the code
 
@@ -1774,12 +1734,6 @@ def main():
                       help="Enable vector space and confidence sharpening")
     parser.add_argument("--sharpening-factor", type=float, default=0.3,
                       help="Sharpening factor for vector embeddings (0.0-1.0)")
-    parser.add_argument("--web-knowledge", action="store_true", default=True,
-                      help="Enable web search for knowledge enhancement")
-    parser.add_argument("--search-engine", type=str, default="duckduckgo", choices=["duckduckgo", "google"],
-                      help="Search engine to use for web knowledge")
-    parser.add_argument("--web-confidence", type=float, default=0.65,
-                      help="Confidence threshold below which to trigger web search")
     parser.add_argument("--test-fractal", action="store_true", default=False,
                       help="Run fractal embedding diagnostics")
     parser.add_argument("--do-sample", action="store_true", help="Enable sampling-based generation")
@@ -1787,8 +1741,6 @@ def main():
     parser.add_argument("--top-k", type=int, default=0, help="Top-k sampling parameter")
     parser.add_argument("--draft-model", action="store_true", default=False,
                       help="Enable draft model for speculative decoding")
-    parser.add_argument("--extended-context", action="store_true", default=True,
-                  help="Enable extended context window simulation")
 
     args = parser.parse_args()
 
@@ -1806,14 +1758,12 @@ def main():
         auto_memorize=not args.no_memory,
         enable_sharpening=args.enable_sharpening,
         sharpening_factor=args.sharpening_factor,
-        enable_web_knowledge=args.web_knowledge,
         fractal_enabled=True,
         max_fractal_levels=3,
         do_sample=args.do_sample,
         top_p=args.top_p,
         top_k=args.top_k,
-        use_draft_model=args.draft_model,
-        use_extended_context=args.extended_context
+        use_draft_model=args.draft_model
     )
 
     # # Test embedding batch processing
@@ -1829,12 +1779,6 @@ def main():
     #return chat.memory_manager.print_fractal_embedding_diagnostics()
 
     try:
-        # If web knowledge is enabled, configure the search engine
-        if args.web_knowledge and chat.web_enhancer:
-            chat.web_enhancer.search_engine = args.search_engine
-            chat.web_enhancer.confidence_threshold = args.web_confidence
-            print(f"{chat.get_time()} Web knowledge enhancement enabled using {args.search_engine}")
-
         if args.test_fractal:
             # Get a user store
             store = chat.memory_manager
@@ -1879,8 +1823,7 @@ def main():
             _ = chat.generate_response(
                 [{"role": "user", "content": f"Just write the result of equation {magic_number_1}{random.choice(operators)}{magic_number_2} without anything than just that the result of equation."}],
                 max_new_tokens=30,
-                temperature=0.7,
-                use_web_search=False
+                temperature=0.7
             )
 
         # Start conversation loop
@@ -1901,14 +1844,11 @@ def main():
         print("  !toggle-sharpening - Toggle vector space sharpening on/off")
         print("  !toggle-memory - Toggle automatic memorization on/off")
         print("  !memory-stats - Display info about memories")
-        print("  !toggle-web - Toggle web knowledge enhancement on/off")
-        print("  !web-stats - Show web search statistics")
         print("  !search-engine: [engine] - Set search engine (duckduckgo/google)")
         print("  !fractal-diagnostics - prints fractal embedding diagnostics")
         print("  !compare-queries: [query1] | [query2] - Compare the semantic relationship between two queries")
         print("  !spec-stats - Show speculative decoding statistics")
         print("  !toggle-draft - Toggle draft model for speculative decoding on/off")
-        print("  !toggle-extended-context - Toggle extended context window simulation on/off")
 
         print("\nIf the model expresses uncertainty, you can ask it to speculate")
         print("by saying 'please continue anyway' or 'please speculate'")
@@ -2023,36 +1963,6 @@ def main():
                     print(f"{chat.get_time()} Unexpected error when getting memory stats: {str(e)}")
                 continue
 
-            elif user_input.lower() == '!toggle-web':
-                is_enabled = chat.toggle_web_knowledge()
-                print(f"{chat.get_time()} Web knowledge enhancement {'enabled' if is_enabled else 'disabled'}")
-                continue
-
-            elif user_input.lower() == '!web-stats':
-                if hasattr(chat, 'web_enhancer') and chat.web_enhancer:
-                    stats = chat.web_enhancer.get_stats()
-                    print(f"\n{chat.get_time()} Web Knowledge Statistics:")
-                    print(f"{chat.get_time()} Total searches: {stats['total_searches']}")
-                    print(f"{chat.get_time()} Successful searches: {stats['successful_searches']}")
-                    print(f"{chat.get_time()} Success rate: {stats['success_rate']*100:.1f}%")
-                    print(f"{chat.get_time()} Cache hits: {stats['cache_hits']}")
-                    print(f"{chat.get_time()} Cache hit rate: {stats['cache_hit_rate']*100:.1f}%")
-                else:
-                    print("Web knowledge enhancement is not enabled")
-                continue
-
-            elif user_input.lower().startswith('!search-engine:'):
-                if hasattr(chat, 'web_enhancer') and chat.web_enhancer:
-                    engine = user_input.split(':')[1].strip().lower()
-                    if engine in ["duckduckgo", "google"]:
-                        chat.web_enhancer.search_engine = engine
-                        print(f"{chat.get_time()} Search engine set to: {engine}")
-                    else:
-                        print(f"{chat.get_time()} Unsupported search engine: {engine}. Please use 'duckduckgo' or 'google'")
-                else:
-                    print("Web knowledge enhancement is not enabled")
-                continue
-
             elif user_input.lower() == '!fractal-diagnostics':
                 store = chat.memory_manager
                 if hasattr(store, 'print_fractal_embedding_diagnostics'):
@@ -2094,12 +2004,6 @@ def main():
                 is_enabled = chat.toggle_draft_model()
                 print(f"{chat.get_time()} Draft model {'enabled' if is_enabled else 'disabled'}")
                 continue
-
-            elif user_input.lower() == '!toggle-extended-context':
-                chat.use_extended_context = not chat.use_extended_context
-                print(f"{chat.get_time()} Extended context {'enabled' if chat.use_extended_context else 'disabled'}")
-                continue
-
 
             # Add user message to conversation
             user_message = {"role": "user", "content": user_input}
