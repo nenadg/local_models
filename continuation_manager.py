@@ -159,6 +159,466 @@ class ContinuationTrackingWindowManager:
 
         return result
 
+    def reduce_higher_level_fractal_contexts(self, messages, reduction_needed):
+        """Reduce context from higher-level fractal contexts first."""
+        system_content = messages[0]["content"]
+
+        # Try to identify and reduce broader context levels first
+        for level in range(self.memory_manager.max_fractal_levels, 0, -1):
+            level_marker = f"\nBROADER CONTEXT (Level {level}):\n"
+            if level_marker in system_content:
+                # Find the section and measure its token count
+                start_idx = system_content.find(level_marker)
+
+                # Find the next level or section
+                next_marker_idx = -1
+                for next_marker in [f"\nBROADER CONTEXT (Level {level-1}):\n", "\nIMPORTANT:", "\nKNOWLEDGE:"]:
+                    idx = system_content.find(next_marker, start_idx + len(level_marker))
+                    if idx != -1 and (next_marker_idx == -1 or idx < next_marker_idx):
+                        next_marker_idx = idx
+
+                # If we found a section to reduce
+                if next_marker_idx != -1:
+                    section = system_content[start_idx:next_marker_idx]
+                    section_tokens = self._count_tokens_safely(section)
+
+                    if section_tokens > 0:
+                        # Remove this section or reduce it
+                        if section_tokens <= reduction_needed:
+                            # Remove entire section
+                            new_content = system_content[:start_idx] + system_content[next_marker_idx:]
+                        else:
+                            # Keep half of the items in this section
+                            lines = section.split('\n')
+                            # Keep header and first line
+                            kept_lines = [lines[0], lines[1]] if len(lines) > 1 else [lines[0]]
+
+                            # Add a summary line
+                            kept_lines.append(f"- [Context reduced: {len(lines)-len(kept_lines)} items omitted due to length constraints]")
+
+                            new_section = '\n'.join(kept_lines)
+                            new_content = system_content[:start_idx] + new_section + system_content[next_marker_idx:]
+
+                        # Update the message
+                        messages[0]["content"] = new_content
+                        return messages
+
+        # If no reductions were made, return the original messages
+        return messages
+
+    def trim_web_search_results(self, messages, reduction_needed):
+        """Trim web search results to essential points."""
+        system_content = messages[0]["content"]
+
+        # Check if web search results exist
+        web_marker = "\nIMPORTANT: Use the following web search results in your response:\n"
+        if web_marker in system_content:
+            start_idx = system_content.find(web_marker)
+
+            # Find the end of web results section
+            end_markers = ["\nKNOWLEDGE:", "\nHIERARCHICAL CONTEXT:"]
+            end_idx = len(system_content)
+            for marker in end_markers:
+                idx = system_content.find(marker, start_idx)
+                if idx != -1 and idx < end_idx:
+                    end_idx = idx
+
+            # Extract web results section
+            web_section = system_content[start_idx:end_idx]
+            web_tokens = self._count_tokens_safely(web_section)
+
+            if web_tokens > 0:
+                # If the section is larger than what we need to reduce
+                if web_tokens > reduction_needed:
+                    # Keep only primary results
+                    primary_marker = "\nPRIMARY INFORMATION:\n"
+                    if primary_marker in web_section:
+                        primary_start = web_section.find(primary_marker)
+                        secondary_marker = "\nSUPPORTING INFORMATION:\n"
+                        secondary_start = web_section.find(secondary_marker)
+
+                        if secondary_start != -1:
+                            # Keep only primary information
+                            reduced_web = web_section[:secondary_start]
+                            new_content = system_content[:start_idx] + reduced_web + system_content[end_idx:]
+                            messages[0]["content"] = new_content
+                            return messages
+
+                # If we need to reduce more drastically or no clear sections
+                # Keep only first few lines of web results
+                lines = web_section.split("\n")
+                summary_line = "\n[Web results summarized: Only showing most relevant items due to length constraints]"
+
+                # Keep header + first 3-5 lines depending on reduction needed
+                kept_lines_count = max(3, min(5, len(lines) // 2))
+                kept_section = "\n".join(lines[:kept_lines_count]) + summary_line
+
+                new_content = system_content[:start_idx] + kept_section + system_content[end_idx:]
+                messages[0]["content"] = new_content
+                return messages
+
+        # If no reductions were made, return the original messages
+        return messages
+
+    def remove_redundant_memories(self, messages, reduction_needed):
+        """Remove redundant memories that convey similar information."""
+        system_content = messages[0]["content"]
+
+        # Look for knowledge section
+        knowledge_marker = "\nKNOWLEDGE:\n"
+        if knowledge_marker in system_content:
+            start_idx = system_content.find(knowledge_marker)
+
+            # Find the end of knowledge section
+            end_markers = ["\nIMPORTANT:", "\nHIERARCHICAL CONTEXT:", "\nWEB SEARCH RESULTS"]
+            end_idx = len(system_content)
+            for marker in end_markers:
+                idx = system_content.find(marker, start_idx)
+                if idx != -1 and idx < end_idx:
+                    end_idx = idx
+
+            # Extract knowledge section
+            knowledge_section = system_content[start_idx:end_idx]
+
+            # Split into items (assuming each item starts with a dash or number)
+            items = re.findall(r'[-•*\d+]\s+([^\n]+)(?:\n|$)', knowledge_section)
+
+            if len(items) > 3:  # Only reduce if we have more than 3 items
+                # Keep first 3 items and add a summary note
+                summary_note = "\n[Knowledge summarized: Additional similar items omitted due to length constraints]"
+                kept_items = items[:3]
+
+                # Rebuild the section with kept items
+                new_section = knowledge_marker
+                for item in kept_items:
+                    new_section += f"- {item}\n"
+                new_section += summary_note
+
+                new_content = system_content[:start_idx] + new_section + system_content[end_idx:]
+                messages[0]["content"] = new_content
+                return messages
+
+        # If no reductions were made, return the original messages
+        return messages
+
+    def compress_conversation_history(self, messages, reduction_needed):
+        """Compress historical conversation as a last resort."""
+        if len(messages) <= 2:  # Only system + current user message
+            return messages
+
+        # Keep system and current user message
+        system_msg = messages[0]
+        user_msg = messages[-1]
+
+        # Compress intermediate history
+        history = messages[1:-1]
+
+        # Strategy 1: Remove oldest messages first
+        if len(history) > 2:
+            # Keep only the 2 most recent exchanges
+            reduced_history = history[-2:]
+
+            # Add a note about reduced history
+            note_msg = {
+                "role": "system",
+                "content": f"[Note: {len(history) - 2} earlier messages omitted due to length constraints]"
+            }
+
+            return [system_msg, note_msg] + reduced_history + [user_msg]
+
+        # Strategy 2: If only 1-2 messages, summarize them
+        combined_content = "\n".join([msg["content"] for msg in history])
+        summary = f"[Previous conversation summary: {combined_content[:100]}...]"
+
+        summary_msg = {
+            "role": "system",
+            "content": summary
+        }
+
+        return [system_msg, summary_msg, user_msg]
+
+    def hard_truncate(self, messages, max_tokens):
+        """Last resort: hard truncate to fit within token limit."""
+        # Keep system and user message
+        system_msg = messages[0]
+        user_msg = messages[-1]
+
+        # Calculate tokens for these essential messages
+        essential_tokens = self._count_tokens_safely(system_msg["content"]) + self._count_tokens_safely(user_msg["content"])
+
+        # If even these exceed the limit, truncate system message
+        if essential_tokens > max_tokens:
+            # Reserve tokens for user message
+            user_tokens = self._count_tokens_safely(user_msg["content"])
+            system_tokens_available = max_tokens - user_tokens - 50  # Reserve some buffer
+
+            if system_tokens_available > 200:  # Minimum useful context
+                # Truncate system message to fit
+                truncated_content = self._truncate_text(system_msg["content"], system_tokens_available)
+                truncated_system = {
+                    "role": "system",
+                    "content": truncated_content + "\n[Content truncated due to length constraints]"
+                }
+                return [truncated_system, user_msg]
+            else:
+                # Extreme case: minimal system prompt + user message
+                minimal_system = {
+                    "role": "system",
+                    "content": "You are a helpful assistant. [Original context omitted due to length constraints]"
+                }
+                return [minimal_system, user_msg]
+
+        # If we have room for history, add most recent messages
+        remaining_tokens = max_tokens - essential_tokens
+        history = []
+
+        for msg in reversed(messages[1:-1]):  # Process history from newest to oldest
+            msg_tokens = self._count_tokens_safely(msg["content"])
+            if msg_tokens < remaining_tokens:
+                history.insert(0, msg)  # Add to front to maintain order
+                remaining_tokens -= msg_tokens
+            else:
+                break
+
+        return [system_msg] + history + [user_msg]
+
+    def reduce_context_when_exceeding_limits(self, messages, max_tokens=2048):
+        """Intelligently reduce context when exceeding token limits."""
+        # Calculate current tokens
+        current_tokens = self.calculate_tokens(messages)
+
+        if current_tokens <= max_tokens:
+            return messages
+
+        # How much we need to reduce
+        reduction_needed = current_tokens - max_tokens + 100  # Add buffer
+
+        self.log(f"Context exceeds token limit ({current_tokens} > {max_tokens}). Applying intelligent reduction.")
+
+        # Apply strategies in order until we're under the limit
+        strategies = [
+            self.reduce_higher_level_fractal_contexts,
+            self.trim_web_search_results,
+            self.remove_redundant_memories,
+            self.compress_conversation_history
+        ]
+
+        reduced_messages = messages
+        for strategy in strategies:
+            before_tokens = self.calculate_tokens(reduced_messages)
+            reduced_messages = strategy(reduced_messages, reduction_needed)
+            after_tokens = self.calculate_tokens(reduced_messages)
+
+            tokens_saved = before_tokens - after_tokens
+            if tokens_saved > 0:
+                self.log(f"Applied {strategy.__name__}: Saved {tokens_saved} tokens")
+
+            # Update reduction needed
+            current_tokens = after_tokens
+            if current_tokens <= max_tokens:
+                self.log(f"Context successfully reduced to {current_tokens} tokens")
+                return reduced_messages
+
+            reduction_needed = current_tokens - max_tokens + 100
+
+        # If all else fails, perform hard truncation
+        self.log(f"Applying hard truncation as last resort")
+        final_messages = self.hard_truncate(reduced_messages, max_tokens)
+        final_tokens = self.calculate_tokens(final_messages)
+        self.log(f"Final context size: {final_tokens} tokens")
+
+        return final_messages
+
+    def optimize_messages_with_extended_context(self, messages, max_new_tokens=128):
+        """
+        Optimize messages to fit in context window with enhanced context handling.
+
+        This improves on the standard optimize_messages by using memory to extend context.
+
+        Args:
+            messages: List of message dictionaries with 'role' and 'content'
+            max_new_tokens: Expected generation length
+
+        Returns:
+            Optimized list of messages
+        """
+        # Calculate the available token budget
+        available_budget = self.max_window_size - max_new_tokens - self.safety_margin
+
+        # Always keep system message and last user message
+        if len(messages) < 2:
+            return messages
+
+        system_message = messages[0] if messages[0]['role'] == 'system' else None
+        user_message = messages[-1] if messages[-1]['role'] == 'user' else None
+
+        # If no system or user message, return as is
+        if not system_message or not user_message:
+            return messages
+
+        # Calculate tokens for essential messages with proper tensor handling
+        system_tokens = self._count_tokens_safely(system_message['content'])
+        user_tokens = self._count_tokens_safely(user_message['content'])
+
+        essential_tokens = system_tokens + user_tokens
+
+        # If essential messages alone exceed budget, truncate the user message
+        if essential_tokens > available_budget:
+            max_user_tokens = available_budget - system_tokens
+            truncated_user_content = self._truncate_text(user_message['content'], max_user_tokens)
+
+            # Return minimal context
+            return [
+                system_message,
+                {"role": "user", "content": truncated_user_content}
+            ]
+
+        # We have room for conversation history - prioritize recent messages
+        history_budget = available_budget - essential_tokens
+        print(f"Available history budget: {history_budget} tokens")
+
+        # First, try to include recent conversation context
+        if len(messages) > 2:
+            # Get history excluding system and last message
+            history = messages[1:-1]
+
+            # Track remaining budget
+            remaining_budget = history_budget
+            optimized_history = []
+
+            # Add most recent messages first until budget is exhausted
+            for msg in reversed(history):
+                msg_tokens = self._count_tokens_safely(msg['content'])
+                if msg_tokens <= remaining_budget:
+                    optimized_history.insert(0, msg)  # Insert at beginning to maintain order
+                    remaining_budget -= msg_tokens
+                else:
+                    # Can't fit this message, but check if we can fit a truncated version
+                    if remaining_budget > 50:  # Only bother if we have reasonable space left
+                        truncated_content = self._truncate_text(msg['content'], remaining_budget)
+                        optimized_history.insert(0, {"role": msg["role"], "content": truncated_content})
+                        remaining_budget = 0
+                    break
+
+            # If we didn't use all the budget, check for relevant memory items
+            if remaining_budget > 100 and hasattr(self, 'memory_manager') and self.memory_manager:
+                # Use memory to fill remaining context
+                memory_results = self.memory_manager.retrieve(
+                    query=user_message['content'],
+                    top_k=3,
+                    min_similarity=0.3,
+                    use_fractal=True
+                )
+
+                if memory_results:
+                    # Create a memory context message
+                    memory_content = "\nRELEVANT MEMORY:\n"
+                    total_memory_tokens = 0
+
+                    for result in memory_results:
+                        item_content = f"- {result['content']}\n"
+                        item_tokens = self._count_tokens_safely(item_content)
+
+                        if total_memory_tokens + item_tokens <= remaining_budget:
+                            memory_content += item_content
+                            total_memory_tokens += item_tokens
+                        else:
+                            break
+
+                    if total_memory_tokens > 0:
+                        optimized_history.insert(0, {
+                            "role": "assistant",
+                            "content": memory_content
+                        })
+
+            # Construct final message list
+            return [system_message] + optimized_history + [user_message]
+
+        # # No history to optimize
+        # return [system_message, user_message]
+
+        optimized_messages = [system_message] + optimized_history + [user_message]
+        final_token_count = self.calculate_tokens(optimized_messages)
+
+        if final_token_count > self.max_window_size:
+            self.log(f"Context still exceeds limits after standard optimization.")
+            # Apply intelligent context reduction
+            optimized_messages = self.reduce_context_when_exceeding_limits(
+                optimized_messages,
+                self.max_window_size
+            )
+
+        return optimized_messages
+
+    def create_memory_summaries(self, memory_items, max_tokens):
+        """Create condensed summaries of memory groups."""
+        if not memory_items:
+            return []
+
+        # Group related memories (simple approach - can be enhanced)
+        memory_groups = {}
+
+        for item in memory_items:
+            # Use a simple grouping heuristic - could be improved with clustering
+            content = item['content']
+            first_sentence = content.split('.')[0] if '.' in content else content
+            words = set(first_sentence.lower().split())
+
+            # Find best group or create new one
+            best_match = None
+            best_score = 0
+
+            for group_id, group in memory_groups.items():
+                group_words = group['keywords']
+                overlap = len(words.intersection(group_words))
+                score = overlap / max(1, len(words.union(group_words)))
+
+                if score > 0.3 and score > best_score:  # Threshold for grouping
+                    best_match = group_id
+                    best_score = score
+
+            if best_match:
+                memory_groups[best_match]['items'].append(item)
+                # Update keywords
+                memory_groups[best_match]['keywords'].update(words)
+            else:
+                # Create new group
+                group_id = f"group_{len(memory_groups)}"
+                memory_groups[group_id] = {
+                    'keywords': words,
+                    'items': [item]
+                }
+
+        # Create summaries for each group
+        summaries = []
+
+        for group_id, group in memory_groups.items():
+            # Extract key points from items
+            key_points = []
+            for item in group['items']:
+                # Simple key point extraction - first sentence of each item
+                content = item['content']
+                first_sentence = content.split('.')[0] if '.' in content else content
+                if first_sentence and len(first_sentence) > 10:
+                    key_points.append(first_sentence)
+
+            # Create summary
+            if key_points:
+                if len(key_points) > 3:
+                    summary = f"MEMORY GROUP: {'; '.join(key_points[:3])}... [{len(key_points)-3} more related points]"
+                else:
+                    summary = f"MEMORY GROUP: {'; '.join(key_points)}"
+
+                summaries.append(summary)
+
+        # Check if we're within token budget
+        while summaries and self._count_tokens_safely('\n'.join(summaries)) > max_tokens:
+            # Remove the longest summary
+            longest_idx = max(range(len(summaries)), key=lambda i: len(summaries[i]))
+            summaries.pop(longest_idx)
+
+        return summaries
+
     def _count_tokens_safely(self, text: str) -> int:
         """
         Count tokens in text with proper error handling to prevent "Already borrowed" errors.
