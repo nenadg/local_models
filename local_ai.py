@@ -221,27 +221,14 @@ class MemoryEnhancedChat:
             print(f"{self.get_time()} Detected embedding dimension: {embedding_dim}")
 
             # Update memory manager's embedding dimension
-            # Update memory manager's embedding dimension
             if hasattr(self.memory_manager, 'embedding_dim'):
                 if self.memory_manager.embedding_dim != embedding_dim:
                     print(f"{self.get_time()} Updating memory manager embedding dimension: "
                           f"{self.memory_manager.embedding_dim} → {embedding_dim}")
 
-                    # Store old dimension for migration
-                    old_dim = self.memory_manager.embedding_dim
+                    # Use the comprehensive update method
+                    self.memory_manager.update_embedding_dimension(embedding_dim)
 
-                    # Update dimension
-                    self.memory_manager.embedding_dim = embedding_dim
-
-                    # Important: Rebuild index with new dimension
-                    if hasattr(self.memory_manager, 'items') and self.memory_manager.items:
-                        print(f"{self.get_time()} Rebuilding memory index for new dimension")
-
-                        # Resize all existing embeddings
-                        self.memory_manager._resize_all_embeddings(old_dim, embedding_dim)
-
-                        # Rebuild the index
-                        self.memory_manager._rebuild_index()
         except Exception as e:
             print(f"{self.get_time()} Error detecting embedding dimension: {e}")
             embedding_dim = 2048  # Fall back to TinyLlama's dimension

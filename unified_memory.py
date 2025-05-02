@@ -641,12 +641,26 @@ class MemoryManager:
         if level == 0:
             return base_embedding
 
-        # Apply the transformation using cached matrices
-        if level in self._rotation_matrices:
-            # Apply the cached rotation
+        # Check if rotation matrices exist with correct dimension
+        if not hasattr(self, '_rotation_matrices') or level not in self._rotation_matrices:
+            # Initialize matrices if needed
+            self._initialize_enhancement_matrices()
+
+            # Check again after initialization
+            if level not in self._rotation_matrices:
+                return None
+
+        # Check dimension match
+        matrix_dim = self._rotation_matrices[level].shape[0]
+        if matrix_dim != len(base_embedding):
+            print(f"{self.get_time()} Dimension mismatch in _generate_level_embedding: {matrix_dim} vs {len(base_embedding)}")
+            return None
+
+        # Apply the transformation
+        try:
             rotated = np.dot(base_embedding, self._rotation_matrices[level])
 
-            # Apply level-specific bias
+            # Apply level-specific bias if available
             if level in self._level_biases:
                 shifted = rotated + self._level_biases[level]
             else:
@@ -670,10 +684,9 @@ class MemoryManager:
             normalized = transformed / norm
 
             return normalized
-        else:
-            # Fallback if matrix isn't available
-            perturbed = base_embedding + (np.random.normal(0, 0.01 * level, base_embedding.shape) * base_embedding)
-            return perturbed / np.linalg.norm(perturbed)
+        except Exception as e:
+            print(f"{self.get_time()} Error in _generate_level_embedding: {e}")
+            return None
 
     def _add_item_to_store(self, item: MemoryItem) -> Optional[str]:
         """
@@ -704,7 +717,7 @@ class MemoryManager:
                 item.embedding = np.pad(item.embedding, (0, self.embedding_dim - len(item.embedding)))
 
             print(f"{self.get_time()} Resized embedding to match index dimension")
-            
+
         # Normalize embedding for cosine similarity
         try:
             embedding_norm = np.linalg.norm(item.embedding)
@@ -979,37 +992,53 @@ class MemoryManager:
         if not self.enable_enhanced_embeddings:
             return
 
-        # Initialize new indices
+        # Reset existing indices
         self.enhanced_indices = {}
 
         # Collect levels from all items
         levels = set()
         for item in self.items:
-            levels.update(item.additional_embeddings.keys())
+            if hasattr(item, 'additional_embeddings'):
+                levels.update(item.additional_embeddings.keys())
+
+        if not levels:
+            return
+
+        print(f"{self.get_time()} Rebuilding enhanced indices for levels: {sorted(levels)}")
 
         # Create index for each level
-        for level in levels:
-            print(f"{self.get_time()} Building index for enhancement level {level}")
-
-            # Create new index
+        for level in sorted(levels):
+            # Create new index with current dimension
             self.enhanced_indices[level] = faiss.IndexFlatIP(self.embedding_dim)
 
             # Collect embeddings for this level
             level_embeddings = []
-            for item in self.items:
-                if level in item.additional_embeddings:
+            valid_indices = []
+
+            for i, item in enumerate(self.items):
+                if hasattr(item, 'additional_embeddings') and level in item.additional_embeddings:
                     embedding = item.additional_embeddings[level]
+
+                    # Ensure correct dimension
+                    if len(embedding) != self.embedding_dim:
+                        print(f"{self.get_time()} Skipping level {level} embedding with wrong dimension")
+                        continue
+
                     # Normalize
                     norm = np.linalg.norm(embedding)
                     if norm > 1e-10:
                         embedding = embedding / norm
+
                     level_embeddings.append(embedding)
+                    valid_indices.append(i)
 
             # Add to index if we have any
             if level_embeddings:
-                self.enhanced_indices[level].add(np.array(level_embeddings, dtype=np.float32))
-
-            print(f"{self.get_time()} Level {level} index created with {self.enhanced_indices[level].ntotal} vectors")
+                try:
+                    self.enhanced_indices[level].add(np.array(level_embeddings, dtype=np.float32))
+                    print(f"{self.get_time()} Level {level} index created with {len(level_embeddings)} vectors")
+                except Exception as e:
+                    print(f"{self.get_time()} Error creating level {level} index: {e}")
 
     def _enhanced_search(self, query_embedding: np.ndarray, top_k: int, min_similarity: float) -> List[Dict[str, Any]]:
         """
@@ -1023,37 +1052,61 @@ class MemoryManager:
         Returns:
             List of matching items with similarity scores
         """
+        # Ensure query has correct dimension
+        if len(query_embedding) != self.embedding_dim:
+            print(f"{self.get_time()} Query dimension mismatch: {len(query_embedding)} vs {self.embedding_dim}")
+            # Resize query embedding
+            if len(query_embedding) > self.embedding_dim:
+                query_embedding = query_embedding[:self.embedding_dim]
+            else:
+                query_embedding = np.pad(query_embedding, (0, self.embedding_dim - len(query_embedding)))
+            # Renormalize
+            norm = np.linalg.norm(query_embedding)
+            if norm > 1e-10:
+                query_embedding = query_embedding / norm
+
         # Search base level
         base_results = self._standard_search(query_embedding, top_k, min_similarity)
 
         # Track all results by item ID
         result_dict = {item["id"]: item for item in base_results}
 
-        # Search all available enhanced levels
-        for level in sorted(self.enhanced_indices.keys()):
-            if self.enhanced_indices[level].ntotal == 0:
-                continue
+        # Check if enhanced indices exist and have correct dimension
+        valid_enhanced_indices = {}
+        for level, index in self.enhanced_indices.items():
+            if index.d == self.embedding_dim:
+                valid_enhanced_indices[level] = index
 
-            # Create level-specific query
-            level_query = self._generate_level_embedding(query_embedding, level)
-            if level_query is None:
-                continue
+        # Skip enhanced search if no valid indices
+        if not valid_enhanced_indices:
+            return list(result_dict.values())
 
-            # Normalize query
-            query_norm = np.linalg.norm(level_query)
-            if query_norm < 1e-10:
-                query_norm = 1e-10
-            normalized_query = level_query / query_norm
+        # Search all valid enhanced levels
+        for level in sorted(valid_enhanced_indices.keys()):
+            try:
+                # Create level-specific query
+                level_query = self._generate_level_embedding(query_embedding, level)
+                if level_query is None or len(level_query) != self.embedding_dim:
+                    continue
 
-            # Search with level-specific query
-            query_array = np.array([normalized_query], dtype=np.float32)
-            search_k = min(top_k * 2, self.enhanced_indices[level].ntotal)
-            similarities, indices = self.enhanced_indices[level].search(query_array, search_k)
+                # Normalize query
+                query_norm = np.linalg.norm(level_query)
+                if query_norm < 1e-10:
+                    continue
+                normalized_query = level_query / query_norm
 
-            # Process level results
-            for i, idx in enumerate(indices[0]):
-                if idx != -1 and similarities[0][i] > min_similarity:
-                    if idx in self.deleted_ids:
+                # Search with level-specific query
+                query_array = np.array([normalized_query], dtype=np.float32)
+                search_k = min(top_k * 2, valid_enhanced_indices[level].ntotal)
+
+                similarities, indices = valid_enhanced_indices[level].search(query_array, search_k)
+
+                # Process level results
+                for i, idx in enumerate(indices[0]):
+                    if idx == -1 or similarities[0][i] <= min_similarity:
+                        continue
+
+                    if idx >= len(self.items) or idx in self.deleted_ids:
                         continue
 
                     item = self.items[idx]
@@ -1070,9 +1123,8 @@ class MemoryManager:
                             "metadata": item.metadata,
                             "level": level
                         }
-
-        # Apply cross-level verification
-        self._apply_cross_level_verification(result_dict)
+            except Exception as e:
+                print(f"{self.get_time()} Error in enhanced search for level {level}: {e}")
 
         # Extract final results
         results = list(result_dict.values())
@@ -1532,6 +1584,36 @@ class MemoryManager:
 
         # Proceed with full load with migration support
         return self._full_load(need_migration=need_migration, old_embedding_dim=old_embedding_dim)
+
+    def update_embedding_dimension(self, new_dim):
+        """
+        Update the embedding dimension and migrate all components.
+
+        Args:
+            new_dim: New embedding dimension
+        """
+        if self.embedding_dim == new_dim:
+            return
+
+        print(f"{self.get_time()} Updating embedding dimension: {self.embedding_dim} → {new_dim}")
+
+        # Store old dimension
+        old_dim = self.embedding_dim
+
+        # Update dimension
+        self.embedding_dim = new_dim
+
+        # Resize embeddings
+        self._resize_all_embeddings(old_dim, new_dim)
+
+        # Reinitialize rotation matrices
+        self._initialize_enhancement_matrices()
+
+        # Rebuild FAISS indices
+        self._rebuild_index()
+        self._rebuild_enhanced_indices()
+
+        print(f"{self.get_time()} Migration to dimension {new_dim} complete")
 
     def _background_full_load(self, cache_timestamp: float):
         """
