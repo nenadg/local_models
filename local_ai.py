@@ -204,6 +204,156 @@ class TinyLlamaChat:
 
         self.system_message = DEFAULT_SYSTEM_MESSAGE
 
+    def test_memory_system(self, test_query=None, verbose=True):
+        """
+        Test the memory system to ensure it's working properly.
+
+        Args:
+            test_query: Optional query to test with, otherwise uses a default
+            verbose: Whether to print detailed diagnostic info
+
+        Returns:
+            Dict with test results and diagnostics
+        """
+        # Start with basic system info
+        diagnostics = {
+            'memory_system': 'initialized',
+            'use_fractal': self.memory_manager.use_fractal,
+            'sharpening_factor': self.memory_manager.sharpening_factor,
+            'embedding_dim': self.memory_manager.embedding_dim,
+            'auto_memorize': self.memory_manager.auto_save,
+            'tests_passed': 0,
+            'tests_failed': 0,
+            'total_tests': 3,  # Basic tests we'll run
+            'issues': []
+        }
+
+        if verbose:
+            print(f"{self.get_time()} Testing memory system...")
+
+        # Test 1: Generate an embedding
+        test_phrase = "This is a test of the memory system's embedding function"
+        try:
+            embedding = self.memory_manager.embedding_function(test_phrase)
+            if embedding is not None and isinstance(embedding, np.ndarray) and embedding.shape[0] == self.memory_manager.embedding_dim:
+                diagnostics['embedding_generation'] = 'passed'
+                diagnostics['tests_passed'] += 1
+                if verbose:
+                    print(f"{self.get_time()} ✓ Embedding generation test passed")
+            else:
+                diagnostics['embedding_generation'] = 'failed'
+                diagnostics['tests_failed'] += 1
+                diagnostics['issues'].append('Embedding function returned invalid result')
+                if verbose:
+                    print(f"{self.get_time()} ✗ Embedding generation test failed")
+        except Exception as e:
+            diagnostics['embedding_generation'] = f'error: {str(e)}'
+            diagnostics['tests_failed'] += 1
+            diagnostics['issues'].append(f'Embedding function error: {str(e)}')
+            if verbose:
+                print(f"{self.get_time()} ✗ Embedding generation test failed with error: {e}")
+
+        # Test 2: Memory addition
+        test_memory = f"Test memory created at {datetime.now().isoformat()}"
+        try:
+            memory_id = self.memory_manager.add(
+                content=test_memory,
+                metadata={'source_hint': 'test', 'test_id': 'memory_diagnostic'},
+                use_fractal=self.memory_manager.use_fractal
+            )
+
+            if memory_id:
+                diagnostics['memory_addition'] = 'passed'
+                diagnostics['memory_id'] = memory_id
+                diagnostics['tests_passed'] += 1
+                if verbose:
+                    print(f"{self.get_time()} ✓ Memory addition test passed")
+            else:
+                diagnostics['memory_addition'] = 'failed'
+                diagnostics['tests_failed'] += 1
+                diagnostics['issues'].append('Memory addition returned no ID')
+                if verbose:
+                    print(f"{self.get_time()} ✗ Memory addition test failed")
+        except Exception as e:
+            diagnostics['memory_addition'] = f'error: {str(e)}'
+            diagnostics['tests_failed'] += 1
+            diagnostics['issues'].append(f'Memory addition error: {str(e)}')
+            if verbose:
+                print(f"{self.get_time()} ✗ Memory addition test failed with error: {e}")
+
+        # Test 3: Memory retrieval
+        if 'memory_id' in diagnostics:
+            try:
+                query = test_query or test_memory
+                retrieved = self.memory_manager.retrieve(query, top_k=5, min_similarity=0.1)
+
+                found_test_memory = False
+                for result in retrieved:
+                    if result.get('id') == diagnostics['memory_id']:
+                        found_test_memory = True
+                        break
+
+                if found_test_memory:
+                    diagnostics['memory_retrieval'] = 'passed'
+                    diagnostics['tests_passed'] += 1
+                    if verbose:
+                        print(f"{self.get_time()} ✓ Memory retrieval test passed")
+                else:
+                    diagnostics['memory_retrieval'] = 'failed - memory not found'
+                    diagnostics['tests_failed'] += 1
+                    diagnostics['issues'].append('Added memory could not be retrieved')
+                    if verbose:
+                        print(f"{self.get_time()} ✗ Memory retrieval test failed - memory not found")
+            except Exception as e:
+                diagnostics['memory_retrieval'] = f'error: {str(e)}'
+                diagnostics['tests_failed'] += 1
+                diagnostics['issues'].append(f'Memory retrieval error: {str(e)}')
+                if verbose:
+                    print(f"{self.get_time()} ✗ Memory retrieval test failed with error: {e}")
+
+        # Optional fractal test
+        if self.memory_manager.use_fractal:
+            diagnostics['total_tests'] += 1
+            try:
+                # Check if memory has fractal embeddings
+                memory_id = diagnostics.get('memory_id')
+                if memory_id:
+                    item_idx = self.memory_manager.id_to_index.get(memory_id)
+                    if item_idx is not None:
+                        item = self.memory_manager.items[item_idx]
+                        if item.fractal_embeddings and len(item.fractal_embeddings) > 0:
+                            diagnostics['fractal_embeddings'] = 'passed'
+                            diagnostics['tests_passed'] += 1
+                            if verbose:
+                                print(f"{self.get_time()} ✓ Fractal embeddings test passed")
+                        else:
+                            diagnostics['fractal_embeddings'] = 'failed - no fractal embeddings found'
+                            diagnostics['tests_failed'] += 1
+                            diagnostics['issues'].append('Fractal embeddings not created for test memory')
+                            if verbose:
+                                print(f"{self.get_time()} ✗ Fractal embeddings test failed - none found")
+            except Exception as e:
+                diagnostics['fractal_embeddings'] = f'error: {str(e)}'
+                diagnostics['tests_failed'] += 1
+                diagnostics['issues'].append(f'Fractal embeddings error: {str(e)}')
+                if verbose:
+                    print(f"{self.get_time()} ✗ Fractal embeddings test failed with error: {e}")
+
+        # Overall status
+        diagnostics['overall_status'] = 'passed' if diagnostics['tests_failed'] == 0 else 'failed'
+
+        if verbose:
+            print(f"{self.get_time()} Memory system test complete: {diagnostics['tests_passed']}/{diagnostics['total_tests']} tests passed")
+
+            if diagnostics['overall_status'] == 'passed':
+                print(f"{self.get_time()} Memory system is functioning correctly ✓")
+            else:
+                print(f"{self.get_time()} Memory system has issues that need attention! ✗")
+                for issue in diagnostics['issues']:
+                    print(f"{self.get_time()} - {issue}")
+
+        return diagnostics
+
     def test_batch_processing(self, operation_type='embedding'):
         """
         Test batch processing performance for different operations.
@@ -291,32 +441,62 @@ class TinyLlamaChat:
     def get_time(self):
         return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
 
+    def set_memory_parameters(self, use_fractal: bool = None, sharpening_factor: float = None):
+        """
+        Set all memory system parameters in one place to ensure consistency.
+        """
+        if use_fractal is not None:
+            self.memory_manager.use_fractal = use_fractal
+            print(f"{self.get_time()} Fractal embeddings {'enabled' if use_fractal else 'disabled'}")
+
+        if sharpening_factor is not None:
+            # Set in both places to ensure consistency
+            self.sharpening_factor = sharpening_factor
+
+            # Update confidence metrics sharpening
+            if hasattr(self.confidence_metrics, 'set_sharpening_factor'):
+                self.confidence_metrics.set_sharpening_factor(sharpening_factor)
+
+            # Update memory manager sharpening
+            if hasattr(self.memory_manager, 'sharpening_factor'):
+                self.memory_manager.sharpening_factor = sharpening_factor
+
+            # Update level-specific factors if available
+            if hasattr(self.memory_manager, 'level_sharpening_factors'):
+                # Base level factor
+                self.memory_manager.level_sharpening_factors[0] = sharpening_factor
+                # Derived factors for other levels
+                for level in range(1, self.memory_manager.max_fractal_levels + 1):
+                    # Increase sharpening with level
+                    self.memory_manager.level_sharpening_factors[level] = min(1.0, sharpening_factor * (1.0 + 0.1 * level))
+
+            print(f"{self.get_time()} Sharpening factor set to {sharpening_factor}")
+
+
     def set_embedding_function(self):
         """
         Set up an optimized embedding function for the memory manager with batching support.
-        This improved version handles caching more efficiently and supports batched operations.
+        This improved version handles caching more efficiently and ensures consistency.
         """
         # Ensure model is in evaluation mode
         if hasattr(self.model, 'eval'):
             self.model.eval()
 
-        # Create a cache for embeddings with better capacity management
-        if not hasattr(self, '_embedding_cache'):
-            self._embedding_cache = {}
-            self._embedding_cache_capacity = 1000  # Maximum cache entries
+        # Create a unified cache for embeddings
+        self._embedding_cache = getattr(self, '_embedding_cache', {})
+        self._embedding_cache_capacity = getattr(self, '_embedding_cache_capacity', 1000)
 
         # Track performance metrics
-        if not hasattr(self, '_embedding_stats'):
-            self._embedding_stats = {
-                'cache_hits': 0,
-                'cache_misses': 0,
-                'batch_calls': 0,
-                'total_embeddings': 0,
-                'batch_sizes': []
-            }
+        self._embedding_stats = getattr(self, '_embedding_stats', {
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'batch_calls': 0,
+            'total_embeddings': 0,
+            'batch_sizes': []
+        })
 
         def generate_embedding(text):
-            """Generate a single embedding with caching and optimization."""
+            """Generate a single embedding with caching and error handling."""
             # Create hash for cache key
             import hashlib
             cache_key = hashlib.md5(text.encode()).hexdigest()
@@ -330,48 +510,54 @@ class TinyLlamaChat:
             self._embedding_stats['cache_misses'] += 1
             self._embedding_stats['total_embeddings'] += 1
 
-            with torch.no_grad():
-                # Tokenize with efficient settings
-                inputs = self.tokenizer(
-                    text,
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=512,
-                    padding=True
-                ).to(self.device)
+            try:
+                with torch.no_grad():
+                    # Tokenize with efficient settings
+                    inputs = self.tokenizer(
+                        text,
+                        return_tensors="pt",
+                        truncation=True,
+                        max_length=512,
+                        padding=True
+                    ).to(self.device)
 
-                # Use more efficient forward pass
-                if hasattr(self.model, 'model'):
-                    outputs = self.model.model(
-                        input_ids=inputs.input_ids,
-                        attention_mask=inputs.attention_mask
-                    )
-                else:
-                    # Fallback for other model types
-                    outputs = self.model(
-                        input_ids=inputs.input_ids,
-                        attention_mask=inputs.attention_mask,
-                        output_hidden_states=True
-                    )
+                    # Use more efficient forward pass
+                    if hasattr(self.model, 'model'):
+                        outputs = self.model.model(
+                            input_ids=inputs.input_ids,
+                            attention_mask=inputs.attention_mask
+                        )
+                    else:
+                        # Fallback for other model types
+                        outputs = self.model(
+                            input_ids=inputs.input_ids,
+                            attention_mask=inputs.attention_mask,
+                            output_hidden_states=True
+                        )
 
-                # Get mean pooled representation
-                embedding = outputs.last_hidden_state.mean(dim=1).cpu().numpy()[0]
+                    # Get mean pooled representation
+                    embedding = outputs.last_hidden_state.mean(dim=1).cpu().numpy()[0]
 
-            # Add to cache (with capacity management)
-            self._embedding_cache[cache_key] = embedding
+                    # Add to cache
+                    self._embedding_cache[cache_key] = embedding
 
-            # If cache is at capacity, remove oldest entries
-            if len(self._embedding_cache) > self._embedding_cache_capacity:
-                # Get oldest 20% of entries to remove
-                remove_count = int(self._embedding_cache_capacity * 0.2)
-                keys_to_remove = list(self._embedding_cache.keys())[:remove_count]
-                for key in keys_to_remove:
-                    del self._embedding_cache[key]
+                    # Manage cache size
+                    if len(self._embedding_cache) > self._embedding_cache_capacity:
+                        # Remove oldest 20% of entries
+                        remove_count = int(self._embedding_cache_capacity * 0.2)
+                        keys_to_remove = list(self._embedding_cache.keys())[:remove_count]
+                        for key in keys_to_remove:
+                            del self._embedding_cache[key]
 
-            return embedding
+                    return embedding
+
+            except Exception as e:
+                print(f"{self.get_time()} Error generating embedding: {e}")
+                # Return a zero vector as fallback
+                return np.zeros(self.memory_manager.embedding_dim)
 
         def generate_embeddings_batch(texts):
-            """Generate embeddings for multiple texts in a batch."""
+            """Generate embeddings for multiple texts in a batch with error handling."""
             # Track batch statistics
             self._embedding_stats['batch_calls'] += 1
             self._embedding_stats['total_embeddings'] += len(texts)
@@ -434,7 +620,9 @@ class TinyLlamaChat:
                         self._embedding_cache[cache_key] = embedding
 
                         # Insert at appropriate position
-                        embeddings.insert(idx, embedding)
+                        while len(embeddings) <= idx:
+                            embeddings.append(None)  # Placeholder
+                        embeddings[idx] = embedding
 
                     # Check cache capacity
                     if len(self._embedding_cache) > self._embedding_cache_capacity:
@@ -442,6 +630,11 @@ class TinyLlamaChat:
                         keys_to_remove = list(self._embedding_cache.keys())[:remove_count]
                         for key in keys_to_remove:
                             del self._embedding_cache[key]
+
+                    # Fill in any gaps with zero vectors (shouldn't happen but just in case)
+                    for i in range(len(embeddings)):
+                        if embeddings[i] is None:
+                            embeddings[i] = np.zeros(self.memory_manager.embedding_dim)
 
                     return embeddings
 
@@ -452,11 +645,20 @@ class TinyLlamaChat:
                 for i, idx in enumerate(indices_to_embed):
                     try:
                         embedding = generate_embedding(texts_to_embed[i])
-                        embeddings.insert(idx, embedding)
+                        while len(embeddings) <= idx:
+                            embeddings.append(None)  # Placeholder
+                        embeddings[idx] = embedding
                     except Exception as inner_e:
                         print(f"{self.get_time()} Error generating individual embedding: {inner_e}")
                         # Use zeros as fallback
-                        embeddings.insert(idx, np.zeros(self.memory_manager.embedding_dim))
+                        while len(embeddings) <= idx:
+                            embeddings.append(None)  # Placeholder
+                        embeddings[idx] = np.zeros(self.memory_manager.embedding_dim)
+
+                # Fill in any gaps with zero vectors
+                for i in range(len(embeddings)):
+                    if embeddings[i] is None:
+                        embeddings[i] = np.zeros(self.memory_manager.embedding_dim)
 
                 return embeddings
 
@@ -465,14 +667,20 @@ class TinyLlamaChat:
             from batch_utils import batch_embedding_processing
 
             def optimized_batch_embedding(texts):
-                """Optimized batch embedding with performance tracking."""
-                # Use batch_utils for processing
-                return batch_embedding_processing(
-                    embedding_function=generate_embedding,
-                    texts=texts,
-                    batch_size=4, # batch_size=None for adaptive
-                    cleanup=True
-                )
+                """Optimized batch embedding with performance tracking and error handling."""
+                try:
+                    # Use batch_utils for processing with adaptive batch sizing
+                    return batch_embedding_processing(
+                        embedding_function=generate_embedding,
+                        texts=texts,
+                        batch_size=None,  # Use adaptive sizing
+                        cleanup=True,
+                        parallel=len(texts) > 8  # Use parallel processing for larger sets
+                    )
+                except Exception as e:
+                    print(f"{self.get_time()} Error in optimized batch embedding: {e}")
+                    # Fall back to direct implementation
+                    return generate_embeddings_batch(texts)
 
             # Set batch function to use optimized version
             self.memory_manager.batch_embedding_function = optimized_batch_embedding
@@ -484,15 +692,14 @@ class TinyLlamaChat:
 
         # Set single embedding function
         self.memory_manager.embedding_function = generate_embedding
-        self.memory_manager._embedding_cache = {}
+
+        # Share the cache with the memory manager to ensure consistency
+        self.memory_manager._embedding_cache = self._embedding_cache
         self.memory_manager._embedding_cache_capacity = self._embedding_cache_capacity
 
         # Add a method to get embedding stats
-        def get_embedding_stats(self):
+        def get_embedding_stats():
             """Get statistics about embedding generation."""
-            if not hasattr(self, '_embedding_stats'):
-                return {}
-
             stats = self._embedding_stats.copy()
 
             # Calculate cache hit ratio
@@ -672,24 +879,64 @@ class TinyLlamaChat:
                 print(f"{self.get_time()} Error ending streamer: {specific_e}")
 
     def generate_with_memory(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None):
-        """Generate a response with memory integration."""
+        """Generate a response with enhanced memory integration."""
         # Get the most recent user query
         user_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
 
+        # Set diagnostic flag for memory debugging
+        append_memory_diagnostic = False  # Set to True during development/debugging
+
         # Retrieve relevant memories
+        memories = []
+        memory_text = ""
         if user_query:
-            memories = self.memory_manager.retrieve(user_query, top_k=5, min_similarity=0.25)
+            try:
+                memories = self.memory_manager.retrieve(user_query, top_k=5, min_similarity=0.25)
 
-            # Format memories for inclusion in the prompt
-            if memories:
-                memory_text = self.memory_manager.format_knowledge_for_prompt(memories, user_query)
+                # Format memories for inclusion in the prompt
+                if memories:
+                    memory_text = self.memory_manager.format_knowledge_for_prompt(memories, user_query)
+            except Exception as e:
+                print(f"{self.get_time()} Error retrieving memories: {e}")
 
-                # Modify the system message to include memories
-                system_with_memory = self.system_message["content"] + "\n\n" + memory_text
-                messages[0]["content"] = system_with_memory
+        # Create a new messages array with memory integrated
+        memory_enhanced_messages = messages.copy()
+
+        # Only modify if we found relevant memories
+        if memory_text:
+            # Create a clearer format for the system message
+            original_system = messages[0]["content"]
+
+            # Check if we need to separate existing system instruction and memory
+            system_with_memory = original_system
+
+            # If we already have memory in the system message, remove it before adding new memory
+            if "MEMORY CONTEXT:" in original_system:
+                # Split and keep only the part before MEMORY CONTEXT
+                system_parts = original_system.split("MEMORY CONTEXT:")
+                system_with_memory = system_parts[0].strip()
+
+            # Now add the new memory text
+            system_with_memory = f"{system_with_memory}\n\n{memory_text}"
+
+            # Replace system message in the copied array
+            memory_enhanced_messages[0]["content"] = system_with_memory
+
+            # For debugging, add diagnostic info
+            if append_memory_diagnostic:
+                memory_diagnostic = "\n\nMemory system found relevant information. Please use it to enhance your response."
+                if len(memory_enhanced_messages) > 1 and memory_enhanced_messages[-1]["role"] == "user":
+                    memory_enhanced_messages[-1]["content"] += memory_diagnostic
 
         # Now generate the response with the enhanced context
-        return self.generate_response(messages, max_new_tokens, temperature, turbo_mode, show_confidence, response_filter)
+        return self.generate_response(
+            memory_enhanced_messages,
+            max_new_tokens,
+            temperature,
+            turbo_mode,
+            show_confidence,
+            response_filter
+        )
 
     def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
@@ -1278,75 +1525,147 @@ class TinyLlamaChat:
             print(f"{self.get_time()} [Sharpening enabled: factor={self.sharpening_factor:.2f}]")
 
     def add_conversation_to_memory(self, query, response):
-        """Add the current exchange to memory if auto-memorize is enabled."""
+        """Add the current exchange to memory with improved context extraction."""
         if not self.auto_memorize:
             return 0
 
-        # Extract key information
-        key_info = self._extract_key_information(query, response)
+        # Extract key information using improved method
+        memories = self._extract_memory_worthy_content(query, response)
 
-        if not key_info:
+        if not memories:
             return 0
 
         # Add each item to memory
         memories_added = 0
 
-        for info in key_info:
+        for memory_text, memory_type in memories:
             # Create metadata
             metadata = {
                 'source_hint': 'conversation',
+                'memory_type': memory_type,
                 'query': query,
                 'timestamp': datetime.now().timestamp(),
-                'retrieval_count': 0
+                'retrieval_count': 0,
+                'context': query  # Store the original query for context
             }
 
             # Add to memory
             item_id = self.memory_manager.add(
-                content=info,
+                content=memory_text,
                 metadata=metadata,
                 use_fractal=self.memory_manager.use_fractal
             )
 
             if item_id:
                 memories_added += 1
-        
+
         if memories_added > 0:
             print(f"{self.get_time()} [Memory] Added {memories_added} new memories")
-            
+
         return memories_added
 
-    def _extract_key_information(self, query, response):
-        # Use a more efficient approach to split sentences
-        sentences = re.split(r'[.!?]', query + " " + response)
+    def _extract_memory_worthy_content(self, query, response):
+        """
+        Extract content worthy of memorization with improved context preservation.
 
-        # Pre-filter to avoid processing many sentences
-        key_info = []
-        seen_simplified = set()  # Track similar sentences
+        Returns:
+            List of (content, memory_type) tuples
+        """
+        memories = []
 
-        for sentence in sentences:
-            # Skip short sentences immediately
-            if len(sentence.strip()) < 10:
-                continue
+        # First, check if we should memorize the entire exchange
+        if len(query) <= 100 and len(response) <= 200:
+            # For short exchanges, memorize the complete Q&A
+            memories.append((f"Q: {query}\nA: {response}", "qa_pair"))
+            return memories
 
-            # Create simplified key to avoid near-duplicates
-            simplified = re.sub(r'[^\w\s]', '', sentence.lower())
-            simplified = ' '.join(simplified.split())
+        # For longer exchanges, extract key information
 
-            # Skip if already seen a similar sentence
-            if simplified in seen_simplified:
-                continue
+        # 1. Try to extract factual statements
+        factual_pattern = r'(?:is|are|was|were|has|have|had|will be)\s+([A-Z][a-z]+\s+(?:is|are|was|were|has|have|had)\s+[^.!?]+[.!?])'
+        matches = re.findall(factual_pattern, response)
+        for match in matches:
+            if len(match) > 10 and len(match) < 200:
+                memories.append((match, "factual"))
 
-            seen_simplified.add(simplified)
+        # 2. Extract definitions
+        definition_pattern = r'([A-Z][a-z]+\s+(?:refers to|is defined as|means|is|are)\s+[^.!?]+[.!?])'
+        matches = re.findall(definition_pattern, response)
+        for match in matches:
+            if len(match) > 10 and len(match) < 200:
+                memories.append((match, "definition"))
 
-            # Apply criteria (only compute once we know this sentence is worth checking)
-            if ("[A-Z][a-z]+" in sentence) or re.search(r'\b\d+\b', sentence) or len(sentence.split()) > 5:
-                key_info.append(sentence.strip())
+        # 3. Extract named entities
+        entity_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,5})\s+(?:is|was|were|are|has|have|had)\s+[^.!?]{10,100}[.!?]'
+        matches = re.findall(entity_pattern, response)
+        for match in matches:
+            if len(match) > 3:  # Reasonable entity name
+                # Find the complete sentence containing this entity
+                sentences = re.split(r'[.!?]', response)
+                for sentence in sentences:
+                    if match in sentence and 10 < len(sentence) < 200:
+                        memories.append((sentence.strip() + ".", "entity"))
+                        break
 
-                # Limit to 10 memories as in the original
-                if len(key_info) >= 10:
-                    break
+        # 4. Extract lists and enumerations
+        lines = response.split('\n')
+        list_items = []
+        in_list = False
+        list_topic = ""
 
-        return key_info
+        for line in lines:
+            # Check for list headers
+            if re.match(r'^[^-*\d]*:$', line) or re.match(r'^[^-*\d]*:$', line.strip()):
+                list_topic = line.strip()
+                in_list = True
+                list_items = []
+            # Check for list items
+            elif in_list and (line.strip().startswith('-') or line.strip().startswith('*') or
+                             re.match(r'^\d+\.', line.strip())):
+                list_items.append(line.strip())
+            # List ended
+            elif in_list and line.strip() and not (line.strip().startswith('-') or
+                                                  line.strip().startswith('*') or
+                                                  re.match(r'^\d+\.', line.strip())):
+                if list_topic and list_items and len(list_items) >= 2:
+                    content = f"{list_topic}\n" + "\n".join(list_items)
+                    if 20 < len(content) < 300:
+                        memories.append((content, "list"))
+                in_list = False
+
+        # 5. If no structured content found, extract key sentences
+        if not memories:
+            sentences = re.split(r'[.!?]', response)
+            key_sentences = []
+
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if len(sentence) < 10:
+                    continue
+
+                # Look for sentences with informational value
+                if (re.search(r'\b(?:key|important|significant|essential|critical)\b', sentence) or
+                    re.search(r'\b(?:always|never|must|should|typically|generally)\b', sentence)):
+                    key_sentences.append(sentence + ".")
+
+            # Take the top 3 most informative sentences
+            for sentence in key_sentences[:3]:
+                if 10 < len(sentence) < 200:
+                    memories.append((sentence, "key_info"))
+
+        # De-duplicate memories
+        unique_memories = []
+        seen_content = set()
+
+        for content, memory_type in memories:
+            # Normalize to avoid near-duplicates
+            normalized = re.sub(r'\s+', ' ', content.lower())
+            if normalized not in seen_content:
+                seen_content.add(normalized)
+                unique_memories.append((content, memory_type))
+
+        # Limit total memories from a single exchange
+        return unique_memories[:10]  # Cap at 10 memories per exchange
 
     def toggle_auto_memorize(self):
         """Toggle automatic memorization on/off"""
@@ -1355,23 +1674,13 @@ class TinyLlamaChat:
 
     def toggle_sharpening(self):
         """Toggle vector space sharpening on/off"""
-        # Flip the current state
-        self.memory_manager.use_fractal = not self.memory_manager.use_fractal
-        return self.memory_manager.use_fractal
+        new_state = not self.memory_manager.use_fractal
+        self.set_memory_parameters(use_fractal=new_state)
+        return new_state
 
     def set_sharpening_factor(self, factor: float) -> None:
-        """Set the sharpening factor for memory retrieval and confidence metrics"""
-        # Update confidence metrics sharpening
-        self.sharpening_factor = factor
-        
-        if hasattr(self.confidence_metrics, 'set_sharpening_factor'):
-            self.confidence_metrics.set_sharpening_factor(factor)
-
-            # Force recalculation with sharpening applied
-            if hasattr(self.confidence_metrics, 'token_probabilities') and self.confidence_metrics.token_probabilities:
-                _ = self.confidence_metrics.get_metrics(apply_sharpening=True)
-
-        print(f"{self.get_time()} Sharpening factor set to {factor}")
+        """Set the sharpening factor"""
+        self.set_memory_parameters(sharpening_factor=factor)
 
     def post_process_response(self, response, query, domain=None):
         """
@@ -1796,6 +2105,8 @@ def main():
 
     # for testing fractal embedding
     #return chat.memory_manager.print_fractal_embedding_diagnostics()
+
+    return chat.test_memory_system()
 
     try:
         if args.test_fractal:

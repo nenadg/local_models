@@ -458,64 +458,58 @@ class UnifiedMemoryManager:
         # Log creation of matrices
         print(f"{self.get_time()} Created {max_potential_levels} fractal rotation matrices of size {embedding_dim}x{embedding_dim}")
 
-    def _add_fractal_embeddings_batch(self, items: List[MemoryItem]):
+    def _add_fractal_embeddings(self, item: MemoryItem):
         """
-        Generate and add fractal embeddings to multiple memory items in batch.
-
-        Args:
-            items: List of memory items to process
+        Generate and add fractal embeddings with better caching behavior.
         """
         # Skip if fractal embeddings are disabled
         if not self.use_fractal:
             return
 
+        # Skip if item already has all needed fractal embeddings
+        if item.fractal_embeddings and len(item.fractal_embeddings) >= self.max_fractal_levels:
+            # Check if all needed levels are present
+            has_all_levels = True
+            for level in range(1, self.max_fractal_levels + 1):
+                if level not in item.fractal_embeddings:
+                    has_all_levels = False
+                    break
+
+            if has_all_levels:
+                return  # Already has all needed embeddings
+
         # Ensure matrices are initialized
         self._initialize_fractal_matrices()
 
-        # Group items by embedding dimension for efficient processing
-        dimension_groups = {}
-        for item in items:
-            if item.embedding is None or len(item.embedding) == 0:
-                print(f"{self.get_time()} Warning: Cannot generate fractal embeddings for item {item.id} - no base embedding")
-                continue
+        # Skip if no base embedding available
+        if item.embedding is None or len(item.embedding) == 0:
+            print(f"{self.get_time()} Warning: Cannot generate fractal embeddings - no base embedding")
+            return
 
-            dim = item.embedding.shape[0]
-            if dim not in dimension_groups:
-                dimension_groups[dim] = []
-            dimension_groups[dim].append(item)
+        base_embedding = item.embedding
 
-        # Process each dimension group
-        for dim, dim_items in dimension_groups.items():
-            print(f"{self.get_time()} Processing fractal embeddings for {len(dim_items)} items with dimension {dim}")
+        # Reset fractal embeddings to ensure clean state
+        item.fractal_embeddings = {}
 
-            # Process each fractal level in batches
-            for level in range(1, self.max_fractal_levels + 1):
-                # Collect all base embeddings for this level
-                base_embeddings = [item.embedding for item in dim_items]
+        # Generate a fractal embedding for each level
+        for level in range(1, self.max_fractal_levels + 1):
+            try:
+                level_embedding = self._generate_level_embedding(base_embedding, level)
 
-                # Stack into a batch tensor for more efficient processing
-                batch_embeddings = np.stack(base_embeddings)
+                if level_embedding is not None and len(level_embedding) > 0:
+                    # Verify the embedding is valid
+                    embedding_norm = np.linalg.norm(level_embedding)
+                    if embedding_norm < 1e-10:
+                        print(f"{self.get_time()} Warning: Generated zero-norm embedding for level {level}")
+                        continue
 
-                try:
-                    # Generate level embeddings for all items at once
-                    level_embeddings = self._generate_level_embeddings_batch(batch_embeddings, level)
+                    # Save the embedding
+                    item.add_fractal_embedding(level, level_embedding)
+                else:
+                    print(f"{self.get_time()} Warning: Failed to generate embedding for level {level}")
+            except Exception as e:
+                print(f"{self.get_time()} Error generating fractal embedding for level {level}: {e}")
 
-                    # Assign back to items
-                    for i, item in enumerate(dim_items):
-                        if level_embeddings[i] is not None:
-                            level_embedding = level_embeddings[i]
-
-                            # Verify the embedding is valid
-                            embedding_norm = np.linalg.norm(level_embedding)
-                            if embedding_norm < 1e-10:
-                                print(f"{self.get_time()} Warning: Generated zero-norm embedding for level {level}")
-                                continue
-
-                            # Save the embedding
-                            item.add_fractal_embedding(level, level_embedding)
-
-                except Exception as e:
-                    print(f"{self.get_time()} Error generating batch fractal embeddings for level {level}: {e}")
 
     def _apply_sharpening(self, similarity: float, sharpening_factor: Optional[float] = None) -> float:
         """
@@ -983,15 +977,7 @@ class UnifiedMemoryManager:
 
     def format_knowledge_for_prompt(self, results: List[Dict[str, Any]], query: str = None) -> str:
         """
-        Format knowledge results for inclusion in the prompt.
-        Unified formatting that relies on content rather than types.
-
-        Args:
-            results: List of knowledge results
-            query: Optional original query for context
-
-        Returns:
-            Formatted string for prompt inclusion
+        Format knowledge results for inclusion in the prompt with clearer structure.
         """
         if not results:
             return ""
@@ -999,8 +985,13 @@ class UnifiedMemoryManager:
         # Sort by similarity (should already be sorted, but just to be safe)
         results.sort(key=lambda x: x.get("similarity", 0), reverse=True)
 
-        # Prepare the formatted output
-        output = "KNOWLEDGE:\n"
+        # Adaptive threshold calculation based on available results
+        similarities = [r.get("similarity", 0) for r in results]
+        max_sim = max(similarities) if similarities else 0
+
+        # Set thresholds adaptively based on max similarity
+        high_threshold = max(0.7, max_sim * 0.9)  # At least 90% of max
+        medium_threshold = max(0.5, max_sim * 0.7)  # At least 70% of max
 
         # Group by confidence/similarity levels
         high_confidence = []
@@ -1009,30 +1000,44 @@ class UnifiedMemoryManager:
 
         for result in results:
             similarity = result.get("similarity", 0)
-            if similarity >= 0.8:
+            if similarity >= high_threshold:
                 high_confidence.append(result)
-            elif similarity >= 0.6:
+            elif similarity >= medium_threshold:
                 medium_confidence.append(result)
             else:
                 low_confidence.append(result)
 
+        # Build formatted output with clear structure
+        output = "MEMORY CONTEXT:\n"
+
         # Add high confidence items first
         if high_confidence:
-            output += "\nHIGH RELEVANCE:\n"
-            for item in high_confidence[:3]:  # Limit to top 3
-                output += f"- {item['content']}\n"
+            output += "\nHIGH RELEVANCE INFORMATION:\n"
+            for i, item in enumerate(high_confidence[:3]):  # Limit to top 3
+                content = item['content'].strip()
+                # Add memory ID and similarity score for diagnostics
+                mem_id = item.get('id', '')[-6:]  # Just the last 6 chars of ID
+                sim = item.get('similarity', 0)
+                output += f"- [{mem_id}] {content}\n"
 
         # Add medium confidence items
         if medium_confidence:
             output += "\nRELEVANT INFORMATION:\n"
-            for item in medium_confidence[:5]:  # Limit to top 5
-                output += f"- {item['content']}\n"
+            for i, item in enumerate(medium_confidence[:4]):  # Limit to top 4
+                content = item['content'].strip()
+                mem_id = item.get('id', '')[-6:]
+                output += f"- [{mem_id}] {content}\n"
 
-        # Add low confidence items if no higher confidence results
-        if low_confidence and not (high_confidence or medium_confidence):
+        # Add low confidence items only if we have very few high/medium
+        if low_confidence and len(high_confidence) + len(medium_confidence) < 3:
             output += "\nPOTENTIALLY RELEVANT:\n"
-            for item in low_confidence[:3]:  # Limit to top 3
-                output += f"- {item['content']}\n"
+            for i, item in enumerate(low_confidence[:2]):  # Limit to top 2
+                content = item['content'].strip()
+                mem_id = item.get('id', '')[-6:]
+                output += f"- [{mem_id}] {content}\n"
+
+        # Add a reminder for the model about using memory
+        output += "\nUse the information above to help answer the query if relevant.\n"
 
         return output
 
@@ -1166,106 +1171,99 @@ class UnifiedMemoryManager:
 
         return final_results
 
-    def retrieve(self, 
-                query: str,
-                top_k: int = 5,
-                min_similarity: float = 0.25,
-                use_fractal: Optional[bool] = None) -> List[Dict[str, Any]]:
+    def retrieve(self, query: str, top_k: int = 5, min_similarity: float = 0.25, use_fractal: Optional[bool] = None) -> List[Dict[str, Any]]:
         """
-        Retrieve relevant knowledge based on query using optimized batch search.
-
-        Args:
-            query: Search query
-            top_k: Maximum number of results to return
-            min_similarity: Minimum similarity threshold
-            use_fractal: Override default fractal setting
-
-        Returns:
-            List of search results with similarity scores
+        Retrieve relevant knowledge with enhanced error handling.
         """
         with self._lock:
-            # If no items or no index, return empty list
-            if not self.items or self.index is None or self.index.ntotal == 0:
-                return []
-
-            # Check query embedding cache first
-            if hasattr(self, '_query_embedding_cache'):
-                query_hash = hashlib.md5(query.encode()).hexdigest()
-                if query_hash in self._query_embedding_cache:
-                    cached_time, cached_embedding = self._query_embedding_cache[query_hash]
-                    # Use cache if recent (within last 5 minutes)
-                    if time.time() - cached_time < 300:
-                        query_embedding = cached_embedding
-                        print(f"{self.get_time()} Using cached query embedding")
-                    else:
-                        # Generate new embedding
-                        query_embedding = self._generate_query_embedding(query)
-                        # Update cache
-                        self._query_embedding_cache[query_hash] = (time.time(), query_embedding)
-                else:
-                    # Generate new embedding
-                    query_embedding = self._generate_query_embedding(query)
-                    # Add to cache
-                    if not hasattr(self, '_query_embedding_cache'):
-                        self._query_embedding_cache = {}
-                    self._query_embedding_cache[query_hash] = (time.time(), query_embedding)
-
-                    # Clean cache if needed
-                    if len(self._query_embedding_cache) > 100:
-                        oldest_keys = sorted(
-                            self._query_embedding_cache.keys(),
-                            key=lambda k: self._query_embedding_cache[k][0]
-                        )[:50]
-                        for key in oldest_keys:
-                            del self._query_embedding_cache[key]
-            else:
-                # Generate embedding directly
-                query_embedding = self._generate_query_embedding(query)
-
-            # Normalize query embedding
             try:
-                query_norm = np.linalg.norm(query_embedding)
-                if query_norm < 1e-10:
-                    query_norm = 1e-10
-                normalized_query = query_embedding / query_norm
-            except Exception as e:
-                print(f"{self.get_time()} Error normalizing query embedding: {e}")
-                return []
+                # Basic validation
+                if not query or not query.strip():
+                    print(f"{self.get_time()} Empty query provided to memory retrieval")
+                    return []
 
-            # Determine whether to use fractal search
-            use_fractal_here = self.use_fractal if use_fractal is None else use_fractal
-            have_fractal_indices = bool(self.fractal_indices) and any(idx.ntotal > 0 for idx in self.fractal_indices.values())
-            can_use_fractal = use_fractal_here and have_fractal_indices
+                # Check if we have any memories to search
+                if not self.items or self.index is None:
+                    print(f"{self.get_time()} Memory system not initialized")
+                    return []
 
-            # Use improved fast similarity search
-            if can_use_fractal:
+                if self.index.ntotal == 0:
+                    print(f"{self.get_time()} No memories stored yet")
+                    return []
+
+                # Generate query embedding with explicit error handling
                 try:
-                    print(f"{self.get_time()} Using enhanced fast similarity search")
-                    found_out = self.fast_similarity_search(
-                        normalized_query,
-                        top_k=top_k,
-                        min_similarity=min_similarity
-                    )
-
-                    print(f"{self.get_time()} Using enhanced fast similarity search found out.")
-                    return found_out
+                    query_embedding = self._generate_query_embedding(query)
+                    if query_embedding is None or len(query_embedding) == 0:
+                        print(f"{self.get_time()} Failed to generate embedding for query")
+                        return []
                 except Exception as e:
-                    print(f"{self.get_time()} Error in fast similarity search: {e}")
+                    print(f"{self.get_time()} Error generating query embedding: {e}")
+                    return []
+
+                # Normalize query embedding
+                try:
+                    query_norm = np.linalg.norm(query_embedding)
+                    if query_norm < 1e-10:
+                        query_norm = 1e-10
+                    normalized_query = query_embedding / query_norm
+                except Exception as e:
+                    print(f"{self.get_time()} Error normalizing query embedding: {e}")
+                    return []
+
+                # Determine search method
+                use_fractal_here = self.use_fractal if use_fractal is None else use_fractal
+                have_fractal_indices = bool(self.fractal_indices) and any(idx.ntotal > 0 for idx in self.fractal_indices.values())
+                can_use_fractal = use_fractal_here and have_fractal_indices
+
+                # Perform search with appropriate method
+                try:
+                    if can_use_fractal:
+                        results = self.fast_similarity_search(
+                            normalized_query,
+                            top_k=top_k,
+                            min_similarity=min_similarity
+                        )
+                    else:
+                        results = self._standard_search(
+                            np.array([normalized_query], dtype=np.float32),
+                            top_k=top_k,
+                            min_similarity=min_similarity
+                        )
+
+                    # Update retrieval metadata
+                    self._update_retrieval_metadata(results)
+
+                    return results
+                except Exception as e:
+                    print(f"{self.get_time()} Error during memory search: {e}")
                     import traceback
                     traceback.print_exc()
-                    # Fall back to standard search
-                    return self._standard_search(
-                        np.array([normalized_query], dtype=np.float32),
-                        top_k=top_k,
-                        min_similarity=min_similarity
-                    )
-            else:
-                # Standard search
-                return self._standard_search(
-                    np.array([normalized_query], dtype=np.float32),
-                    top_k=top_k,
-                    min_similarity=min_similarity
-                )
+                    return []
+
+            except Exception as e:
+                print(f"{self.get_time()} Unexpected error in memory retrieval: {e}")
+                return []
+
+    def _update_retrieval_metadata(self, results):
+        """Update metadata for retrieved items."""
+        for result in results:
+            item_id = result.get('id')
+            if item_id in self.id_to_index:
+                idx = self.id_to_index[item_id]
+                # Skip deleted items
+                if idx in self.deleted_ids:
+                    continue
+
+                item = self.items[idx]
+                # Update retrieval count
+                if "retrieval_count" in item.metadata:
+                    item.metadata["retrieval_count"] += 1
+                else:
+                    item.metadata["retrieval_count"] = 1
+
+                # Update last access time
+                item.metadata["last_access"] = datetime.now().timestamp()
     
     def _standard_search(self, 
                        normalized_query: np.ndarray, 
