@@ -1,3 +1,8 @@
+"""
+TinyLlama Chat with integrated memory, streaming, and MCP support.
+Provides a more coherent integration of memory, confidence, and response generation.
+"""
+
 import torch
 import os
 import json
@@ -5,120 +10,112 @@ import argparse
 import time
 import sys
 import threading
-import math
 import re
 import termios
 import tty
 import signal
 import select
+import hashlib
 
 from typing import List, Dict, Any, Optional, Tuple
-
 from datetime import datetime
 from threading import Thread
-from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer, BitsAndBytesConfig, LogitsProcessor, LogitsProcessorList
+from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
 import numpy as np
-from typing import List, Dict, Tuple, Optional
+
 from history import setup_readline_history
-
 from resource_manager import ResourceManager
-
 from mcp_handler import MCPHandler
 from enhanced_confidence_metrics import EnhancedConfidenceMetrics, TokenProbabilityCaptureProcessor
 from response_filter import ResponseFilter
-from unified_memory import UnifiedMemoryManager
-
-from terminal_heatmap import TerminalHeatmap, EnhancedHeatmap
+from terminal_heatmap import EnhancedHeatmap
 from question_classifier import QuestionClassifier
-
-from batch_utils import tensor_batch_processing
-
-from semantic_reasoning_enhancer import integrate_semantic_reasoning
-
 from speculative_decoder import SpeculativeDecoder, SpeculativeDecodingStats
 
-# Default system message with uncertainty guidelines
-DEFAULT_SYSTEM_MESSAGE = {
-    "role": "system",
-    "content": """You are a helpful and friendly assistant designed to provide accurate information. Follow these guidelines:
+# Import our refactored memory manager
+from unified_memory import MemoryManager
+
+# Default system message template
+DEFAULT_SYSTEM_MESSAGE = """You are a helpful and friendly assistant designed to provide accurate information. Follow these guidelines:
 1. When you don't know something, explicitly say "I don't know about [topic]" or "I'm not familiar with that."
 2. Never make up information. It is better to admit uncertainty than to provide potentially incorrect information.
 3. You may speculate if the user explicitly asks you to "please continue anyway" or "please speculate."
 4. When speculating, clearly indicate your uncertainty with phrases like "I'm not confident, but..."
 5. Be helpful, informative, and conversational in your responses.
 """
-}
 
-class TinyLlamaChat:
+class MemoryEnhancedChat:
+    """
+    Improved chat interface with proper memory integration, streaming, and speculative decoding.
+    """
+
     def __init__(self,
-             model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-             device=None,
-             memory_dir="./memory",
-             output_dir="./output",
-             confidence_threshold=0.7,
-             auto_memorize=True,
-             enable_sharpening=True,
-             sharpening_factor=0.3,
-             fractal_enabled=True,
-             max_fractal_levels=3,
-             do_sample=False,
-             top_p=1, # initial top_p = 1.0
-             top_k=50,   # initial top_k = 50
-             use_draft_model=False
-             ):
+                model_name: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                device: Optional[str] = None,
+                memory_dir: str = "./memory",
+                output_dir: str = "./output",
+                confidence_threshold: float = 0.7,
+                enable_memory: bool = True,
+                similarity_enhancement_factor: float = 0.3,
+                enable_enhanced_embeddings: bool = True,
+                do_sample: bool = True,
+                top_p: float = 1.0,
+                top_k: int = 50,
+                enable_draft_model: bool = False,
+                system_message: Optional[str] = None):
+        """
+        Initialize the chat interface.
+
+        Args:
+            model_name: Name of the model to use
+            device: Device to use (cuda/cpu)
+            memory_dir: Directory for storing memory data
+            output_dir: Directory for output files
+            confidence_threshold: Threshold for confidence filtering
+            enable_memory: Whether to enable memory
+            similarity_enhancement_factor: Factor for enhancing similarity (0.0-1.0)
+            enable_enhanced_embeddings: Whether to use enhanced embeddings
+            do_sample: Whether to use sampling for generation
+            top_p: Top-p sampling parameter
+            top_k: Top-k sampling parameter
+            enable_draft_model: Whether to enable draft model for speculative decoding
+            system_message: Custom system message
+        """
         self.model_name = model_name
         self.memory_dir = memory_dir
+        self.output_dir = output_dir
+        self.confidence_threshold = confidence_threshold
+        self.enable_memory = enable_memory
+        self.similarity_enhancement_factor = similarity_enhancement_factor
+        self.enable_enhanced_embeddings = enable_enhanced_embeddings
         self.do_sample = do_sample
         self.top_p = top_p
         self.top_k = top_k
-        self._query_embedding_cache = {}
+        self.enable_draft_model = enable_draft_model
 
+        # Set system message
+        self.system_message = system_message or DEFAULT_SYSTEM_MESSAGE
 
+        # Set up components
+        self._setup_device(device)
+        self._setup_utility_components()
+        self._setup_model_and_tokenizer()
+        self._setup_memory_system()
+        self._setup_speculative_decoding()
+
+        # Initialize stats and state
+        self.memory_stats = {"items_added": 0, "retrievals": 0}
         self.stop_event = threading.Event()
 
-        self.mcp_handler = MCPHandler(output_dir=output_dir, allow_shell_commands=True)
-        self.confidence_metrics = EnhancedConfidenceMetrics(sharpening_factor=sharpening_factor)
-
-        # Initialize resource manager
-        self.resource_manager = ResourceManager(device=device)
-
-        # Initialize memory manager with UnifiedMemoryManager
-        self.memory_manager = UnifiedMemoryManager(
-            storage_path=memory_dir,
-            embedding_function=None,  # Will set this after model is loaded
-            embedding_dim=384,  # Set this to your model's embedding dimension
-            use_fractal=fractal_enabled,
-            max_fractal_levels=max_fractal_levels,
-            auto_save=True,
-            enable_entity_separation=True
-        )
-
-        self.auto_memorize = auto_memorize
-        self.sharpening_factor = sharpening_factor
-
-        # Initialize the question classifier
-        self.question_classifier = QuestionClassifier()
-
-        # Initialize from semantic reasoning finetune function
-        finetuned_model_path = "./finetuned_tinyllama_reasoning_2"
-
-        if os.path.exists(finetuned_model_path):
-            try:
-                integrate_semantic_reasoning(self, finetuned_model_path)
-            except Exception as e:
-                print(f"{self.get_time()} Finetuned model not loaded: {e}")
-
-        self.current_user_id = "default_user"
-
-        os.makedirs(memory_dir, exist_ok=True)
-
-
-        # Determine the device to use
+    def _setup_device(self, device: Optional[str]):
+        """Set up the device for processing."""
         if device:
             self.device = device
         elif torch.cuda.is_available():
             self.device = "cuda"
             print(f"{self.get_time()} Using GPU for acceleration")
+
+            # Enable optimizations for CUDA
             if hasattr(torch.backends, "cuda"):
                 if hasattr(torch.backends.cuda, "matmul"):
                     torch.backends.cuda.matmul.allow_tf32 = True
@@ -130,388 +127,85 @@ class TinyLlamaChat:
             self.device = "cpu"
             print(f"{self.get_time()} No GPU detected, using CPU (this will be slow)")
 
-        # Setup appropriate torch dtype
-        if self.device == "cpu":
-            self.torch_dtype = torch.float32
-        else:
-            self.torch_dtype = torch.float16
+        # Set appropriate torch dtype
+        self.torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
 
-        # Load model and tokenizer
-        print(f"{self.get_time()} Loading target model: {model_name}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
-        self.tokenizer.model_max_length = 2048 # should be 1024 or lower for performance
+    def _setup_utility_components(self):
+        """Set up utility components for the chat system."""
+        # Resource manager for efficient memory usage
+        self.resource_manager = ResourceManager(device=self.device)
 
-        # AMD only
-        # quantization_config = BitsAndBytesConfig(
-        #     load_in_4bit=True,
-        #     bnb_4bit_compute_dtype=torch.float16,
-        #     bnb_4bit_use_double_quant=True,
-        #     bnb_4bit_quant_type="nf4"
-        # )
+        # Output file handler
+        self.mcp_handler = MCPHandler(output_dir=self.output_dir, allow_shell_commands=True)
 
-        # Main model loading
-        self.loading_options = {
+        # Confidence metrics tracker
+        self.confidence_metrics = EnhancedConfidenceMetrics(
+            sharpening_factor=self.similarity_enhancement_factor
+        )
+
+        # Question classifier for domain-specific handling
+        self.question_classifier = QuestionClassifier()
+
+    def _setup_model_and_tokenizer(self):
+        """Load the model and tokenizer with appropriate settings."""
+        print(f"{self.get_time()} Loading model: {self.model_name}")
+
+        # Load tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=True)
+        self.tokenizer.model_max_length = 2048  # Set appropriate context window
+
+        # Set up model loading options
+        loading_options = {
             "torch_dtype": self.torch_dtype,
             "device_map": "auto" if self.device != "cpu" else None,
             "low_cpu_mem_usage": True,
-            # "quantization_config": quantization_config
-            # "load_in_8bit": True # Nvidia
         }
 
-        # Load model
-        print(f"{self.get_time()} Loading model...")
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, **self.loading_options)
+        # Load main model
+        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **loading_options)
         self.model = self.resource_manager.register_model(self.model)
 
-        if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "enable_flash_sdp"):
-            torch.backends.cuda.enable_flash_sdp = True
-            print(f"{self.get_time()} FlashAttention enabled")
+        # Optimize for inference
+        self.resource_manager.optimize_for_inference()
 
-        self.spec_stats = SpeculativeDecodingStats()
-        self.spec_decoder = SpeculativeDecoder(
-            main_model=self.model,
-            draft_model=None,  # Will be set later
-            tokenizer=self.tokenizer,
-            confidence_metrics=self.confidence_metrics,
-            device=self.device,
-            stats=self.spec_stats,
-            repetition_penalty=1.2,
-            max_draft_tokens=5,
-            batch_processor=None if not hasattr(self, 'resource_manager') else self.resource_manager.batch_process_inference
+    def _setup_memory_system(self):
+        """Set up the memory system with embedding capabilities."""
+        # Initialize memory manager
+        self.memory_manager = MemoryManager(
+            storage_path=self.memory_dir,
+            embedding_dim=384,  # Adjust based on model's hidden size
+            enable_enhanced_embeddings=self.enable_enhanced_embeddings,
+            max_enhancement_levels=3,
+            auto_save=True,
+            similarity_enhancement_factor=self.similarity_enhancement_factor
         )
 
-        # Set embedding function for memory manager
-        self.set_embedding_function()
+        # Create embedding function
+        self._setup_embedding_function()
 
-        # Store the setting
-        self.use_draft_model = use_draft_model
-
-        # Only create draft model if explicitly enabled
-        if self.use_draft_model:
-            print(f"{self.get_time()} Creating draft model for speculative decoding...")
-            self.draft_model = self.spec_decoder.create_draft_model(self.model)
-            if self.draft_model:
-                print(f"{self.get_time()} Successfully created draft model")
-                # Set the draft model in the decoder
-                self.spec_decoder.draft_model = self.draft_model
-            else:
-                print(f"{self.get_time()} Could not create draft model, speculative decoding disabled")
-                self.use_draft_model = False
-        else:
-            print(f"{self.get_time()} Draft model disabled, using standard generation")
-            self.draft_model = None
-
-
-        self.system_message = DEFAULT_SYSTEM_MESSAGE
-
-    def test_memory_system(self, test_query=None, verbose=True):
-        """
-        Test the memory system to ensure it's working properly.
-
-        Args:
-            test_query: Optional query to test with, otherwise uses a default
-            verbose: Whether to print detailed diagnostic info
-
-        Returns:
-            Dict with test results and diagnostics
-        """
-        # Start with basic system info
-        diagnostics = {
-            'memory_system': 'initialized',
-            'use_fractal': self.memory_manager.use_fractal,
-            'sharpening_factor': self.memory_manager.sharpening_factor,
-            'embedding_dim': self.memory_manager.embedding_dim,
-            'auto_memorize': self.memory_manager.auto_save,
-            'tests_passed': 0,
-            'tests_failed': 0,
-            'total_tests': 3,  # Basic tests we'll run
-            'issues': []
-        }
-
-        if verbose:
-            print(f"{self.get_time()} Testing memory system...")
-
-        # Test 1: Generate an embedding
-        test_phrase = "This is a test of the memory system's embedding function"
-        try:
-            embedding = self.memory_manager.embedding_function(test_phrase)
-            if embedding is not None and isinstance(embedding, np.ndarray) and embedding.shape[0] == self.memory_manager.embedding_dim:
-                diagnostics['embedding_generation'] = 'passed'
-                diagnostics['tests_passed'] += 1
-                if verbose:
-                    print(f"{self.get_time()} ✓ Embedding generation test passed")
-            else:
-                diagnostics['embedding_generation'] = 'failed'
-                diagnostics['tests_failed'] += 1
-                diagnostics['issues'].append('Embedding function returned invalid result')
-                if verbose:
-                    print(f"{self.get_time()} ✗ Embedding generation test failed")
-        except Exception as e:
-            diagnostics['embedding_generation'] = f'error: {str(e)}'
-            diagnostics['tests_failed'] += 1
-            diagnostics['issues'].append(f'Embedding function error: {str(e)}')
-            if verbose:
-                print(f"{self.get_time()} ✗ Embedding generation test failed with error: {e}")
-
-        # Test 2: Memory addition
-        test_memory = f"Test memory created at {datetime.now().isoformat()}"
-        try:
-            memory_id = self.memory_manager.add(
-                content=test_memory,
-                metadata={'source_hint': 'test', 'test_id': 'memory_diagnostic'},
-                use_fractal=self.memory_manager.use_fractal
-            )
-
-            if memory_id:
-                diagnostics['memory_addition'] = 'passed'
-                diagnostics['memory_id'] = memory_id
-                diagnostics['tests_passed'] += 1
-                if verbose:
-                    print(f"{self.get_time()} ✓ Memory addition test passed")
-            else:
-                diagnostics['memory_addition'] = 'failed'
-                diagnostics['tests_failed'] += 1
-                diagnostics['issues'].append('Memory addition returned no ID')
-                if verbose:
-                    print(f"{self.get_time()} ✗ Memory addition test failed")
-        except Exception as e:
-            diagnostics['memory_addition'] = f'error: {str(e)}'
-            diagnostics['tests_failed'] += 1
-            diagnostics['issues'].append(f'Memory addition error: {str(e)}')
-            if verbose:
-                print(f"{self.get_time()} ✗ Memory addition test failed with error: {e}")
-
-        # Test 3: Memory retrieval
-        if 'memory_id' in diagnostics:
-            try:
-                query = test_query or test_memory
-                retrieved = self.memory_manager.retrieve(query, top_k=5, min_similarity=0.1)
-
-                found_test_memory = False
-                for result in retrieved:
-                    if result.get('id') == diagnostics['memory_id']:
-                        found_test_memory = True
-                        break
-
-                if found_test_memory:
-                    diagnostics['memory_retrieval'] = 'passed'
-                    diagnostics['tests_passed'] += 1
-                    if verbose:
-                        print(f"{self.get_time()} ✓ Memory retrieval test passed")
-                else:
-                    diagnostics['memory_retrieval'] = 'failed - memory not found'
-                    diagnostics['tests_failed'] += 1
-                    diagnostics['issues'].append('Added memory could not be retrieved')
-                    if verbose:
-                        print(f"{self.get_time()} ✗ Memory retrieval test failed - memory not found")
-            except Exception as e:
-                diagnostics['memory_retrieval'] = f'error: {str(e)}'
-                diagnostics['tests_failed'] += 1
-                diagnostics['issues'].append(f'Memory retrieval error: {str(e)}')
-                if verbose:
-                    print(f"{self.get_time()} ✗ Memory retrieval test failed with error: {e}")
-
-        # Optional fractal test
-        if self.memory_manager.use_fractal:
-            diagnostics['total_tests'] += 1
-            try:
-                # Check if memory has fractal embeddings
-                memory_id = diagnostics.get('memory_id')
-                if memory_id:
-                    item_idx = self.memory_manager.id_to_index.get(memory_id)
-                    if item_idx is not None:
-                        item = self.memory_manager.items[item_idx]
-                        if item.fractal_embeddings and len(item.fractal_embeddings) > 0:
-                            diagnostics['fractal_embeddings'] = 'passed'
-                            diagnostics['tests_passed'] += 1
-                            if verbose:
-                                print(f"{self.get_time()} ✓ Fractal embeddings test passed")
-                        else:
-                            diagnostics['fractal_embeddings'] = 'failed - no fractal embeddings found'
-                            diagnostics['tests_failed'] += 1
-                            diagnostics['issues'].append('Fractal embeddings not created for test memory')
-                            if verbose:
-                                print(f"{self.get_time()} ✗ Fractal embeddings test failed - none found")
-            except Exception as e:
-                diagnostics['fractal_embeddings'] = f'error: {str(e)}'
-                diagnostics['tests_failed'] += 1
-                diagnostics['issues'].append(f'Fractal embeddings error: {str(e)}')
-                if verbose:
-                    print(f"{self.get_time()} ✗ Fractal embeddings test failed with error: {e}")
-
-        # Overall status
-        diagnostics['overall_status'] = 'passed' if diagnostics['tests_failed'] == 0 else 'failed'
-
-        if verbose:
-            print(f"{self.get_time()} Memory system test complete: {diagnostics['tests_passed']}/{diagnostics['total_tests']} tests passed")
-
-            if diagnostics['overall_status'] == 'passed':
-                print(f"{self.get_time()} Memory system is functioning correctly ✓")
-            else:
-                print(f"{self.get_time()} Memory system has issues that need attention! ✗")
-                for issue in diagnostics['issues']:
-                    print(f"{self.get_time()} - {issue}")
-
-        return diagnostics
-
-    def test_batch_processing(self, operation_type='embedding'):
-        """
-        Test batch processing performance for different operations.
-
-        Args:
-            operation_type: Type of operation to test ('embedding' or 'inference')
-        """
-        from batch_utils import validate_batch_processing_performance
-
-        if operation_type == 'embedding':
-            # Generate test data for embeddings
-            test_texts = [
-                "This is a test text for batch processing benchmarking.",
-                "Here's another sample text with different content.",
-                "A third text to include in our test batch.",
-                "Let's add a fourth sample with varying length.",
-                "And a fifth one to round out our test set."
-            ] * 4  # Repeat to get 20 items
-
-            # Define test function
-            def test_func(texts, batch_size):
-                return self.memory_manager.batch_embedding_function(texts[:batch_size])
-
-            # Run benchmark
-            return validate_batch_processing_performance(test_func, test_texts)
-
-        elif operation_type == 'inference':
-            # Generate test input for inference
-            test_prompt = "Write a short poem about batch processing."
-
-            # Tokenize
-            tokens = self.tokenizer(test_prompt, return_tensors="pt").to(self.device)
-
-            # Define test function
-            def test_func(input_ids, batch_size):
-                # Simple forward pass
-                with torch.no_grad():
-                    return self.model(input_ids=input_ids, max_length=batch_size)
-
-            # Run benchmark
-            return validate_batch_processing_performance(test_func, tokens.input_ids)
-
-        else:
-            print(f"{self.get_time()} Unknown operation type: {operation_type}")
-            return None
-
-    def test_embedding_performance(self):
-        """Test embedding performance with minimal overhead"""
-        import time
-
-        # Create some sample text
-        sample_texts = [
-            "This is a sample text for testing embedding performance",
-            "Another sample text with different content",
-            "Third sample with yet more different content",
-            "Fourth sample to test batching performance",
-            "Fifth sample completing our test batch"
-        ]
-
-        print("Testing individual embedding performance...")
-
-        # Test individual embeddings
-        start_time = time.time()
-        individual_embeddings = []
-
-        for text in sample_texts:
-            embedding = self.memory_manager.embedding_function(text)
-            individual_embeddings.append(embedding)
-
-        individual_time = time.time() - start_time
-        print(f"Individual embedding time: {individual_time:.4f}s for {len(sample_texts)} texts")
-        print(f"Average time per text: {individual_time/len(sample_texts):.4f}s")
-
-        # Now test batched operation for raw comparison
-        # (this won't run unless you implement a batch_embedding_function)
-        if hasattr(self.memory_manager, 'batch_embedding_function'):
-            print("Testing batch embedding performance...")
-            start_time = time.time()
-            batch_embeddings = self.memory_manager.batch_embedding_function(sample_texts)
-            batch_time = time.time() - start_time
-            print(f"Batch embedding time: {batch_time:.4f}s for {len(sample_texts)} texts")
-            print(f"Average time per text: {batch_time/len(sample_texts):.4f}s")
-            print(f"Speedup: {individual_time/batch_time:.2f}x")
-
-    def get_time(self):
-        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-
-    def set_memory_parameters(self, use_fractal: bool = None, sharpening_factor: float = None):
-        """
-        Set all memory system parameters in one place to ensure consistency.
-        """
-        if use_fractal is not None:
-            self.memory_manager.use_fractal = use_fractal
-            print(f"{self.get_time()} Fractal embeddings {'enabled' if use_fractal else 'disabled'}")
-
-        if sharpening_factor is not None:
-            # Set in both places to ensure consistency
-            self.sharpening_factor = sharpening_factor
-
-            # Update confidence metrics sharpening
-            if hasattr(self.confidence_metrics, 'set_sharpening_factor'):
-                self.confidence_metrics.set_sharpening_factor(sharpening_factor)
-
-            # Update memory manager sharpening
-            if hasattr(self.memory_manager, 'sharpening_factor'):
-                self.memory_manager.sharpening_factor = sharpening_factor
-
-            # Update level-specific factors if available
-            if hasattr(self.memory_manager, 'level_sharpening_factors'):
-                # Base level factor
-                self.memory_manager.level_sharpening_factors[0] = sharpening_factor
-                # Derived factors for other levels
-                for level in range(1, self.memory_manager.max_fractal_levels + 1):
-                    # Increase sharpening with level
-                    self.memory_manager.level_sharpening_factors[level] = min(1.0, sharpening_factor * (1.0 + 0.1 * level))
-
-            print(f"{self.get_time()} Sharpening factor set to {sharpening_factor}")
-
-    def set_embedding_function(self):
-        """
-        Set up an optimized embedding function for the memory manager with batching support.
-        This improved version handles caching more efficiently and ensures consistency.
-        """
+    def _setup_embedding_function(self):
+        """Set up embedding function for the memory system."""
         # Ensure model is in evaluation mode
-        if hasattr(self.model, 'eval'):
-            self.model.eval()
+        self.model.eval()
 
-        # Create a unified cache for embeddings
-        self._embedding_cache = getattr(self, '_embedding_cache', {})
-        self._embedding_cache_capacity = getattr(self, '_embedding_cache_capacity', 1000)
+        # Create embedding cache
+        self._embedding_cache = {}
+        self._embedding_cache_capacity = 1000
 
-        # Track performance metrics
-        self._embedding_stats = getattr(self, '_embedding_stats', {
-            'cache_hits': 0,
-            'cache_misses': 0,
-            'batch_calls': 0,
-            'total_embeddings': 0,
-            'batch_sizes': []
-        })
-
-        def generate_embedding(text):
-            """Generate a single embedding with caching and error handling."""
+        # Create single embedding function
+        def generate_embedding(text: str) -> np.ndarray:
+            """Generate an embedding vector for a text string."""
             # Create hash for cache key
-            import hashlib
             cache_key = hashlib.md5(text.encode()).hexdigest()
 
-            # Check cache first
+            # Check cache
             if cache_key in self._embedding_cache:
-                self._embedding_stats['cache_hits'] += 1
                 return self._embedding_cache[cache_key]
 
-            # Cache miss - generate embedding
-            self._embedding_stats['cache_misses'] += 1
-            self._embedding_stats['total_embeddings'] += 1
-
+            # Generate embedding
             try:
                 with torch.no_grad():
-                    # Tokenize with efficient settings
+                    # Tokenize
                     inputs = self.tokenizer(
                         text,
                         return_tensors="pt",
@@ -520,14 +214,13 @@ class TinyLlamaChat:
                         padding=True
                     ).to(self.device)
 
-                    # Use more efficient forward pass
+                    # Get model outputs
                     if hasattr(self.model, 'model'):
                         outputs = self.model.model(
                             input_ids=inputs.input_ids,
                             attention_mask=inputs.attention_mask
                         )
                     else:
-                        # Fallback for other model types
                         outputs = self.model(
                             input_ids=inputs.input_ids,
                             attention_mask=inputs.attention_mask,
@@ -549,462 +242,167 @@ class TinyLlamaChat:
                             del self._embedding_cache[key]
 
                     return embedding
-
             except Exception as e:
                 print(f"{self.get_time()} Error generating embedding: {e}")
                 # Return a zero vector as fallback
                 return np.zeros(self.memory_manager.embedding_dim)
 
-        def generate_embeddings_batch(texts):
-            """Generate embeddings for multiple texts in a batch with error handling."""
-            # Track batch statistics
-            self._embedding_stats['batch_calls'] += 1
-            self._embedding_stats['total_embeddings'] += len(texts)
-            self._embedding_stats['batch_sizes'].append(len(texts))
-
-            # Check cache for each text first
+        # Create batch embedding function
+        def generate_embeddings_batch(texts: List[str]) -> List[np.ndarray]:
+            """Generate embeddings for multiple texts in batch."""
             embeddings = []
-            texts_to_embed = []
-            indices_to_embed = []
+            for text in texts:
+                embeddings.append(generate_embedding(text))
+            return embeddings
 
-            for i, text in enumerate(texts):
-                cache_key = hashlib.md5(text.encode()).hexdigest()
-                if cache_key in self._embedding_cache:
-                    embeddings.append(self._embedding_cache[cache_key])
-                    self._embedding_stats['cache_hits'] += 1
-                else:
-                    texts_to_embed.append(text)
-                    indices_to_embed.append(i)
-                    self._embedding_stats['cache_misses'] += 1
+        # Set embedding functions
+        self.memory_manager.set_embedding_function(
+            function=generate_embedding,
+            batch_function=generate_embeddings_batch
+        )
 
-            # If all texts were cached, return immediately
-            if not texts_to_embed:
-                return embeddings
+    def _setup_speculative_decoding(self):
+        """Set up speculative decoding with draft model if enabled."""
+        # Initialize stats tracker
+        self.spec_stats = SpeculativeDecodingStats()
 
-            # Process uncached texts in batches
-            try:
-                with torch.no_grad():
-                    # Tokenize all texts at once
-                    inputs = self.tokenizer(
-                        texts_to_embed,
-                        return_tensors="pt",
-                        truncation=True,
-                        max_length=512,
-                        padding=True
-                    ).to(self.device)
+        # Initialize speculative decoder
+        self.spec_decoder = SpeculativeDecoder(
+            main_model=self.model,
+            draft_model=None,  # Will be set later if enabled
+            tokenizer=self.tokenizer,
+            confidence_metrics=self.confidence_metrics,
+            device=self.device,
+            stats=self.spec_stats,
+            repetition_penalty=1.2,
+            max_draft_tokens=5,
+            batch_processor=None
+        )
 
-                    # Get model outputs
-                    if hasattr(self.model, 'model'):
-                        outputs = self.model.model(
-                            input_ids=inputs.input_ids,
-                            attention_mask=inputs.attention_mask
-                        )
-                    else:
-                        outputs = self.model(
-                            input_ids=inputs.input_ids,
-                            attention_mask=inputs.attention_mask,
-                            output_hidden_states=True
-                        )
+        # Create draft model if enabled
+        if self.enable_draft_model:
+            print(f"{self.get_time()} Creating draft model for speculative decoding...")
+            self.draft_model = self.spec_decoder.create_draft_model(self.model)
 
-                    # Get mean pooled representations
-                    batch_embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
-
-                    # Add to cache and results
-                    for i, idx in enumerate(indices_to_embed):
-                        # Create embedding
-                        embedding = batch_embeddings[i]
-
-                        # Add to cache
-                        cache_key = hashlib.md5(texts_to_embed[i].encode()).hexdigest()
-                        self._embedding_cache[cache_key] = embedding
-
-                        # Insert at appropriate position
-                        while len(embeddings) <= idx:
-                            embeddings.append(None)  # Placeholder
-                        embeddings[idx] = embedding
-
-                    # Check cache capacity
-                    if len(self._embedding_cache) > self._embedding_cache_capacity:
-                        remove_count = int(self._embedding_cache_capacity * 0.2)
-                        keys_to_remove = list(self._embedding_cache.keys())[:remove_count]
-                        for key in keys_to_remove:
-                            del self._embedding_cache[key]
-
-                    # Fill in any gaps with zero vectors (shouldn't happen but just in case)
-                    for i in range(len(embeddings)):
-                        if embeddings[i] is None:
-                            embeddings[i] = np.zeros(self.memory_manager.embedding_dim)
-
-                    return embeddings
-
-            except Exception as e:
-                print(f"{self.get_time()} Error in batch embedding: {e}")
-
-                # Fall back to individual processing
-                for i, idx in enumerate(indices_to_embed):
-                    try:
-                        embedding = generate_embedding(texts_to_embed[i])
-                        while len(embeddings) <= idx:
-                            embeddings.append(None)  # Placeholder
-                        embeddings[idx] = embedding
-                    except Exception as inner_e:
-                        print(f"{self.get_time()} Error generating individual embedding: {inner_e}")
-                        # Use zeros as fallback
-                        while len(embeddings) <= idx:
-                            embeddings.append(None)  # Placeholder
-                        embeddings[idx] = np.zeros(self.memory_manager.embedding_dim)
-
-                # Fill in any gaps with zero vectors
-                for i in range(len(embeddings)):
-                    if embeddings[i] is None:
-                        embeddings[i] = np.zeros(self.memory_manager.embedding_dim)
-
-                return embeddings
-
-        # Use the improved batch_embedding_function if batch_utils is available
-        try:
-            from batch_utils import batch_embedding_processing
-
-            def optimized_batch_embedding(texts):
-                """Optimized batch embedding with performance tracking and error handling."""
-                try:
-                    # Use batch_utils for processing with adaptive batch sizing
-                    return batch_embedding_processing(
-                        embedding_function=generate_embedding,
-                        texts=texts,
-                        batch_size=None,  # Use adaptive sizing
-                        cleanup=True,
-                        parallel=len(texts) > 8  # Use parallel processing for larger sets
-                    )
-                except Exception as e:
-                    print(f"{self.get_time()} Error in optimized batch embedding: {e}")
-                    # Fall back to direct implementation
-                    return generate_embeddings_batch(texts)
-
-            # Set batch function to use optimized version
-            self.memory_manager.batch_embedding_function = optimized_batch_embedding
-            print(f"{self.get_time()} Using optimized batch embedding function")
-        except ImportError:
-            # Fall back to direct implementation
-            self.memory_manager.batch_embedding_function = generate_embeddings_batch
-            print(f"{self.get_time()} Using default batch embedding function")
-
-        # Set single embedding function
-        self.memory_manager.embedding_function = generate_embedding
-
-        # Share the cache with the memory manager to ensure consistency
-        self.memory_manager._embedding_cache = self._embedding_cache
-        self.memory_manager._embedding_cache_capacity = self._embedding_cache_capacity
-
-        # Add a method to get embedding stats
-        def get_embedding_stats():
-            """Get statistics about embedding generation."""
-            stats = self._embedding_stats.copy()
-
-            # Calculate cache hit ratio
-            total_requests = stats['cache_hits'] + stats['cache_misses']
-            if total_requests > 0:
-                stats['cache_hit_ratio'] = stats['cache_hits'] / total_requests
+            if self.draft_model:
+                print(f"{self.get_time()} Successfully created draft model")
+                self.spec_decoder.draft_model = self.draft_model
             else:
-                stats['cache_hit_ratio'] = 0
+                print(f"{self.get_time()} Could not create draft model, speculative decoding disabled")
+                self.enable_draft_model = False
+        else:
+            self.draft_model = None
 
-            # Calculate average batch size
-            if stats['batch_calls'] > 0:
-                stats['avg_batch_size'] = sum(stats['batch_sizes']) / stats['batch_calls']
-            else:
-                stats['avg_batch_size'] = 0
+    def get_time(self) -> str:
+        """Get formatted timestamp for logging."""
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
 
-            return stats
+    def toggle_memory(self) -> bool:
+        """Toggle memory system on/off."""
+        self.enable_memory = not self.enable_memory
+        return self.enable_memory
 
-        # Attach stats method
-        self.get_embedding_stats = get_embedding_stats
-
-    def toggle_draft_model(self):
+    def toggle_draft_model(self) -> bool:
         """Toggle draft model on/off for speculative decoding."""
-        if self.use_draft_model and self.draft_model is not None:
+        if self.enable_draft_model and self.draft_model is not None:
             # Disable draft model
-            self.use_draft_model = False
+            self.enable_draft_model = False
             print(f"{self.get_time()} Draft model disabled")
             return False
-        elif not self.use_draft_model and self.draft_model is None:
+        elif not self.enable_draft_model and self.draft_model is None:
             # Try to create draft model
             print(f"{self.get_time()} Creating draft model...")
             self.draft_model = self.spec_decoder.create_draft_model(self.model)
+
             if self.draft_model:
-                self.use_draft_model = True
+                self.enable_draft_model = True
                 self.spec_decoder.draft_model = self.draft_model
                 print(f"{self.get_time()} Draft model enabled")
                 return True
             else:
                 print(f"{self.get_time()} Failed to create draft model")
                 return False
-        elif not self.use_draft_model and self.draft_model is not None:
+        elif not self.enable_draft_model and self.draft_model is not None:
             # Re-enable existing draft model
-            self.use_draft_model = True
+            self.enable_draft_model = True
             self.spec_decoder.draft_model = self.draft_model
             print(f"{self.get_time()} Draft model re-enabled")
             return True
         else:
-            # Shouldn't happen, but just in case
-            print(f"{self.get_time()} Draft model status unchanged")
-            return self.use_draft_model
+            # No change needed
+            return True
 
-    def toggle_auto_memorize(self):
-        """Toggle automatic memorization on/off"""
-        self.auto_memorize = not self.auto_memorize
-        return self.auto_memorize
+    def set_similarity_enhancement(self, factor: float) -> None:
+        """Set the similarity enhancement factor for memory and confidence."""
+        # Validate range
+        factor = max(0.0, min(1.0, factor))
 
-    def toggle_sharpening(self):
-        """Toggle vector space sharpening on/off"""
-        new_state = not self.memory_manager.use_fractal
-        self.set_memory_parameters(use_fractal=new_state)
-        return new_state
+        # Update settings
+        self.similarity_enhancement_factor = factor
 
-    def set_sharpening_factor(self, factor: float) -> None:
-        """Set the sharpening factor"""
-        self.set_memory_parameters(sharpening_factor=factor)
+        # Update confidence metrics
+        if hasattr(self.confidence_metrics, 'set_sharpening_factor'):
+            self.confidence_metrics.set_sharpening_factor(factor)
 
-    def get_domain_specific_generation_config(self, query, base_config):
+        # Update memory manager
+        self.memory_manager.similarity_enhancement_factor = factor
+
+        print(f"{self.get_time()} Similarity enhancement factor set to {factor}")
+
+    def chat(self,
+            messages: List[Dict[str, str]],
+            max_new_tokens: int = 128,
+            temperature: float = 0.7,
+            enable_memory: Optional[bool] = None,
+            show_confidence: bool = False,
+            response_filter: Optional[ResponseFilter] = None) -> str:
         """
-        Get domain-specific generation configuration.
+        Generate a response with memory integration and streaming.
 
         Args:
-            query: The user query
-            base_config: The base generation configuration
+            messages: List of conversation messages
+            max_new_tokens: Maximum tokens to generate
+            temperature: Temperature for sampling
+            enable_memory: Override default memory setting
+            show_confidence: Whether to show confidence heatmap
+            response_filter: Optional response filter
 
         Returns:
-            Modified configuration dictionary
+            Generated response
         """
-        # Get domain settings from the classifier
-        settings = self.question_classifier.get_domain_settings(query)
-        domain = settings['domain']
+        # Reset for new generation
+        self.stop_event.clear()
+        self.confidence_metrics.reset()
 
-        # Create a copy of the base configuration
-        config = base_config.copy()
-
-        # Apply domain-specific adjustments
-        if domain == 'arithmetic':
-            # More deterministic for math
-            config['temperature'] = min(config.get('temperature', 0.7), 0.3)
-            config['top_p'] = 0.85 # use only if use_sample=False
-
-        elif domain == 'translation':
-            # More deterministic for translations too
-            config['temperature'] = min(config.get('temperature', 0.7), 0.4)
-            config['top_p'] = 0.9 # use only if use_sample=False
-
-        elif domain == 'factual':
-            # Slightly more deterministic for facts
-            config['temperature'] = min(config.get('temperature', 0.7), 0.5)
-
-        elif domain == 'conceptual' or domain == 'procedural':
-            # More creative for concepts and procedures
-            config['temperature'] = max(config.get('temperature', 0.7), 0.6)
-
-        return config
-
-    def reset_speculative_stats(self):
-        """Reset the speculative decoding statistics."""
-        if hasattr(self, 'spec_decoder') and self.spec_decoder:
-            self.spec_decoder.reset_stats()
-
-    # Function for speculative decoding with streaming
-    def generate_speculative(self, input_ids, streamer, max_new_tokens, generation_config, turbo_mode):
-        """Enhanced implementation of speculative decoding using the SpeculativeDecoder class"""
-        try:
-            # First, ensure the confidence metrics is set in the speculative decoder
-            if hasattr(self, 'confidence_metrics') and self.spec_decoder:
-                self.spec_decoder.confidence_metrics = self.confidence_metrics
-
-            # Use standard generation if:
-            # 1. Turbo mode is disabled, OR
-            # 2. Draft model is disabled, OR
-            # 3. Draft model doesn't exist
-            if not turbo_mode or not self.use_draft_model or self.draft_model is None:
-                # Use standard streaming mode with TokenProbabilityCaptureProcessor
-                streaming_config = {k: v for k, v in generation_config.items()
-                                   if k not in ['max_new_tokens', 'output_scores', 'return_dict_in_generate']}
-
-                # Add TokenProbabilityCaptureProcessor if not already added
-                if self.confidence_metrics:
-                    from transformers import LogitsProcessorList
-                    from enhanced_confidence_metrics import TokenProbabilityCaptureProcessor
-
-                    # Create processor for capturing token probabilities
-                    metrics_processor = TokenProbabilityCaptureProcessor(self.confidence_metrics)
-
-                    if 'logits_processor' in streaming_config:
-                        if isinstance(streaming_config['logits_processor'], list):
-                            streaming_config['logits_processor'].append(metrics_processor)
-                        else:
-                            # If it's already a LogitsProcessorList, we need to add to it
-                            existing_processors = streaming_config['logits_processor']
-                            streaming_config['logits_processor'] = LogitsProcessorList([*existing_processors, metrics_processor])
-                    else:
-                        # No existing processors, create a new list
-                        streaming_config['logits_processor'] = LogitsProcessorList([metrics_processor])
-
-                self.model.generate(
-                    input_ids=input_ids,
-                    attention_mask=torch.ones_like(input_ids),
-                    streamer=streamer,
-                    max_new_tokens=max_new_tokens,
-                    **streaming_config
-                )
-                return
-
-            # Use the speculative decoder for generation (only if we get here with draft model enabled)
-            self.spec_decoder.generate_with_speculative_decoding(
-                input_ids=input_ids,
-                streamer=streamer,
-                max_new_tokens=max_new_tokens,
-                generation_config=generation_config,
-                stop_event=self.stop_event
-            )
-
-            # Ensure confidence metrics were set
-            if self.confidence_metrics and not self.confidence_metrics.token_probabilities:
-                response_length = max_new_tokens  # Estimate response length
-                # Create dummy metrics
-                for i in range(min(10, response_length)):
-                    dummy_logits = torch.zeros(self.tokenizer.vocab_size, device=self.device)
-                    # Vary confidence values for more realistic metrics
-                    confidence_val = 5.0 + (i % 3)
-                    token_id = i % 100
-                    dummy_logits[token_id] = confidence_val
-                    # Add some secondary values
-                    for j in range(3):
-                        dummy_logits[(token_id + j + 1) % 100] = confidence_val * 0.3
-                    self.confidence_metrics.add_token_score(dummy_logits, token_id)
-
-            # Print stats summary if enabled
-            if hasattr(self.spec_decoder, 'get_stats_summary'):
-                stats = self.spec_decoder.get_stats_summary()
-                print(f"\n{self.get_time()} Speculative decoding: {stats['tokens_from_draft']} tokens from draft "
-                      f"({stats['draft_token_acceptance_rate']} acceptance, {stats['estimated_time_saved']} time saved)")
-
-        except Exception as e:
-            print(f"{self.get_time()} Error in generation thread: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            try:
-                streamer.end()
-            except Exception as specific_e:
-                print(f"{self.get_time()} Error ending streamer: {specific_e}")
-
-    def generate_with_memory(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None):
-        """Generate a response with enhanced memory integration."""
         # Get the most recent user query
         user_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
 
-        # Set diagnostic flag for memory debugging
-        append_memory_diagnostic = False  # Set to True during development/debugging
-
-        # Retrieve relevant memories
-        memories = []
-        memory_text = ""
+        # Process MCP commands in user query if present
         if user_query:
-            try:
-                memories = self.memory_manager.retrieve(user_query, top_k=5, min_similarity=0.25)
+            cleaned_input, user_commands = self.mcp_handler.extract_mcp_from_user_input(user_query)
 
-                # Format memories for inclusion in the prompt
-                if memories:
-                    memory_text = self.memory_manager.format_knowledge_for_prompt(memories, user_query)
-            except Exception as e:
-                print(f"{self.get_time()} Error retrieving memories: {e}")
+            # Replace the original user input with cleaned version
+            if user_query != cleaned_input:
+                messages[-1]["content"] = cleaned_input
 
-        # Create a new messages array with memory integrated
-        memory_enhanced_messages = messages.copy()
+            # Handle command-only inputs
+            if cleaned_input == "_COMMAND_ONLY_":
+                return "Command processed."
 
-        # Only modify if we found relevant memories
-        if memory_text:
-            # Create a clearer format for the system message
-            original_system = messages[0]["content"]
+        # Create memory-enhanced messages if memory is enabled
+        memory_enabled = self.enable_memory if enable_memory is None else enable_memory
+        if memory_enabled and user_query:
+            messages = self._integrate_memory(messages, user_query)
 
-            # Check if we need to separate existing system instruction and memory
-            system_with_memory = original_system
-
-            # If we already have memory in the system message, remove it before adding new memory
-            if "MEMORY CONTEXT:" in original_system:
-                # Split and keep only the part before MEMORY CONTEXT
-                system_parts = original_system.split("MEMORY CONTEXT:")
-                system_with_memory = system_parts[0].strip()
-
-            # Now add the new memory text
-            system_with_memory = f"{system_with_memory}\n\n{memory_text}"
-
-            # Replace system message in the copied array
-            memory_enhanced_messages[0]["content"] = system_with_memory
-
-            # For debugging, add diagnostic info
-            if append_memory_diagnostic:
-                memory_diagnostic = "\n\nMemory system found relevant information. Please use it to enhance your response."
-                if len(memory_enhanced_messages) > 1 and memory_enhanced_messages[-1]["role"] == "user":
-                    memory_enhanced_messages[-1]["content"] += memory_diagnostic
-
-        # Now generate the response with the enhanced context
-        return self.generate_response(
-            memory_enhanced_messages,
-            max_new_tokens,
-            temperature,
-            turbo_mode,
-            show_confidence,
-            response_filter
-        )
-
-    def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None):
-        """Generate a response with ultra-fast speculative decoding (streaming only)"""
-        # We only support streaming now, simplifies the code
-
-        fallback_message_streamed = False
+        # Setup streaming
         fd = sys.stdin.fileno()
-        self.old_settings = termios.tcgetattr(fd)
-        ## not needed - tty.setraw(fd)
-        tty.setcbreak(fd)
-
+        old_settings = termios.tcgetattr(fd)
         try:
-            # heatmap = TerminalHeatmap(self.tokenizer, use_background=False)
+            tty.setcbreak(fd)
+
+            # Initialize streaming components
             heatmap = EnhancedHeatmap(self.tokenizer, use_background=False, window_size=3)
-            token_confidences = []  # To store confidence scores for each token
-
-            # Reset confidence metrics
-            self.confidence_metrics.reset()
-
-            if messages and messages[-1]["role"] == "user":
-                user_input = messages[-1]["content"]
-                cleaned_input, user_commands = self.mcp_handler.extract_mcp_from_user_input(user_input)
-
-                # Extract target length and set it in window manager
-                user_query = messages[-1]["content"]
-
-                if cleaned_input == "_COMMAND_ONLY_":
-                    # This was just a shell command, don't generate a response
-                    return ""
-
-                # Replace the original user input with cleaned version
-                if user_input != cleaned_input:
-                    messages[-1]["content"] = cleaned_input
-
-                # Process any immediate user commands
-                if user_commands:
-                    # Process any shell command outputs and add to memory
-                    for cmd, details in user_commands.items():
-                        if details.get("action") == "shell_command":
-                            # Add the command output to memory
-                            self.add_command_to_memory(
-                                command=cmd,
-                                output=details.get("output", ""),
-                                error=details.get("error", ""),
-                                output_file=details.get("output_file")
-                            )
-
-                    # Process file save commands
-                    file_commands = {file: cmd for file, cmd in user_commands.items()
-                                    if cmd.get("action") == "save_response"}
-                    successful = [file for file, status in file_commands.items()]
-                    if successful:
-                        files_info = ", ".join(successful)
-                        print(f"{self.get_time()} [User content saved to: {files_info}]")
+            token_confidences = []
 
             # Apply chat template
             prompt = self.tokenizer.apply_chat_template(
@@ -1013,772 +411,330 @@ class TinyLlamaChat:
                 add_generation_prompt=True
             )
 
+            # Tokenize prompt
             try:
-                with torch.no_grad():
-                    # Use the safe tokenization function instead
-                    tokenized = self.safe_tokenize(
-                        prompt,
-                        return_tensors="pt",
-                        truncation=True,
-                        padding=True
-                    )
-                    # Access the input_ids from the dictionary
-                    input_ids = tokenized['input_ids'].to(self.device)
+                tokenized = self._safe_tokenize(
+                    prompt,
+                    return_tensors="pt",
+                    truncation=True,
+                    padding=True
+                )
+                input_ids = tokenized['input_ids'].to(self.device)
             except Exception as e:
                 print(f"{self.get_time()} Error encoding prompt: {e}")
-                import traceback
-                traceback.print_exc()
-                return "Error preparing response. Please try again with a simpler query."
+                return "Error preparing response."
 
-
-            # Configure streamer
+            # Set up streamer
             streamer = TextIteratorStreamer(
                 self.tokenizer,
                 skip_prompt=True,
                 skip_special_tokens=True,
-                stride=16  # Reasonable stride for batching
+                stride=16
             )
 
-            # Generation configuration
-            generation_config = {
-                "max_new_tokens": max_new_tokens,
-                #"do_sample": temperature >= 0.1, # use only if do_sample=false
-                # "temperature": temperature if temperature > 0.1 else 1.0,
-                #"top_k":  50,
-                #"top_p": 0.95, # use only if do_sample=False
-                "repetition_penalty": 1.0,
-                "num_beams": 1,
-                "pad_token_id": self.tokenizer.eos_token_id,
-                "eos_token_id": self.tokenizer.eos_token_id,
-                "use_cache": True
-            }
+            # Get domain-specific generation config
+            generation_config = self._get_domain_config(
+                user_query,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature
+            )
 
-            if messages and messages[-1]["role"] == "user":
-                user_query = messages[-1]["content"]
-                generation_config = self.get_domain_specific_generation_config(user_query, generation_config)
-
-            if (self.do_sample):
-                generation_config['do_sample'] = True
-                generation_config['top_k'] = self.top_k
-                generation_config['top_p'] = self.top_p
-                generation_config['temperature'] = temperature if temperature > 0.1 else 1.0
-            else:
-                generation_config['do_sample'] = False
-                # Remove sampling parameters when not using sampling
-                for param in ['temperature', 'top_k', 'top_p']:
-                    if param in generation_config:
-                        del generation_config[param]
-
-            # Start generation in background
-            thread = Thread(target=self.generate_speculative, args=(input_ids, streamer, max_new_tokens, generation_config, turbo_mode))
+            # Start generation in a separate thread
+            thread = Thread(
+                target=self._generate_with_streaming,
+                args=(input_ids, streamer, generation_config, self.enable_draft_model)
+            )
             thread.daemon = True
             thread.start()
 
-            # Initialize response
+            # Initialize response tracking
             complete_response = ""
             token_buffer = ""
-            mcp_buffer = ""    # For accumulating MCP commands
+            mcp_buffer = ""
 
             # Settings for token display
             last_print_time = time.time()
-            force_display_time = 0.05  # 50ms max wait between displays
-            max_buffer_size = 16  # Reasonable buffer size
+            force_display_time = 0.05  # 50ms max wait
+            max_buffer_size = 16
             stop_sequences = ["<|user|>", "<|assistant|>"]
 
             # Variables to track streaming state
             tokens_received = 0
-            early_confidence_check_threshold = 10  # Check confidence after this many tokens
             low_confidence_detected = False
 
-            user_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
-
-            # If no system command matched, generate response using the model
+            # Print assistant marker
             print(f"{self.get_time()} Assistant: \n", end='', flush=True)
 
-            try:
-                while True:
-                    if select.select([sys.stdin], [], [], 0)[0]:
-                        c = sys.stdin.read(1)
-                        if c == '\x03':  # Ctrl+C
-                            self.stop_event.set()
-                            print(f"\n{self.get_time()} Canceled by user")
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-                            break
-
-                    token = next(iter(streamer), None)
-
-                    if token is None:
-                        # No more tokens - generation complete
+            # Streaming loop
+            while True:
+                # Check for user interrupt
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    c = sys.stdin.read(1)
+                    if c == '\x03':  # Ctrl+C
+                        self.stop_event.set()
+                        print(f"\n{self.get_time()} Canceled by user")
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                         break
 
-                    tokens_received += 1
+                # Get next token
+                token = next(iter(streamer), None)
 
-                    # Process token for MCP
-                    display_token, mcp_buffer = self.mcp_handler.process_streaming_token(token, mcp_buffer)
+                # End of generation
+                if token is None:
+                    break
 
+                tokens_received += 1
 
-                    # Add token to response
-                    complete_response += token
+                # Process token for MCP
+                display_token, mcp_buffer = self.mcp_handler.process_streaming_token(token, mcp_buffer)
 
-                    # Get confidence for latest token
-                    if self.confidence_metrics.token_probabilities:
-                        latest_confidence = self.confidence_metrics.token_probabilities[-1]
-                        token_confidences.append(latest_confidence)
-                    elif self.confidence_metrics.original_token_probabilities:
-                        # Fallback to original probabilities if sharpened not available
-                        latest_idx = len(self.confidence_metrics.original_token_probabilities) - 1
-                        if latest_idx >= 0:
-                            latest_confidence = self.confidence_metrics.original_token_probabilities[latest_idx]
-                            token_confidences.append(latest_confidence)
-                        else:
-                            # Default if no confidence available
-                            latest_confidence = 0.8
-                            token_confidences.append(latest_confidence)
+                # Add token to response
+                complete_response += token
+
+                # Get confidence for latest token
+                if self.confidence_metrics.token_probabilities:
+                    latest_confidence = self.confidence_metrics.token_probabilities[-1]
+                    token_confidences.append(latest_confidence)
+                else:
+                    # Default if no confidence available
+                    latest_confidence = 0.8
+                    token_confidences.append(latest_confidence)
+
+                # Check confidence to possibly stop generation
+                if (response_filter is not None and
+                    not low_confidence_detected and
+                    tokens_received >= 10):  # Check after reasonable context
+
+                    # Get current metrics
+                    current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
+
+                    # Should we show fallback instead of continuing?
+                    if response_filter.should_stream_fallback(current_metrics, user_query):
+                        # Set flag to avoid checking again
+                        low_confidence_detected = True
+
+                        # Stop generation
+                        self.stop_event.set()
+
+                        # Get fallback message
+                        fallback = response_filter.get_streamable_fallback(user_query)
+                        print(fallback, end="", flush=True)
+
+                        # Update complete response
+                        complete_response = fallback
+                        break
+
+                # Only add displayable tokens to the buffer
+                if display_token and not low_confidence_detected:
+                    if show_confidence:
+                        colored_token = heatmap.colorize_streaming_token(
+                            display_token, latest_confidence)
+                        token_buffer += colored_token
                     else:
-                        # Default if no confidence available
-                        latest_confidence = 0.8
-                        token_confidences.append(latest_confidence)
+                        # Normal display without colorization
+                        token_buffer += display_token
 
-                    # Check confidence early enough to stop generation if needed
-                    # But only if we have a response filter and after receiving some tokens
-                    if (response_filter is not None and not low_confidence_detected and tokens_received >= early_confidence_check_threshold):
+                # Check timing
+                current_time = time.time()
+                time_since_print = current_time - last_print_time
 
-                        # Get current metrics
-                        current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
-
-                        # Should we show fallback instead of continuing?
-                        if response_filter.should_stream_fallback(current_metrics, user_query):
-                            # Set flag to avoid checking again
-                            low_confidence_detected = True
-
-                            # Set the stop event to interrupt generation
-                            self.stop_event.set()
-
-                            # Get fallback message
-                            fallback = response_filter.get_streamable_fallback(user_query)
-
-                            # Stream the fallback message with variable delays to mimic LLM output
-                            # Break into words for more natural streaming
-                            fallback_words = fallback.split()
-
-                            for i, word in enumerate(fallback_words):
-                                # Print the word
-                                print(word, end="", flush=True)
-
-                                # Add space after word (except for last word)
-                                if i < len(fallback_words) - 1:
-                                    print(" ", end="", flush=True)
-
-                                # Variable delays between words
-                                # Occasional longer pauses at punctuation or every few words
-                                if i > 0 and word[-1] in ".,:;?!":
-                                    time.sleep(0.3)  # Longer pause after punctuation
-                                elif i % 3 == 0:
-                                    time.sleep(0.15)  # Medium pause every few words
-                                else:
-                                    time.sleep(0.07)  # Regular pause between words
-
-                            # Mark fallback as streamed
-                            fallback_message_streamed = True
-
-                            # Update complete response with fallback
-                            complete_response = fallback
-                            break
-
-                    # Only add displayable tokens to the buffer
-                    if display_token and not fallback_message_streamed:
-                        if show_confidence:
-                            colored_token = heatmap.colorize_streaming_token(
-                                display_token, latest_confidence)
-                            token_buffer += colored_token
-                        else:
-                            # Normal display without colorization
-                            token_buffer += display_token
-
-                    # Check timing
-                    current_time = time.time()
-                    time_since_print = current_time - last_print_time
-
-                    # Print conditions
-                    if (len(token_buffer) >= max_buffer_size or time_since_print >= force_display_time) and token_buffer:
-                        print(token_buffer, end="", flush=True)
-                        token_buffer = ""
-                        last_print_time = current_time
-
-                    # Check for stop sequences
-                    if len(token_buffer) > 5:
-                        for stop_seq in stop_sequences:
-                            if stop_seq in token_buffer:
-                                token_buffer = token_buffer.split(stop_seq)[0]
-                                if token_buffer:
-                                    print(token_buffer, end="", flush=True)
-                                complete_response = complete_response.split(stop_seq)[0]
-
-                                # ENSURE WE HAVE CONFIDENCE METRICS
-                                if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
-                                    for i in range(5):
-                                        dummy_logits = torch.zeros(self.tokenizer.vocab_size, device=self.device)
-                                        # Generate varied values from 0.5 to 0.9
-                                        prob_value = 0.5 + (i * 0.1)
-                                        max_index = i % self.tokenizer.vocab_size
-
-                                        # Create a probability distribution with the max at our chosen token
-                                        dummy_logits.fill_(0.1 / self.tokenizer.vocab_size)  # Low baseline
-                                        dummy_logits[max_index] = prob_value  # Higher probability for this token
-
-                                        # Convert to logits
-                                        dummy_logits = torch.log(dummy_logits + 1e-10)
-
-                                        self.confidence_metrics.add_token_score(dummy_logits, max_index)
-
-                                return self.mcp_handler.finalize_streaming(complete_response)
-
-                termios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
-                # Handle any remaining tokens
-                if token_buffer:
+                # Print buffer when it's full or enough time has passed
+                if (len(token_buffer) >= max_buffer_size or
+                    time_since_print >= force_display_time) and token_buffer:
                     print(token_buffer, end="", flush=True)
+                    token_buffer = ""
+                    last_print_time = current_time
 
-                # ALWAYS ENSURE WE HAVE CONFIDENCE METRICS BEFORE RETURNING
-                if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
-                    response_length = len(complete_response.split())
-                    num_tokens = max(5, min(response_length, 10))
+                # Check for stop sequences
+                if len(token_buffer) > 5:
+                    for stop_seq in stop_sequences:
+                        if stop_seq in token_buffer:
+                            token_buffer = token_buffer.split(stop_seq)[0]
+                            if token_buffer:
+                                print(token_buffer, end="", flush=True)
+                            complete_response = complete_response.split(stop_seq)[0]
 
-                    for i in range(num_tokens):
-                        dummy_logits = torch.zeros(self.tokenizer.vocab_size)
-                        # Use different confidence values based on response quality
-                        confidence_val = 8.0 + (i % 3)  # Vary between 8-10
-                        dummy_logits[i % 100] = confidence_val
-                        self.confidence_metrics.add_token_score(dummy_logits, i % 100)
+                            # Make sure we have confidence metrics
+                            self._ensure_confidence_metrics(10)
 
-                # Get domain information if available
-                domain = None
-                settings = None
-                if hasattr(self, 'question_classifier') and messages[-1]["role"] == "user":
-                    user_query = messages[-1]["content"]
-                    settings = self.question_classifier.get_domain_settings(user_query)
-                    domain = settings['domain']
+                            return self.mcp_handler.finalize_streaming(complete_response)
 
-                # Apply post-processing to clean up the response
-                complete_response = self.post_process_response(complete_response, user_query, domain)
+            # Handle any remaining tokens
+            if token_buffer:
+                print(token_buffer, end="", flush=True)
 
-                # Finalize MCP processing
-                complete_response = self.mcp_handler.finalize_streaming(complete_response)
+            # Ensure confidence metrics exist
+            self._ensure_confidence_metrics(len(complete_response.split()))
 
-                if len(user_commands) > 0:
-                    for filename, cmd in user_commands.items():
-                        if cmd.get("action") == "save_response":
-                            success = self.mcp_handler.save_response_to_file(complete_response, filename)
-                            if success:
-                                print(f"{self.get_time()} [Response saved to: {filename}]")
-                            else:
-                                print(f"{self.get_time()} [Failed to save response to: {filename}]")
+            # Finalize the response
+            response = self.mcp_handler.finalize_streaming(complete_response)
 
-                return complete_response
+            # Post-process the response
+            response = self._post_process_response(response)
 
-            except Exception as e:
-                print(f"\n{self.get_time()} Error during token streaming: {str(e)}")
-                if complete_response:
-                    # Even with errors, make sure we have metrics
-                    if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
-                        dummy_logits = torch.zeros(self.tokenizer.vocab_size)
-                        dummy_logits[0] = 5.0  # Medium confidence for error cases
-                        self.confidence_metrics.add_token_score(dummy_logits, 0)
+            # Save to memory if enabled
+            if memory_enabled and user_query and response:
+                self._save_to_memory(user_query, response)
 
-                    return self.mcp_handler.finalize_streaming(complete_response)
-                return "Error generating response. Please try again."
-
-            self.last_token_confidences = token_confidences
+            return response
 
         except KeyboardInterrupt:
-            print(f"\n{self.get_time()} Exiting due to keyboard interrupt...")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
+            print(f"\n{self.get_time()} Generation interrupted by user")
+            return "Generation interrupted."
         except Exception as e:
-            print(f"\n{self.get_time()} Streaming setup failed: {e}")
-
-            exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            print(exc_type, fname, exc_tb.tb_lineno)
-
-            return "Error in streaming setup. Please try again."
+            print(f"\n{self.get_time()} Error during generation: {e}")
+            import traceback
+            traceback.print_exc()
+            return f"Error during generation: {str(e)}"
 
         finally:
-            if show_confidence and not self.stop_event.is_set() and not fallback_message_streamed:
-                # Print the legend after the response is complete
+            # Clean up terminal settings
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+            # Show heatmap legend if enabled
+            if show_confidence and not self.stop_event.is_set() and not low_confidence_detected:
                 print()  # Add a newline
                 heatmap.print_legend()
 
-            # Fallback for confidence metrics if somehow none were added
-            if not self.confidence_metrics.token_probabilities and not self.confidence_metrics.original_token_probabilities:
-                dummy_logits = torch.zeros(self.tokenizer.vocab_size)
-                dummy_logits[0] = 7.0  # Default confidence
-                self.confidence_metrics.add_token_score(dummy_logits, 0)
-
+            # Clean up resources
             self.resource_manager.clear_cache()
-            termios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
 
-    def ensure_metrics(self, response_length=None):
+    def _integrate_memory(self, messages: List[Dict[str, str]], query: str) -> List[Dict[str, str]]:
         """
-        Ensure confidence metrics exist with reasonable values.
+        Integrate relevant memories into conversation messages.
 
         Args:
-            response_length: Optional length of response to scale metrics
-        """
-        if not self.confidence_metrics.token_probabilities:
-            # If response length is not provided, use a default
-            num_tokens = 5
-            if response_length:
-                # First, clean the response of boilerplate messages
-                cleaned_response = self._clean_boilerplate_messages(response)
-                # Scale the number of tokens based on cleaned response length
-                num_tokens = max(5, min(len(cleaned_response.split()), 20))
-
-            for i in range(num_tokens):
-                # Create dummy logits tensor
-                dummy_logits = torch.zeros(self.tokenizer.vocab_size)
-
-                # Vary the confidence value to create realistic metrics
-                # The variation depends on token position (early tokens more confident)
-                position_factor = 1.0 - (i / (num_tokens * 2))  # Decreases from 1.0 to 0.5
-                confidence_base = 5.0 + (position_factor * 3.0)  # Range 5.0-8.0
-
-                # Add some randomness
-                confidence_val = confidence_base + ((i % 3) * 0.5)  # Small variations
-
-                # Set the logit value for a token
-                token_id = i % 100  # Use different token IDs
-                dummy_logits[token_id] = confidence_val
-
-                # Add the metrics
-                self.confidence_metrics.add_token_score(dummy_logits, token_id)
-
-            return True
-        return False
-
-    def calculate_response_metrics(self, response, generation_time):
-        """
-        Calculate metrics for the response, excluding boilerplate text.
-
-        Args:
-            response: The generated response text
-            generation_time: Time taken to generate the response
+            messages: Current conversation messages
+            query: Current user query
 
         Returns:
-            Tuple of (token_count, tokens_per_second)
+            Updated messages with memory context
         """
-        # Clean the response first
-        cleaned_response = self._clean_boilerplate_messages(response)
-
-        # Calculate tokens based on clean response
         try:
-            response_tokens = len(self.tokenizer.encode(cleaned_response))
-        except Exception as e:
-            print(f"{self.get_time()} Error encoding response: {e}")
-            # Fallback to rough estimation
-            response_tokens = len(cleaned_response.split()) * 1.3  # Approximate token count
-
-        # Calculate tokens per second
-        if generation_time > 0:
-            tokens_per_second = response_tokens / generation_time
-        else:
-            tokens_per_second = 0
-
-        return response_tokens, tokens_per_second
-
-    def format_metric_bar(self, value, min_val=0.0, max_val=1.0, width=20, label="", reverse=False):
-        """
-        Format a metric as a progress bar.
-
-        Args:
-            value: The metric value
-            min_val: Minimum value for the scale
-            max_val: Maximum value for the scale
-            width: Width of the progress bar in characters
-            label: Label for the metric
-            reverse: If True, lower values are better (like perplexity)
-
-        Returns:
-            Formatted string with the metric and progress bar
-        """
-        # Normalize value to 0-1 range
-        normalized = (value - min_val) / (max_val - min_val)
-        normalized = max(0.0, min(1.0, normalized))
-
-        # For reverse metrics (where lower is better), invert the value
-        if reverse:
-            normalized = 1.0 - normalized
-
-        # Calculate filled and empty portions
-        filled_length = int(width * normalized)
-        empty_length = width - filled_length
-
-        # Create the bar
-        bar = "█" * filled_length + "░" * empty_length
-
-        # Format the output
-        return f"[{bar}] {label}: {value:.2f}"
-
-    def print_generation_metrics(self, metrics, generation_time, response_tokens, show_all_metrics=False):
-        """
-        Print generation metrics with sharpening information if available.
-
-        Args:
-            metrics: Dictionary of metrics
-            generation_time: Time taken for generation
-            response_tokens: Number of tokens generated
-            show_all_metrics: Whether to show all individual metrics
-        """
-        # Calculate tokens per second
-        tokens_per_second = response_tokens / max(0.01, generation_time)
-
-        # Print header
-        print(f"{self.get_time()} [Generated {response_tokens} tokens in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec]")
-
-        # Get confidence metrics with sharpening applied
-        confidence_data = self.confidence_metrics.get_metrics(apply_sharpening=True)
-
-        # Check if we have original metrics for comparison (this is where the bug was)
-        has_sharpening = "original" in confidence_data
-
-        # Get the metrics from the right source
-        if has_sharpening:
-            # We have both sharpened and original metrics
-            sharpened = {
-                'confidence': confidence_data.get('confidence', 0.0),
-                'perplexity': confidence_data.get('perplexity', 0.0),
-                'entropy': confidence_data.get('entropy', 0.0)
-            }
-            original = confidence_data['original']
-            enhancement = confidence_data.get('enhancement', 0.0)
-        else:
-            # Just use the metrics provided
-            sharpened = metrics
-            original = None
-            enhancement = None
-
-        # Calculate quality score using either provided or confidence_data values
-        confidence = sharpened.get('confidence', metrics.get('confidence', 0.0))
-        perplexity = sharpened.get('perplexity', metrics.get('perplexity', 0.0))
-        entropy = sharpened.get('entropy', metrics.get('entropy', 0.0))
-
-        # For perplexity and entropy, lower is better, so normalize them inversely
-        perplexity_score = max(0.0, min(1.0, 1.0 - (perplexity / 10.0)))
-        entropy_score = max(0.0, min(1.0, 1.0 - (entropy / 3.0)))
-
-        # Combine all metrics with equal weights to get quality
-        quality = metrics.get('quality', (confidence * 0.25) + (perplexity_score * 0.25) + (entropy_score * 0.25) + 0.25)
-
-        # If all metrics are toggled on, show individual metrics
-        if show_all_metrics:
-            print("\nDetailed metrics:")
-            print(self.format_metric_bar(quality, 0.0, 1.0, 20, "Quality"))
-
-            # Show confidence with comparison if available
-            if has_sharpening:
-                orig_conf = original["confidence"]
-                print(self.format_metric_bar(confidence, 0.0, 1.0, 20,
-                                       f"Confidence (was {orig_conf:.2f}, {enhancement:+.1f}%)"))
-            else:
-                print(self.format_metric_bar(confidence, 0.0, 1.0, 20, "Confidence"))
-
-            # Show other metrics with comparison
-            if has_sharpening:
-                orig_perp = original["perplexity"]
-                print(self.format_metric_bar(perplexity, 1.0, 10.0, 20,
-                                       f"Perplexity (was {orig_perp:.2f})", reverse=True))
-
-                orig_entropy = original["entropy"]
-                print(self.format_metric_bar(entropy, 0.0, 3.0, 20,
-                                       f"Entropy (was {orig_entropy:.2f})", reverse=True))
-            else:
-                print(self.format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
-                print(self.format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
-
-        # Print quality bar
-        print(self.format_metric_bar(quality, 0.0, 1.0, 30, "Quality"))
-
-        # Show sharpening status if enabled
-        if self.memory_manager.use_fractal:
-            print(f"{self.get_time()} [Sharpening enabled: factor={self.sharpening_factor:.2f}]")
-
-    def add_conversation_to_memory(self, query, response):
-        """Add the current exchange to memory with improved context extraction."""
-        if not self.auto_memorize:
-            return 0
-
-        # Extract key information using improved method
-        memories = self._extract_memory_worthy_content(query, response)
-
-        if not memories:
-            return 0
-
-        # Add each item to memory
-        memories_added = 0
-
-        for memory_text, memory_type in memories:
-            # Create metadata
-            metadata = {
-                'source_hint': 'conversation',
-                'memory_type': memory_type,
-                'query': query,
-                'timestamp': datetime.now().timestamp(),
-                'retrieval_count': 0,
-                'context': query  # Store the original query for context
-            }
-
-            # Add to memory
-            item_id = self.memory_manager.add(
-                content=memory_text,
-                metadata=metadata,
-                use_fractal=self.memory_manager.use_fractal
+            # Retrieve relevant memories
+            memories = self.memory_manager.retrieve(
+                query=query,
+                top_k=5,
+                min_similarity=0.25
             )
 
-            if item_id:
-                memories_added += 1
+            # Format memories for context
+            if memories:
+                memory_text = self.memory_manager.format_for_context(memories, query)
 
-        if memories_added > 0:
-            print(f"{self.get_time()} [Memory] Added {memories_added} new memories")
+                # Create memory-enhanced messages
+                memory_enhanced_messages = messages.copy()
 
-        return memories_added
+                # Extract system message
+                original_system = messages[0]["content"]
 
-    def post_process_response(self, response, query, domain=None):
+                # Remove existing memory context if present
+                if "MEMORY CONTEXT:" in original_system:
+                    system_parts = original_system.split("MEMORY CONTEXT:")
+                    system_content = system_parts[0].strip()
+                else:
+                    system_content = original_system
+
+                # Add memory context
+                system_with_memory = f"{system_content}\n\n{memory_text}"
+
+                # Update system message
+                memory_enhanced_messages[0]["content"] = system_with_memory
+
+                # Update stats
+                self.memory_stats["retrievals"] += 1
+
+                return memory_enhanced_messages
+
+            return messages
+        except Exception as e:
+            print(f"{self.get_time()} Error integrating memory: {e}")
+            return messages
+
+    def _save_to_memory(self, query: str, response: str) -> bool:
         """
-        Clean up the response after generation.
+        Save conversation exchange to memory.
 
         Args:
-            response: The generated response text
-            query: The user query
-            domain: The detected domain (if available)
+            query: User query
+            response: Generated response
 
         Returns:
-            Cleaned response text
+            Success status
         """
-        if not response:
-            return response
-
-        # If domain wasn't provided, try to detect it
-        if domain is None and hasattr(self, 'question_classifier'):
-            domain, _ = self.question_classifier.classify(query)
-
-        # Apply domain-specific post-processing
-        if domain == 'translation':
-            # Clean up translation responses
-            return self._clean_translation_response(response, query)
-        elif domain == 'arithmetic':
-            # Clean up arithmetic responses
-            return self._clean_arithmetic_response(response, query)
-
-        # General cleanup for all responses
-        return self._clean_general_response(response)
-
-    def add_command_to_memory(self, command: str, output: str, error: str = None, output_file: str = None):
-        """Add command output to unified knowledge system."""
-        # Skip empty outputs
-        if not output and not error:
-            return 0
-
-        # Prepare content - the actual text we want to remember
-        content = f"Command '{command}' output: {output[:500]}"
-        if len(output) > 500:
-            content += "... [output truncated]"
-
-        if error:
-            content += f"\nError: {error}"
-
-        # Prepare metadata
-        metadata = {
-            "source_hint": "command",
-            "command": command,
-            "timestamp": datetime.now().timestamp(),
-            "retrieval_count": 0
-        }
-
-        if output_file:
-            metadata["output_file"] = output_file
-
-        if error:
-            metadata["has_error"] = True
-
-        # Add to memory
-        item_id = self.memory_manager.add(
-            content=content,
-            metadata=metadata,
-            use_fractal=self.memory_manager.use_fractal
-        )
-
-        return 1 if item_id else 0
-
-    def cleanup(self):
-        """Release all resources properly."""
-
         try:
-            # Unload models
-            if hasattr(self, 'draft_model') and self.draft_model is not None:
-                self.resource_manager.unload_model(self.draft_model)
-                self.draft_model = None
+            # Extract key information
+            memories = self._extract_memory_worthy_content(query, response)
 
-            if hasattr(self, 'model') and self.model is not None:
-                self.resource_manager.unload_model(self.model)
-                self.model = None
+            if not memories:
+                return False
 
-            # Clear speculative decoder reference to models
-            if hasattr(self, 'spec_decoder') and self.spec_decoder:
-                self.spec_decoder.draft_model = None
-                self.spec_decoder.main_model = None
+            # Add each memory item
+            memories_added = 0
 
-            # For memory consolidation, we need to get the store first
-            if hasattr(self, 'memory_manager') and hasattr(self, 'current_user_id'):
-                try:
-                    # Clean up memory
-                    self.memory_manager.cleanup()
-                    print(f"{self.get_time()} Consolidated memories for user {self.current_user_id}")
-                except Exception as e:
-                    print(f"{self.get_time()} Error consolidating memories: {e}")
+            for memory_text, source_hint in memories:
+                # Create metadata
+                metadata = {
+                    'source': 'conversation',
+                    'source_hint': source_hint,
+                    'query': query,
+                    'timestamp': datetime.now().timestamp()
+                }
 
-            # Final cleanup
-            if hasattr(self, 'resource_manager'):
-                self.resource_manager.cleanup()
+                # Add to memory
+                item_id = self.memory_manager.add(
+                    content=memory_text,
+                    metadata=metadata
+                )
 
-            if torch.cuda.is_available():
-                print(f"{self.get_time()} Releasing cuda cache.")
-                torch.cuda.empty_cache()
+                if item_id:
+                    memories_added += 1
 
-            print(f"{self.get_time()} Resources cleaned up successfully")
+            # Update stats
+            if memories_added > 0:
+                self.memory_stats["items_added"] += memories_added
+                print(f"{self.get_time()} Added {memories_added} new memories")
+                return True
 
+            return False
         except Exception as e:
-            print(f"{self.get_time()} Error during cleanup: {e}")
-            # Attempt to run basic cleanup even after an error
-            try:
-                if hasattr(self, 'resource_manager'):
-                    self.resource_manager.cleanup()
-            except:
-                pass
+            print(f"{self.get_time()} Error saving to memory: {e}")
+            return False
 
-    def get_multiline_input(self, prompt):
+    def _extract_memory_worthy_content(self, query: str, response: str) -> List[Tuple[str, str]]:
         """
-        Get multiline input with full editing capabilities using prompt_toolkit.
+        Extract content worthy of memorization.
 
         Args:
-            prompt: Initial prompt to display
+            query: User query
+            response: Generated response
 
         Returns:
-            String containing the entire multiline input
-        """
-        try:
-            from prompt_toolkit import prompt
-            from prompt_toolkit.history import FileHistory
-            from prompt_toolkit.styles import Style
-            import os
-        except ImportError:
-            print("prompt_toolkit is not installed. Install it with 'pip install prompt_toolkit'")
-            print("Falling back to simple input method.")
-
-            # Fallback to previous implementation if prompt_toolkit is not available
-            print("(Enter your text, paste multiline content. Press Ctrl+D or submit an empty line to finish)")
-
-            try:
-                lines = []
-                while True:
-                    try:
-                        line = input()
-                        lines.append(line)
-                    except EOFError:
-                        break
-            except KeyboardInterrupt:
-                print("\nInput cancelled.")
-                return ""
-
-            return "\n".join(lines)
-
-        # Ensure memory directory exists
-        os.makedirs(self.memory_dir, exist_ok=True)
-
-        # Create a history file for persistent input history
-        history_file = os.path.join(self.memory_dir, '.multiline_history')
-
-        print("\n(Multiline input mode. Use Ctrl+D or Alt+Enter to submit, Ctrl+C to cancel)")
-
-        try:
-            style = Style.from_dict({
-                # The empty string key '' is the “default” token,
-                # so anything you type (that isn’t otherwise styled) gets this color.
-                '': 'fg:#0BB8E2',
-                # If you also want your continuation dots to be the same color:
-                'prompt.continuation': 'fg:#ADD8E6',
-            })
-
-            # Use prompt_toolkit for advanced multiline input
-            user_input = prompt(
-                '',  # No initial prompt inside the input area
-                multiline=True,  # Enable multiline input
-                prompt_continuation=lambda width, line_number, wrap_count: '.' * width,  # Continuation prompt
-                history=FileHistory(history_file),  # Persistent history
-                complete_while_typing=True,  # Enable autocompletion
-                enable_open_in_editor=True,  # Allow opening in external editor with F4
-                style=style
-            )
-            # Trim trailing whitespace if needed
-            user_input = user_input.rstrip()
-
-            # Confirm and return input
-            if user_input:
-                print(f"{self.get_time()} Received {len(user_input.splitlines())} lines of input.")
-
-            return user_input
-
-        except KeyboardInterrupt:
-            print(f"\n{self.get_time()} Input cancelled.")
-            return ""
-        except Exception as e:
-            print(f"\n{self.get_time()} Error during input: {e}")
-            return ""
-
-    def _extract_memory_worthy_content(self, query, response):
-        """
-        Extract content worthy of memorization with improved context preservation.
-
-        Returns:
-            List of (content, memory_type) tuples
+            List of (content, source_hint) tuples
         """
         memories = []
 
-        # First, check if we should memorize the entire exchange
+        # For short exchanges, memorize complete Q&A
         if len(query) <= 100 and len(response) <= 200:
-            # For short exchanges, memorize the complete Q&A
             memories.append((f"Q: {query}\nA: {response}", "qa_pair"))
             return memories
 
-        # For longer exchanges, extract key information
-
-        # 1. Try to extract factual statements
+        # Extract factual statements
         factual_pattern = r'(?:is|are|was|were|has|have|had|will be)\s+([A-Z][a-z]+\s+(?:is|are|was|were|has|have|had)\s+[^.!?]+[.!?])'
         matches = re.findall(factual_pattern, response)
         for match in matches:
             if len(match) > 10 and len(match) < 200:
                 memories.append((match, "factual"))
 
-        # 2. Extract definitions
+        # Extract definitions
         definition_pattern = r'([A-Z][a-z]+\s+(?:refers to|is defined as|means|is|are)\s+[^.!?]+[.!?])'
         matches = re.findall(definition_pattern, response)
         for match in matches:
             if len(match) > 10 and len(match) < 200:
                 memories.append((match, "definition"))
 
-        # 3. Extract named entities
-        entity_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,5})\s+(?:is|was|were|are|has|have|had)\s+[^.!?]{10,100}[.!?]'
-        matches = re.findall(entity_pattern, response)
-        for match in matches:
-            if len(match) > 3:  # Reasonable entity name
-                # Find the complete sentence containing this entity
-                sentences = re.split(r'[.!?]', response)
-                for sentence in sentences:
-                    if match in sentence and 10 < len(sentence) < 200:
-                        memories.append((sentence.strip() + ".", "entity"))
-                        break
-
-        # 4. Extract lists and enumerations
+        # Extract lists
         lines = response.split('\n')
         list_items = []
         in_list = False
@@ -1804,7 +760,7 @@ class TinyLlamaChat:
                         memories.append((content, "list"))
                 in_list = False
 
-        # 5. If no structured content found, extract key sentences
+        # If no structured content found, extract key sentences
         if not memories:
             sentences = re.split(r'[.!?]', response)
             key_sentences = []
@@ -1819,7 +775,7 @@ class TinyLlamaChat:
                     re.search(r'\b(?:always|never|must|should|typically|generally)\b', sentence)):
                     key_sentences.append(sentence + ".")
 
-            # Take the top 3 most informative sentences
+            # Take top 3 most informative sentences
             for sentence in key_sentences[:3]:
                 if 10 < len(sentence) < 200:
                     memories.append((sentence, "key_info"))
@@ -1828,83 +784,169 @@ class TinyLlamaChat:
         unique_memories = []
         seen_content = set()
 
-        for content, memory_type in memories:
+        for content, source_hint in memories:
             # Normalize to avoid near-duplicates
             normalized = re.sub(r'\s+', ' ', content.lower())
             if normalized not in seen_content:
                 seen_content.add(normalized)
-                unique_memories.append((content, memory_type))
+                unique_memories.append((content, source_hint))
 
         # Limit total memories from a single exchange
-        return unique_memories[:10]  # Cap at 10 memories per exchange
+        return unique_memories[:5]  # Cap at 5 memories per exchange
 
-    def _clean_translation_response(self, response, query):
-        """Clean up translation responses"""
-        # Extract the core translation from verbose responses
-        first_line = response.split('\n')[0].strip()
+    def _generate_with_streaming(self, input_ids, streamer, generation_config, use_draft_model):
+        """
+        Generate a response with streaming output.
 
-        # If the response has notes or explanations, keep only the essential part
-        if len(response.split('\n')) > 1:
-            # Use regex to find the translation pattern
-            match = re.search(r'["\'«]([^"\'»]+)["\'\»]\s+(?:in|en|na|в|på)\s+\w+', first_line)
-            if match:
-                translation = match.group(1).strip()
-                # Return a cleaner version
-                lang_match = re.search(r'(?:in|to|into)\s+(\w+)', query)
-                if lang_match:
-                    language = lang_match.group(1)
-                    return f'"{translation}" in {language}'
+        Args:
+            input_ids: Input token IDs
+            streamer: Text streamer for output
+            generation_config: Generation configuration
+            use_draft_model: Whether to use draft model
+        """
+        try:
+            # Reset confidence metrics
+            if hasattr(self.confidence_metrics, 'reset'):
+                self.confidence_metrics.reset()
 
-        # Remove duplicated text like "Prikaz:" and redundant notes
-        response = re.sub(r'Prikaz:\s*-\s*', '', response)
-        response = re.sub(r'(?:Note|Примечание):\s*"[^"]+"\s+(?:may|peut|puede|может|kan).*?$', '', response, flags=re.MULTILINE)
+            # Setup logits processor for confidence tracking
+            from transformers import LogitsProcessorList
 
-        # Remove duplicated translations
-        lines = response.split('\n')
-        unique_lines = []
-        seen = set()
-        for line in lines:
-            # Create a simplified key for comparison
-            simplified = re.sub(r'[^\w\s]', '', line.lower())
-            if simplified and simplified not in seen:
-                seen.add(simplified)
-                unique_lines.append(line)
+            streaming_config = {k: v for k, v in generation_config.items()
+                               if k not in ['max_new_tokens', 'output_scores', 'return_dict_in_generate']}
 
-        return '\n'.join(unique_lines)
+            # Add TokenProbabilityCaptureProcessor for confidence tracking
+            if 'logits_processor' not in streaming_config:
+                streaming_config['logits_processor'] = LogitsProcessorList()
 
-    def _clean_arithmetic_response(self, response, query):
-        """Clean up arithmetic responses"""
-        # Extract the expression from the query
-        expression = None
+            # Create the processor for capturing token probabilities
+            metrics_processor = TokenProbabilityCaptureProcessor(self.confidence_metrics)
+            streaming_config['logits_processor'].append(metrics_processor)
 
-        if not expression:
-            # Try a simple regex fallback
-            match = re.search(r'(\d+\s*[\+\-\*\/]\s*\d+)', query)
-            if match:
-                expression = match.group(1).replace(' ', '')
+            # Use speculative decoding if enabled
+            if use_draft_model and self.draft_model is not None:
+                # Generate with speculative decoding
+                self.spec_decoder.generate_with_speculative_decoding(
+                    input_ids=input_ids,
+                    streamer=streamer,
+                    max_new_tokens=generation_config.get('max_new_tokens', 128),
+                    generation_config=streaming_config,
+                    stop_event=self.stop_event
+                )
+            else:
+                # Use standard generation
+                self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=torch.ones_like(input_ids),
+                    streamer=streamer,
+                    max_new_tokens=generation_config.get('max_new_tokens', 128),
+                    **streaming_config
+                )
 
-        if expression:
-            # Calculate the correct result
+        except Exception as e:
+            print(f"{self.get_time()} Error in generation thread: {str(e)}")
+            import traceback
+            traceback.print_exc()
             try:
-                correct_result = eval(expression)
-
-                # Check if the response has the correct result
-                if str(correct_result) not in response:
-                    # Replace with correct calculation
-                    return f"The result of {expression} is {correct_result}."
-
-                # If it has the correct result, just clean up any verbose explanations
-                match = re.search(r'.*?(\d+\s*[\+\-\*\/]\s*\d+).*?(\d+)', response)
-                if match:
-                    return f"The result of {expression} is {correct_result}."
-            except:
+                streamer.end()
+            except Exception:
                 pass
 
-        return response
+    def _get_domain_config(self, query, max_new_tokens=128, temperature=0.7):
+        """
+        Get domain-specific generation configuration.
 
-    def _clean_general_response(self, response):
-        """General cleanup for all responses"""
-        # Remove repeated paragraphs (not just lines)
+        Args:
+            query: User query
+            max_new_tokens: Maximum tokens to generate
+            temperature: Temperature for sampling
+
+        Returns:
+            Generation configuration dictionary
+        """
+        # Base configuration
+        config = {
+            "max_new_tokens": max_new_tokens,
+            "repetition_penalty": 1.0,
+            "num_beams": 1,
+            "pad_token_id": self.tokenizer.eos_token_id,
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "use_cache": True
+        }
+
+        # Set sampling parameters if needed
+        if self.do_sample:
+            config['do_sample'] = True
+            config['top_k'] = self.top_k
+            config['top_p'] = self.top_p
+            config['temperature'] = temperature if temperature > 0.1 else 1.0
+        else:
+            config['do_sample'] = False
+
+        # Get domain settings if classifier is available
+        if hasattr(self, 'question_classifier') and self.question_classifier:
+            settings = self.question_classifier.get_domain_settings(query)
+            domain = settings['domain']
+
+            # Apply domain-specific adjustments
+            if domain == 'arithmetic':
+                # More deterministic for math
+                config['temperature'] = min(config.get('temperature', 0.7), 0.3)
+                config['top_p'] = 0.85
+            elif domain == 'translation':
+                # More deterministic for translations
+                config['temperature'] = min(config.get('temperature', 0.7), 0.4)
+                config['top_p'] = 0.9
+            elif domain == 'factual':
+                # Slightly more deterministic for facts
+                config['temperature'] = min(config.get('temperature', 0.7), 0.5)
+            elif domain == 'conceptual' or domain == 'procedural':
+                # More creative for concepts and procedures
+                config['temperature'] = max(config.get('temperature', 0.7), 0.6)
+
+        return config
+
+    def _ensure_confidence_metrics(self, token_count=10):
+        """
+        Ensure confidence metrics exist with reasonable values.
+
+        Args:
+            token_count: Number of tokens to simulate
+        """
+        if (not hasattr(self.confidence_metrics, 'token_probabilities') or
+            not self.confidence_metrics.token_probabilities):
+
+            # Create dummy metrics
+            for i in range(token_count):
+                # Create dummy logits tensor
+                dummy_logits = torch.zeros(self.tokenizer.vocab_size)
+
+                # Vary confidence values
+                position_factor = 1.0 - (i / (token_count * 2))
+                confidence_base = 5.0 + (position_factor * 3.0)
+                confidence_val = confidence_base + ((i % 3) * 0.5)
+
+                # Set the logit value for a token
+                token_id = i % 100
+                dummy_logits[token_id] = confidence_val
+
+                # Add the metrics
+                self.confidence_metrics.add_token_score(dummy_logits, token_id)
+
+    def _post_process_response(self, response: str) -> str:
+        """
+        Clean up the response after generation.
+
+        Args:
+            response: The generated response
+
+        Returns:
+            Cleaned response
+        """
+        if not response:
+            return response
+
+        # Remove duplicate paragraphs
         lines = response.split('\n')
         paragraphs = []
         current_paragraph = []
@@ -1927,371 +969,317 @@ class TinyLlamaChat:
         seen_paragraphs = set()
 
         for paragraph in paragraphs:
-            # Create a simplified key for comparison
             if paragraph:
+                # Create a simplified key for comparison
                 simplified = re.sub(r'[^\w\s]', '', paragraph.lower())
                 if simplified and simplified not in seen_paragraphs:
                     seen_paragraphs.add(simplified)
                     unique_paragraphs.append(paragraph)
                 elif not simplified:
-                    unique_paragraphs.append(paragraph)  # Keep formatting paragraphs
+                    unique_paragraphs.append(paragraph)
             else:
-                unique_paragraphs.append(paragraph)  # Keep empty lines
+                unique_paragraphs.append(paragraph)
 
         cleaned = '\n'.join(unique_paragraphs)
 
-        # Remove any debugging information that might have leaked
-        cleaned = re.sub(r'(?:relevance|similarity)\s+(?:increased|decreased)\s+by\s+[\d\.]+%.*?$', '', cleaned, flags=re.MULTILINE)
+        # Remove any debugging information
+        cleaned = re.sub(r'(?:relevance|similarity)\s+(?:increased|decreased)\s+by\s+[\d\.]+%.*?', '', cleaned, flags=re.MULTILINE)
 
         return cleaned
 
-    def _clean_boilerplate_messages(self, response):
+    def _safe_tokenize(self, text, **kwargs):
         """
-        Clean boilerplate UI messages from the response before metric calculation.
+        Safe tokenization that handles 'Already borrowed' errors.
 
         Args:
-            response: The original response text
+            text: Text to tokenize
+            **kwargs: Arguments for tokenizer
 
         Returns:
-            Cleaned response without boilerplate
-        """
-        # Additional patterns to clean if needed
-        patterns = [
-            r'Confidence Heatmap Legend.*?Confidence range:.*?\d+\.\d+',  # Entire legend block
-            r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Memory\] Added \d+ new',  # Memory adding info
-            r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Generated.*?tokens\/sec\]',  # Generation stats
-            r'\[█+░*\] Quality:.*?\d+\.\d+',                           # quality bar
-            r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Sharpening enabled:.*?\]',  # Sharpening info
-        ]
-
-        # Apply each pattern
-        cleaned = response
-        for pattern in patterns:
-            cleaned = re.sub(pattern, '', cleaned, flags=re.DOTALL|re.MULTILINE)
-
-        return cleaned.strip()
-
-    # handles "Already borrowed" error in tokenization
-    def safe_tokenize(self, text, **kwargs):
-        """
-        Safe tokenization that avoids the 'Already borrowed' error by creating new tensors.
+            Tokenized result
         """
         try:
-            # Try normal tokenization first
+            # Try normal tokenization
             return self.tokenizer(text, **kwargs)
         except RuntimeError as e:
             if "Already borrowed" in str(e):
-                print(f"{self.get_time()} Compensating for already borrowed tensor...")
-                # Create a fresh tokenizer instance for this operation
+                print(f"{self.get_time()} Handling 'Already borrowed' error...")
+
+                # Create a fresh tokenizer instance
                 import copy
                 temp_tokenizer = copy.deepcopy(self.tokenizer)
 
-                # Try with the fresh tokenizer
+                # Tokenize with fresh tokenizer
                 result = temp_tokenizer(text, **kwargs)
 
-                # Convert to regular Python objects before returning
+                # Convert tensors to fresh copies
                 return {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in result.items()}
             else:
-                # Re-raise if it's a different error
+                # Re-raise other errors
                 raise
 
-def main():
-    start_time = datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
-    print(f"{start_time} Let's start ...")
-    parser = argparse.ArgumentParser(description="TinyLlama Chat with Speculative Decoding and MCP")
-    parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-                      help="Model to use for chat")
-    parser.add_argument("--device", type=str, default=None,
-                      help="Device to use (cuda, cpu). If not specified, will autodetect.")
-    parser.add_argument("--system-prompt", type=str,
-                      default="You are a helpful and friendly assistant.",
-                      help="System prompt to use")
-    parser.add_argument("--temperature", type=float, default=0.7,
-                      help="Temperature for response generation (lower = more deterministic)")
-    parser.add_argument("--max-tokens", type=int, default=128,
-                      help="Maximum number of tokens to generate in response")
-    parser.add_argument("--turbo", action="store_true", default=True,
-                      help="Enable turbo mode for ultra-fast generation")
-    parser.add_argument("--output-dir", type=str, default="./output",
-                      help="Directory to store output files from MCP")
-    parser.add_argument("--confidence_threshold", type=float, default=0.7,
-                      help="Filter confidence")
-    parser.add_argument("--heatmap", action="store_true", default=False,
-                      help="Show confidence heatmap visualization")
-    parser.add_argument("--no-memory", action="store_true",
-                      help="Disable automatic memory features")
-    parser.add_argument("--all-metrics", action="store_true", default=False,
-                      help="Show all detailed metrics instead of just quality")
-    parser.add_argument("--enable-sharpening", action="store_true", default=True,
-                      help="Enable vector space and confidence sharpening")
-    parser.add_argument("--sharpening-factor", type=float, default=0.3,
-                      help="Sharpening factor for vector embeddings (0.0-1.0)")
-    parser.add_argument("--test-fractal", action="store_true", default=False,
-                      help="Run fractal embedding diagnostics")
-    parser.add_argument("--do-sample", action="store_true", help="Enable sampling-based generation")
-    parser.add_argument("--top-p", type=float, default=1.0, help="Top-p (nucleus) sampling parameter")
-    parser.add_argument("--top-k", type=int, default=0, help="Top-k sampling parameter")
-    parser.add_argument("--draft-model", action="store_true", default=False,
-                      help="Enable draft model for speculative decoding")
+    def get_multiline_input(self, prompt: str = "") -> str:
+        """
+        Get multiline input from the user.
 
+        Args:
+            prompt: Prompt to display
+
+        Returns:
+            User input as string
+        """
+        try:
+            from prompt_toolkit import prompt
+            from prompt_toolkit.history import FileHistory
+            from prompt_toolkit.styles import Style
+        except ImportError:
+            print("prompt_toolkit not installed. Install with 'pip install prompt_toolkit'")
+            print("Falling back to simple input method.")
+
+            # Simple fallback
+            print(prompt)
+            print("(Enter your text. Press Ctrl+D or empty line to finish)")
+
+            try:
+                lines = []
+                while True:
+                    try:
+                        line = input()
+                        if not line:
+                            break
+                        lines.append(line)
+                    except EOFError:
+                        break
+            except KeyboardInterrupt:
+                print("\nInput cancelled.")
+                return ""
+
+            return "\n".join(lines)
+
+        # Create history file
+        os.makedirs(self.memory_dir, exist_ok=True)
+        history_file = os.path.join(self.memory_dir, '.multiline_history')
+
+        print(f"\n{prompt}")
+        print("(Multiline input mode. Use Ctrl+D or Alt+Enter to submit, Ctrl+C to cancel)")
+
+        try:
+            style = Style.from_dict({
+                '': 'fg:#0BB8E2',
+                'prompt.continuation': 'fg:#ADD8E6',
+            })
+
+            # Get input with prompt_toolkit
+            user_input = prompt(
+                '',
+                multiline=True,
+                prompt_continuation=lambda width, line_number, wrap_count: '.' * width,
+                history=FileHistory(history_file),
+                complete_while_typing=True,
+                enable_open_in_editor=True,
+                style=style
+            )
+
+            # Trim trailing whitespace
+            user_input = user_input.rstrip()
+
+            # Confirm input
+            if user_input:
+                print(f"{self.get_time()} Received {len(user_input.splitlines())} lines of input.")
+
+            return user_input
+
+        except KeyboardInterrupt:
+            print(f"\n{self.get_time()} Input cancelled.")
+            return ""
+        except Exception as e:
+            print(f"\n{self.get_time()} Error during input: {e}")
+            return ""
+
+    def cleanup(self):
+        """Release all resources properly."""
+        try:
+            # Unload models
+            if hasattr(self, 'draft_model') and self.draft_model is not None:
+                self.resource_manager.unload_model(self.draft_model)
+                self.draft_model = None
+
+            if hasattr(self, 'model') and self.model is not None:
+                self.resource_manager.unload_model(self.model)
+                self.model = None
+
+            # Clear speculative decoder references
+            if hasattr(self, 'spec_decoder') and self.spec_decoder:
+                self.spec_decoder.draft_model = None
+                self.spec_decoder.main_model = None
+
+            # Clean up memory
+            if hasattr(self, 'memory_manager'):
+                self.memory_manager.cleanup()
+
+            # Final cleanup
+            if hasattr(self, 'resource_manager'):
+                self.resource_manager.cleanup()
+
+            # Clear CUDA cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            print(f"{self.get_time()} Resources cleaned up successfully")
+
+        except Exception as e:
+            print(f"{self.get_time()} Error during cleanup: {e}")
+            # Attempt basic cleanup
+            try:
+                if hasattr(self, 'resource_manager'):
+                    self.resource_manager.cleanup()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except:
+                pass
+
+def main():
+    """Main application function for the chat interface."""
+    parser = argparse.ArgumentParser(description="Memory-Enhanced Chat")
+
+    # Basic parameters
+    parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                       help="Model to use for chat")
+    parser.add_argument("--device", type=str, default=None,
+                       help="Device to use (cuda, cpu). If not specified, will autodetect.")
+    parser.add_argument("--system-prompt", type=str,
+                       default=DEFAULT_SYSTEM_MESSAGE,
+                       help="System prompt to use")
+    parser.add_argument("--temperature", type=float, default=0.7,
+                       help="Temperature for response generation")
+    parser.add_argument("--max-tokens", type=int, default=128,
+                       help="Maximum number of tokens to generate")
+
+    # Feature flags
+    parser.add_argument("--no-memory", action="store_true",
+                       help="Disable memory features")
+    parser.add_argument("--heatmap", action="store_true", default=True,
+                       help="Show confidence heatmap")
+    parser.add_argument("--do-sample", action="store_true", default=True,
+                        help="Enable sampling-based generation")
+    parser.add_argument("--draft-model", action="store_true", default=False,
+                       help="Enable draft model for speculative decoding")
+
+    # Advanced settings
+    parser.add_argument("--output-dir", type=str, default="./output",
+                       help="Directory for output files")
+    parser.add_argument("--confidence-threshold", type=float, default=0.7,
+                       help="Confidence threshold for filtering")
+    parser.add_argument("--enhancement-factor", type=float, default=0.3,
+                       help="Similarity enhancement factor (0.0-1.0)")
+    parser.add_argument("--top-p", type=float, default=1.0,
+                        help="Top-p sampling parameter")
+    parser.add_argument("--top-k", type=int, default=50,
+                        help="Top-k sampling parameter")
+
+    # Parse args
     args = parser.parse_args()
 
-    filter_enabled = True  # Add this to track filtering state
-    user_context = {}  # Shared context for the ResponseFilter
-    show_all_metrics = args.all_metrics  # Add this to track whether to show all metrics
+    # Initialize user_context for ResponseFilter
+    user_context = {}
 
-    # Initialize chat with speculative decoding support
-    chat = TinyLlamaChat(
+    # Initialize chat
+    chat = MemoryEnhancedChat(
         model_name=args.model,
         device=args.device,
-        memory_dir="./memory",  # Add this explicitly if you want to keep the default
-        output_dir=args.output_dir,  # Pass the output_dir parameter here
+        memory_dir="./memory",
+        output_dir=args.output_dir,
         confidence_threshold=args.confidence_threshold,
-        auto_memorize=not args.no_memory,
-        enable_sharpening=args.enable_sharpening,
-        sharpening_factor=args.sharpening_factor,
-        fractal_enabled=True,
-        max_fractal_levels=3,
+        enable_memory=not args.no_memory,
+        similarity_enhancement_factor=args.enhancement_factor,
+        enable_enhanced_embeddings=True,
         do_sample=args.do_sample,
         top_p=args.top_p,
         top_k=args.top_k,
-        use_draft_model=args.draft_model
+        enable_draft_model=args.draft_model,
+        system_message=args.system_prompt
     )
 
-    # # Test embedding batch processing
-    # chat.test_batch_processing('embedding')
+    # Initialize response filter
+    response_filter = ResponseFilter(
+        confidence_threshold=args.confidence_threshold,
+        user_context=user_context,
+        question_classifier=chat.question_classifier,
+        sharpening_factor=args.enhancement_factor
+    )
 
-    # # Test inference batch processing
-    # chat.test_batch_processing('inference')
+    # Set up history
+    history_file = setup_readline_history(chat.memory_dir)
+    print(f"{chat.get_time()} Command history stored in: {history_file}")
 
-    # for debugging embed performance
-    # return chat.test_embedding_performance()
+    # Warm up the model with a short prompt
+    if chat.device == "cuda":
+        print(f"{chat.get_time()} Warming up model...")
+        import random
 
-    # for testing fractal embedding
-    #return chat.memory_manager.print_fractal_embedding_diagnostics()
-
-    # return chat.test_memory_system()
-
-    try:
-        if args.test_fractal:
-            # Get a user store
-            store = chat.memory_manager
-
-            # Run and print diagnostics
-            store.print_fractal_embedding_diagnostics()
-            return  # Exit after diagnostics
-
-        response_filter = ResponseFilter(
-            confidence_threshold=args.confidence_threshold,
-            user_context=user_context,
-            question_classifier=chat.question_classifier
+        _ = chat.chat(
+            [{"role": "user", "content": f"Calculate {random.randint(1, 100)} + {random.randint(1, 100)}"}],
+            max_new_tokens=20,
+            temperature=0.7
         )
 
-        history_file = setup_readline_history(chat.memory_dir)
-        print(f"{chat.get_time()} Command history stored in: {history_file}")
+    # Display welcome header
+    print("\n" + "="*50)
+    print("Memory-Enhanced Chat")
+    print("="*50)
+    print("Type 'exit' to end the conversation")
+    print("Special commands:")
+    print("  !system: [message] - Change the system message")
+    print("  !mcp-help - Show MCP commands for file output")
+    print("  !toggle-memory - Toggle memory system on/off")
+    print("  !toggle-heatmap - Toggle confidence heatmap visualization")
+    print("  !toggle-draft - Toggle draft model for speculative decoding")
+    print("  !memory-stats - Display info about memories")
+    print("  !enhance-factor: [0.0-1.0] - Set similarity enhancement factor")
+    print("  !toggle-filter - Toggle confidence filtering")
+    print("="*50 + "\n")
 
-        # Set system message
-        chat.system_message = {
-            "role": "system",
-            "content": args.system_prompt
-        }
+    # Initialize chat state
+    show_confidence = args.heatmap
+    filter_enabled = True
+    conversation = [{"role": "system", "content": args.system_prompt}]
 
-        # Warm up the model with a short prompt
-        if chat.device != "cpu":
-            try:
-                import bitsandbytes as bnb
-                chat.loading_options["load_in_4bit"] = True  # or load_in_4bit=True for even better performance
-                print(f"{chat.get_time()} Using 4-bit quantization for better performance")
-            except ImportError:
-                print(f"{chat.get_time()} bitsandbytes not installed, using full precision")
-
-            print(f"{chat.get_time()} Warming up model for maximum throughput...")
-            import random
-            from random import randrange
-
-            magic_number = 259125
-            magic_number_1 = randrange(magic_number)
-            magic_number_2 = randrange(magic_number)
-            operators = ["+", "-", "/", "*"]
-
-            _ = chat.generate_response(
-                [{"role": "user", "content": f"Just write the result of equation {magic_number_1}{random.choice(operators)}{magic_number_2} without anything than just that the result of equation."}],
-                max_new_tokens=30,
-                temperature=0.7
-            )
-
-        # Start conversation loop
-        print("\n" + "="*50)
-        print("TinyLlama Chat with Speculative Decoding and MCP")
-        print("="*50)
-        print("Type 'exit' to end the conversation")
-        print("Special commands:")
-
-        print("  !system: [message] - Change the system message")
-        print("  !mcp-help - Show MCP commands for directing output to files")
-        print("  !confidence: [0.0-1.0] - Set confidence threshold")
-        print("  !sharpening-factor: [0.0-1.0] - Set the sharpening factor for vector embeddings")
-        print("  !toggle-turbo - Toggle turbo mode on/off")
-        print("  !toggle-filter - Toggle uncertainty filtering on/off")
-        print("  !toggle-heatmap - Toggle confidence heatmap visualization on/off")
-        print("  !toggle-all-metrics - Toggle between showing all metrics or just quality")
-        print("  !toggle-sharpening - Toggle vector space sharpening on/off")
-        print("  !toggle-memory - Toggle automatic memorization on/off")
-        print("  !memory-stats - Display info about memories")
-        print("  !search-engine: [engine] - Set search engine (duckduckgo/google)")
-        print("  !fractal-diagnostics - prints fractal embedding diagnostics")
-        print("  !compare-queries: [query1] | [query2] - Compare the semantic relationship between two queries")
-        print("  !spec-stats - Show speculative decoding statistics")
-        print("  !toggle-draft - Toggle draft model for speculative decoding on/off")
-
-        print("\nIf the model expresses uncertainty, you can ask it to speculate")
-        print("by saying 'please continue anyway' or 'please speculate'")
-
-        print("="*50 + "\n")
-
-        # Set initial mode settings
-        turbo_mode = args.turbo
-        show_confidence = args.heatmap
-
-        conversation = [chat.system_message]
-
+    try:
+        # Main conversation loop
         while True:
-            # Get timestamp for user input
+            # Get user input
             user_input = chat.get_multiline_input(f"{chat.get_time()} You: ")
 
-            if user_input == "":
-                chat.stop_event.set()
+            if not user_input:
                 continue
 
             # Handle special commands
             if user_input.lower() == 'exit':
-                store = chat.memory_manager
-
-                # Show final stats
-                stats = store.get_stats()
-                print(f"{chat.get_time()} Memories saved this session: {stats['active_items']}")
-                print(f"{chat.get_time()} Total memories saved this: {stats['total_items']}")
+                # Show memory stats
+                stats = chat.memory_manager.get_stats()
+                print(f"{chat.get_time()} Total memories: {stats['active_items']}")
+                print(f"{chat.get_time()} Memories added this session: {chat.memory_stats['items_added']}")
                 break
 
             elif user_input.lower().startswith('!system:'):
                 new_system = user_input[8:].strip()
-                chat.system_message = {
-                    "role": "system",
-                    "content": new_system
-                }
-                conversation[0] = chat.system_message
-                print(f"{chat.get_time()} System message updated: {new_system}")
-                continue
-
-            elif user_input.lower() == '!toggle-turbo':
-                turbo_mode = not turbo_mode
-                print(f"{chat.get_time()} Turbo mode {'enabled' if turbo_mode else 'disabled'}")
+                conversation[0] = {"role": "system", "content": new_system}
+                print(f"{chat.get_time()} System message updated")
                 continue
 
             elif user_input.lower() == '!mcp-help':
                 help_text = chat.mcp_handler.get_help_text()
                 print(help_text)
                 continue
-            elif user_input.lower() == '!toggle-filter':
-                filter_enabled = not filter_enabled
-                print(f"{chat.get_time()} Response filtering {'enabled' if filter_enabled else 'disabled'}")
+
+            elif user_input.lower() == '!toggle-memory':
+                is_enabled = chat.toggle_memory()
+                print(f"{chat.get_time()} Memory system {'enabled' if is_enabled else 'disabled'}")
                 continue
+
             elif user_input.lower() == '!toggle-heatmap':
                 show_confidence = not show_confidence
                 print(f"{chat.get_time()} Confidence heatmap {'enabled' if show_confidence else 'disabled'}")
-                continue
-            elif user_input.lower() == '!toggle-all-metrics':
-                show_all_metrics = not show_all_metrics
-                print(f"{chat.get_time()} Detailed metrics display {'enabled' if show_all_metrics else 'disabled'}")
-                continue
-            elif user_input.lower() == '!toggle-sharpening':
-                is_enabled = chat.memory_manager.toggle_sharpening()
-                print(f"{chat.get_time()} Vector space sharpening {'enabled' if is_enabled else 'disabled'}")
-                continue
-            elif user_input.lower().startswith('!sharpening-factor:'):
-                try:
-                    factor = float(user_input.split(':')[1].strip())
-                    if 0.0 <= factor <= 1.0:
-                        chat.memory_manager.set_sharpening_factor(factor)
-                    else:
-                        print("Sharpening factor must be between 0.0 and 1.0")
-                except Exception as e:
-                    print(f"{chat.get_time()} Invalid value: {str(e)}. Please specify a number between 0.0 and 1.0")
-                continue
-
-            elif user_input.lower() == '!toggle-memory':
-                is_enabled = chat.toggle_auto_memorize()
-                print(f"{chat.get_time()} Automatic memorization {'enabled' if is_enabled else 'disabled'}")
-                continue
-
-            elif user_input.lower() == '!memory-stats':
-                try:
-                    # Get vector store stats
-                    store = chat.memory_manager
-                    store_stats = store.get_stats() if store else {"total_items": 0, "active_items": 0}
-
-                    # Get memory manager state
-                    auto_memorize = chat.memory_manager.auto_memorize if hasattr(chat.memory_manager, 'auto_memorize') else False
-
-                    print(f"\n{chat.get_time()} Memory System Statistics:")
-                    print(f"{chat.get_time()} Total memories: {store_stats.get('total_items', 0)}")
-                    print(f"{chat.get_time()} Active memories: {store_stats.get('active_items', 0)}")
-                    print(f"{chat.get_time()} Auto-memorize: {'Enabled' if auto_memorize else 'Disabled'}")
-
-                    # Add additional statistics from the store if available
-                    if hasattr(store, 'get_stats') and callable(store.get_stats):
-                        try:
-                            # Include more stats if they're available and informative
-                            if 'index_dimension' in store_stats:
-                                print(f"{chat.get_time()} Embedding dimension: {store_stats.get('index_dimension', 384)}")
-                            if 'deleted_documents' in store_stats:
-                                print(f"{chat.get_time()} Deleted memories: {store_stats.get('deleted_documents', 0)}")
-                            # Show when the last store update happened
-                            if 'last_updated' in store_stats:
-                                print(f"{chat.get_time()} Last updated: {store_stats.get('last_updated', 'never')}")
-                        except Exception:
-                            # Ignore errors in additional stats
-                            pass
-
-                except Exception as e:
-                    print(f"{chat.get_time()} Unexpected error when getting memory stats: {str(e)}")
-                continue
-
-            elif user_input.lower() == '!fractal-diagnostics':
-                store = chat.memory_manager
-                if hasattr(store, 'print_fractal_embedding_diagnostics'):
-                    store.print_fractal_embedding_diagnostics()
-                else:
-                    print(f"{chat.get_time()} Fractal diagnostics not available.")
-                continue
-
-            elif user_input.lower().startswith('!compare-queries:'):
-                try:
-                    # Extract the two queries
-                    _, query_part = user_input.split(':', 1)
-                    query1, query2 = query_part.split('|')
-                    query1 = query1.strip()
-                    query2 = query2.strip()
-
-                    # Call the semantic reasoning function
-                    if hasattr(chat, 'test_semantic_relationship'):
-                        relationship = chat.test_semantic_relationship(query1, query2)
-                        print(f"\n{chat.get_time()} Semantic relationship between the queries: {relationship}")
-                    else:
-                        print(f"\n{chat.get_time()} Semantic reasoning capability not available. Run the finetuning first.")
-                except Exception as e:
-                    print(f"\n{chat.get_time()} Error comparing queries: {e}")
-                    print(f"{chat.get_time()} Usage: !compare-queries: first query | second query")
-                continue
-
-            elif user_input.lower() == '!spec-stats':
-                if hasattr(chat, 'spec_decoder') and chat.spec_decoder:
-                    stats = chat.spec_decoder.get_stats_summary()
-                    print(f"\n{chat.get_time()} Speculative Decoding Statistics:")
-                    for key, value in stats.items():
-                        print(f"  {key}: {value}")
-                else:
-                    print("Speculative decoding not initialized")
                 continue
 
             elif user_input.lower() == '!toggle-draft':
@@ -2299,120 +1287,72 @@ def main():
                 print(f"{chat.get_time()} Draft model {'enabled' if is_enabled else 'disabled'}")
                 continue
 
+            elif user_input.lower().startswith('!enhance-factor:'):
+                try:
+                    factor = float(user_input.split(':')[1].strip())
+                    if 0.0 <= factor <= 1.0:
+                        chat.set_similarity_enhancement(factor)
+                        # Update response filter too
+                        response_filter.sharpening_factor = factor
+                    else:
+                        print(f"{chat.get_time()} Factor must be between 0.0 and 1.0")
+                except Exception as e:
+                    print(f"{chat.get_time()} Invalid value: {e}")
+                continue
+
+            elif user_input.lower() == '!toggle-filter':
+                filter_enabled = not filter_enabled
+                print(f"{chat.get_time()} Response filtering {'enabled' if filter_enabled else 'disabled'}")
+                continue
+
+            elif user_input.lower() == '!memory-stats':
+                stats = chat.memory_manager.get_stats()
+                print(f"\n{chat.get_time()} Memory Statistics:")
+                print(f"  Total items: {stats['total_items']}")
+                print(f"  Active items: {stats['active_items']}")
+                print(f"  Items added this session: {chat.memory_stats['items_added']}")
+                print(f"  Retrievals this session: {chat.memory_stats['retrievals']}")
+                print(f"  Enhanced embeddings: {'Enabled' if stats['enhanced_enabled'] else 'Disabled'}")
+                continue
+
             # Add user message to conversation
             user_message = {"role": "user", "content": user_input}
             conversation.append(user_message)
 
             # Generate response
-            try:
-                # Measure generation time
-                start_time = time.time()
-                chat.stop_event.clear()  # Reset the event
+            start_time = time.time()
 
-                # Generate response
-                response = chat.generate_with_memory(
-                    conversation,
-                    temperature=args.temperature,
-                    max_new_tokens=args.max_tokens,
-                    turbo_mode=turbo_mode,
-                    show_confidence=show_confidence,
-                    response_filter=response_filter if filter_enabled else None  # Pass the filter only if enabled
-                )
+            response = chat.chat(
+                messages=conversation,
+                max_new_tokens=args.max_tokens,
+                temperature=args.temperature,
+                show_confidence=show_confidence,
+                response_filter=response_filter if filter_enabled else None
+            )
 
-                # Add a newline after streaming output is complete
-                # print("...")
+            # Add assistant response to conversation
+            assistant_message = {"role": "assistant", "content": response}
+            conversation.append(assistant_message)
 
-                # Report generation time and calculate tokens per second
-                end_time = time.time()
-                generation_time = max(0.01, end_time - start_time)
+            # Calculate tokens and timing
+            generation_time = time.time() - start_time
+            token_count = len(response.split())
+            tokens_per_second = token_count / max(0.01, generation_time)
 
-                if response:
-                    chat.ensure_metrics(len(response.split()))
+            # Display generation stats
+            print(f"\n{chat.get_time()} Generated ~{token_count} tokens in {generation_time:.2f}s ({tokens_per_second:.1f} tokens/sec)")
 
-                # Get confidence metrics
-                confidence_data = chat.confidence_metrics.get_metrics(apply_sharpening=chat.memory_manager.use_fractal)
+    except KeyboardInterrupt:
+        print(f"\n{chat.get_time()} Exiting due to keyboard interrupt...")
 
-                # Apply filtering only if enabled
-                if filter_enabled:
-                    filtered_response = response_filter.filter_response(
-                        response,
-                        confidence_data,
-                        query=user_input,
-                        preserve_mcp=True,
-                        allow_override=True
-                    )
-
-                    # Check if response was filtered and print notification
-                    if filtered_response != response:
-                        response = filtered_response
-
-                        # PRINT THE FILTERED RESPONSE HERE with legend
-                        if show_confidence:
-                            # Show confidence legend and add separator for clarity
-                            heatmap = TerminalHeatmap(tokenizer=None, use_background=False, color_scheme="sepia-red")
-                            heatmap.print_legend()
-                            # print(f"\n{chat.get_time()} Filtered response:")
-
-                    else:
-                        # If not filtered, print the original response
-                        # (This is already happening in the stream)
-                        pass
-
-                    # Update user context
-                    response_filter.update_user_context(user_input, response, confidence_data)
-                else:
-                    filtered_response = response  # Use original response if filtering disabled
-
-                # First, check if this is a follow-up to a previously uncertain response
-                current_query = user_input.lower()
-
-                assistant_message = {"role": "assistant", "content": filtered_response}
-                conversation.append(assistant_message)
-
-                # Estimate tokens generated
-                try:
-                    # Calculate metrics on the clean response
-                    response_tokens, tokens_per_second = chat.calculate_response_metrics(response, generation_time)
-
-                    chat.print_generation_metrics(
-                        # {
-                        #     'quality': quality,
-                        #     'confidence': confidence_data.get('confidence', 0),
-                        #     'perplexity': confidence_data.get('perplexity', 0),
-                        #     'entropy': confidence_data.get('entropy', 0)
-                        # },
-                        confidence_data,
-                        generation_time,
-                        response_tokens,
-                        show_all_metrics
-                    )
-                except Exception as e:
-                    print(f"{chat.get_time()} stupid error {e}")
-                    # Fallback to maximum tokens estimate
-                    if args.max_tokens > 0:
-                        tokens_per_second = args.max_tokens / generation_time
-                        print(f"{chat.get_time()} [Generated in {generation_time:.2f}s - ~{tokens_per_second:.1f} tokens/sec | Confidence: {confidence_data['confidence']:.2f}]")
-
-                chat.add_conversation_to_memory(user_input, filtered_response)
-
-            except Exception as e:
-                print(f"{chat.get_time()} Error generating response (probably cancelled): {e}")
-
-            # finally:
-            #     chat.cleanup()
-
-    # except KeyboardInterrupt:
-    #     print(f"\n{chat.get_time()} Exiting due to keyboard interrupt...")
-    #     if torch.cuda.is_available():
-    #         torch.cuda.empty_cache()
     except Exception as e:
         print(f"\n{chat.get_time()} Unexpected error: {e}")
         import traceback
         traceback.print_exc()
+
     finally:
-        # This should only happen when exiting the program
+        # Final cleanup
         chat.cleanup()
 
 if __name__ == "__main__":
     main()
-
