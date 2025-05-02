@@ -13,6 +13,7 @@ import hashlib
 import threading
 import pickle
 import gc
+import traceback
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Callable, Union, TypeVar, Generic
 
@@ -381,6 +382,63 @@ class MemoryManager:
 
                 return result_ids
 
+    def _resize_all_embeddings(self, old_dim, new_dim):
+        """
+        Resize all embeddings to match the new dimension.
+
+        Args:
+            old_dim: Original dimension
+            new_dim: Target dimension
+        """
+        print(f"{self.get_time()} Resizing all embeddings from {old_dim}D to {new_dim}D")
+
+        # Resize base embeddings
+        for i, item in enumerate(self.items):
+            if len(item.embedding) != new_dim:
+                # Resize embedding
+                if len(item.embedding) > new_dim:
+                    # Truncate
+                    new_embedding = item.embedding[:new_dim]
+                else:
+                    # Pad with zeros
+                    new_embedding = np.pad(item.embedding, (0, new_dim - len(item.embedding)))
+
+                # Normalize
+                norm = np.linalg.norm(new_embedding)
+                if norm > 1e-10:
+                    new_embedding = new_embedding / norm
+
+                # Update embedding
+                item.embedding = new_embedding
+                self.embeddings[i] = new_embedding
+
+        # Resize enhanced embeddings
+        for item in self.items:
+            if hasattr(item, 'additional_embeddings') and item.additional_embeddings:
+                resized_embeddings = {}
+                for level, embedding in item.additional_embeddings.items():
+                    if len(embedding) != new_dim:
+                        # Resize embedding
+                        if len(embedding) > new_dim:
+                            # Truncate
+                            new_embedding = embedding[:new_dim]
+                        else:
+                            # Pad with zeros
+                            new_embedding = np.pad(embedding, (0, new_dim - len(embedding)))
+
+                        # Normalize
+                        norm = np.linalg.norm(new_embedding)
+                        if norm > 1e-10:
+                            new_embedding = new_embedding / norm
+
+                        resized_embeddings[level] = new_embedding
+                    else:
+                        resized_embeddings[level] = embedding
+
+                # Update enhanced embeddings
+                item.additional_embeddings = resized_embeddings
+
+        print(f"{self.get_time()} All embeddings resized to {new_dim}D")
     def _initialize_enhancement_matrices(self):
         """
         Initialize matrices for enhanced embeddings with proper dimension detection.
@@ -434,6 +492,89 @@ class MemoryManager:
             np.random.seed(137 + i)
             bias_factor = 0.01 + (i * 0.002)
             self._level_biases[i] = np.random.normal(0, bias_factor, (embedding_dim,))
+
+    def _load_enhanced_embeddings(self):
+        """Load enhanced embeddings if available."""
+        if not self.enable_enhanced_embeddings:
+            return
+
+        enhanced_path = os.path.join(self.storage_path, "enhanced_embeddings.pkl")
+        if not os.path.exists(enhanced_path):
+            print(f"{self.get_time()} No enhanced embeddings found")
+            return
+
+        try:
+            print(f"{self.get_time()} Loading enhanced embeddings...")
+            with open(enhanced_path, 'rb') as f:
+                enhanced_data = pickle.load(f)
+
+            # Initialize enhancement matrices with current dimension
+            self._initialize_enhancement_matrices()
+
+            # Check for dimension mismatch
+            need_migration = False
+            old_dim = None
+
+            # Check the first item to determine dimension
+            if enhanced_data:
+                first_id = next(iter(enhanced_data))
+                first_item = enhanced_data[first_id]
+                if first_item:
+                    first_level = next(iter(first_item))
+                    if first_level in first_item:
+                        level_embedding = first_item[first_level]
+                        old_dim = level_embedding.shape[0]
+                        if old_dim != self.embedding_dim:
+                            print(f"{self.get_time()} Enhanced embedding dimension mismatch: {old_dim} vs {self.embedding_dim}")
+                            need_migration = True
+
+            # Process enhanced embeddings
+            loaded_count = 0
+            migrated_count = 0
+            for item_id, item_enhanced in enhanced_data.items():
+                if item_id in self.id_to_index:
+                    idx = self.id_to_index[item_id]
+
+                    # Check if item needs migration
+                    if need_migration:
+                        migrated_embeddings = {}
+                        for level, embedding in item_enhanced.items():
+                            # Migrate embedding dimension
+                            if len(embedding) != self.embedding_dim:
+                                if len(embedding) > self.embedding_dim:
+                                    # Truncate
+                                    new_embedding = embedding[:self.embedding_dim]
+                                else:
+                                    # Pad
+                                    new_embedding = np.pad(embedding, (0, self.embedding_dim - len(embedding)))
+
+                                # Normalize
+                                norm = np.linalg.norm(new_embedding)
+                                if norm > 1e-10:
+                                    new_embedding = new_embedding / norm
+
+                                migrated_embeddings[level] = new_embedding
+                                migrated_count += 1
+                            else:
+                                migrated_embeddings[level] = embedding
+
+                        # Save migrated embeddings
+                        self.items[idx].additional_embeddings = migrated_embeddings
+                    else:
+                        # No migration needed
+                        self.items[idx].additional_embeddings = item_enhanced
+
+                    loaded_count += 1
+
+            print(f"{self.get_time()} Loaded {loaded_count} enhanced embeddings, migrated {migrated_count}")
+
+            # Rebuild enhanced indices if needed
+            if loaded_count > 0:
+                self._rebuild_enhanced_indices()
+
+        except Exception as e:
+            print(f"{self.get_time()} Error loading enhanced embeddings: {e}")
+            traceback.print_exc()
 
     def _add_enhanced_embeddings(self, item: MemoryItem):
         """
@@ -552,6 +693,18 @@ class MemoryManager:
                 print(f"{self.get_time()} Error creating index: {e}")
                 return None
 
+        # Check embedding dimension matches index
+        if len(item.embedding) != self.embedding_dim:
+            print(f"{self.get_time()} Embedding dimension mismatch: {len(item.embedding)} vs {self.embedding_dim}")
+
+            # Resize embedding to match index
+            if len(item.embedding) > self.embedding_dim:
+                item.embedding = item.embedding[:self.embedding_dim]
+            else:
+                item.embedding = np.pad(item.embedding, (0, self.embedding_dim - len(item.embedding)))
+
+            print(f"{self.get_time()} Resized embedding to match index dimension")
+            
         # Normalize embedding for cosine similarity
         try:
             embedding_norm = np.linalg.norm(item.embedding)
@@ -599,13 +752,23 @@ class MemoryManager:
 
         except Exception as e:
             print(f"{self.get_time()} Error adding item to store: {e}")
+            traceback.print_exc()
             return None
 
     def _create_index(self, dim: int = None):
         """Create a new FAISS index with the specified dimension."""
+        # Update dimension if provided
         if dim is not None:
             self.embedding_dim = dim
+
+        # Free old index if it exists
+        if hasattr(self, 'index') and self.index is not None:
+            del self.index
+
+        # Create new index with current dimension
         self.index = faiss.IndexFlatIP(self.embedding_dim)  # Inner product (cosine on normalized vectors)
+
+        print(f"{self.get_time()} Created new FAISS index with dimension {self.embedding_dim}")
 
     def _enhance_similarity(self, similarity: float) -> float:
         """
@@ -810,6 +973,43 @@ class MemoryManager:
 
         # Limit to top-k
         return results[:top_k]
+
+    def _rebuild_enhanced_indices(self):
+        """Rebuild FAISS indices for enhanced embeddings."""
+        if not self.enable_enhanced_embeddings:
+            return
+
+        # Initialize new indices
+        self.enhanced_indices = {}
+
+        # Collect levels from all items
+        levels = set()
+        for item in self.items:
+            levels.update(item.additional_embeddings.keys())
+
+        # Create index for each level
+        for level in levels:
+            print(f"{self.get_time()} Building index for enhancement level {level}")
+
+            # Create new index
+            self.enhanced_indices[level] = faiss.IndexFlatIP(self.embedding_dim)
+
+            # Collect embeddings for this level
+            level_embeddings = []
+            for item in self.items:
+                if level in item.additional_embeddings:
+                    embedding = item.additional_embeddings[level]
+                    # Normalize
+                    norm = np.linalg.norm(embedding)
+                    if norm > 1e-10:
+                        embedding = embedding / norm
+                    level_embeddings.append(embedding)
+
+            # Add to index if we have any
+            if level_embeddings:
+                self.enhanced_indices[level].add(np.array(level_embeddings, dtype=np.float32))
+
+            print(f"{self.get_time()} Level {level} index created with {self.enhanced_indices[level].ntotal} vectors")
 
     def _enhanced_search(self, query_embedding: np.ndarray, top_k: int, min_similarity: float) -> List[Dict[str, Any]]:
         """
@@ -1128,27 +1328,27 @@ class MemoryManager:
             return True
 
     def _rebuild_index(self):
-        """Rebuild the FAISS indices after updates."""
-        # Create new indices
-        self.index = faiss.IndexFlatIP(self.embedding_dim)
-        self.enhanced_indices = {}
+        """Rebuild the FAISS index with current embeddings."""
+        if not self.embeddings:
+            print(f"{self.get_time()} No embeddings to index")
+            self._create_index()
+            return
 
-        # Add all non-deleted items
-        for i, item in enumerate(self.items):
-            if i not in self.deleted_ids:
-                # Add to main index
-                normalized_embedding = item.embedding / max(np.linalg.norm(item.embedding), 1e-10)
-                self.index.add(np.array([normalized_embedding], dtype=np.float32))
+        print(f"{self.get_time()} Rebuilding index for {len(self.embeddings)} items...")
 
-                # Add to enhanced indices
-                if item.additional_embeddings:
-                    for level, level_embedding in item.additional_embeddings.items():
-                        normalized_level_embedding = level_embedding / max(np.linalg.norm(level_embedding), 1e-10)
+        # Create new index
+        self._create_index()
 
-                        if level not in self.enhanced_indices:
-                            self.enhanced_indices[level] = faiss.IndexFlatIP(self.embedding_dim)
+        # Add embeddings in batches to avoid memory issues
+        batch_size = 1000
+        for i in range(0, len(self.embeddings), batch_size):
+            batch = self.embeddings[i:i+batch_size]
+            try:
+                self.index.add(np.array(batch, dtype=np.float32))
+            except Exception as e:
+                print(f"{self.get_time()} Error adding batch to index: {e}")
 
-                        self.enhanced_indices[level].add(np.array([normalized_level_embedding], dtype=np.float32))
+        print(f"{self.get_time()} Index rebuilt with {self.index.ntotal} vectors")
 
     def save(self) -> bool:
         """
@@ -1225,57 +1425,113 @@ class MemoryManager:
             start_time = time.time()
             print(f"{self.get_time()} Starting memory load...")
 
-            # Check for cache file first
+            # First load metadata to determine configuration
+            metadata_path = os.path.join(self.storage_path, "metadata.json")
+            old_embedding_dim = None
+            need_migration = False
+
+            if os.path.exists(metadata_path):
+                try:
+                    with open(metadata_path, 'r') as f:
+                        metadata = json.load(f)
+                    old_embedding_dim = metadata.get('embedding_dim')
+
+                    # Check if dimension migration is needed
+                    if old_embedding_dim and old_embedding_dim != self.embedding_dim:
+                        print(f"{self.get_time()} Embedding dimension changed: {old_embedding_dim} → {self.embedding_dim}")
+                        print(f"{self.get_time()} Will perform dimension migration during load")
+                        need_migration = True
+                except Exception as e:
+                    print(f"{self.get_time()} Error reading metadata: {e}")
+
+            # Check for cache with migration support
             cache_path = os.path.join(self.storage_path, "quickstart_cache.pkl")
 
-            # Try to load from cache
-            if os.path.exists(cache_path):
+            # Try loading from cache
+            if os.path.exists(cache_path) and not need_migration:  # Skip cache if migration needed
                 try:
                     print(f"{self.get_time()} Found quickstart cache, loading...")
                     with open(cache_path, 'rb') as f:
                         cache_data = pickle.load(f)
 
-                    # Get cache timestamp and item count
-                    cache_timestamp = cache_data.get('timestamp', 0)
-                    cached_item_count = len(cache_data.get('items', []))
+                    # Check if cache is using current embedding dimension
+                    cached_dim = cache_data.get('embedding_dim')
+                    if cached_dim != self.embedding_dim:
+                        print(f"{self.get_time()} Cache embedding dimension mismatch: {cached_dim} vs {self.embedding_dim}")
+                        print(f"{self.get_time()} Falling back to full load with migration")
+                        return self._full_load(need_migration=True, old_embedding_dim=cached_dim)
 
-                    # Load core data from cache
-                    self.items = cache_data.get('items', [])
-                    self.id_to_index = cache_data.get('id_to_index', {})
-                    self.deleted_ids = set(cache_data.get('deleted_ids', []))
-                    self.embedding_dim = cache_data.get('embedding_dim', self.embedding_dim)
-                    self.enable_enhanced_embeddings = cache_data.get('enable_enhanced_embeddings',
-                                                                    self.enable_enhanced_embeddings)
+                    # Load items from cache if available
+                    if 'lite_items' in cache_data:
+                        print(f"{self.get_time()} Loading {len(cache_data['lite_items'])} items from cache")
 
-                    # Load FAISS index from cache
-                    self.index = cache_data.get('index')
+                        # Reset storage
+                        self.items = []
+                        self.embeddings = []
 
-                    # Cache load complete
-                    cache_load_time = time.time() - start_time
-                    print(f"{self.get_time()} Quick cache loaded {cached_item_count} items in {cache_load_time:.2f}s")
+                        # Load ID mapping
+                        self.id_to_index = cache_data.get('id_to_index', {})
+                        self.deleted_ids = set(cache_data.get('deleted_ids', []))
 
-                    # Start background loading for complete data
-                    thread = threading.Thread(
-                        target=self._background_full_load,
-                        args=(cache_timestamp,),
-                        daemon=True
-                    )
-                    thread.start()
+                        # We'll load full embeddings in the background
+                        # For now, create placeholder items with random temp embeddings
+                        for lite_item in cache_data['lite_items']:
+                            # Create temporary embedding
+                            temp_embedding = np.random.randn(self.embedding_dim).astype(np.float32)
+                            temp_embedding = temp_embedding / np.linalg.norm(temp_embedding)
 
-                    return True
+                            # Create memory item
+                            item = MemoryItem(
+                                content=lite_item['content'],
+                                embedding=temp_embedding,
+                                metadata=lite_item['metadata']
+                            )
+                            # Ensure ID matches original
+                            item.id = lite_item['id']
+
+                            # Add to storage
+                            self.items.append(item)
+                            self.embeddings.append(temp_embedding)
+
+                        # Try to load the separate index file
+                        if cache_data.get('has_index', False):
+                            index_path = os.path.join(self.storage_path, "cache_index.faiss")
+                            if os.path.exists(index_path):
+                                try:
+                                    self.index = faiss.read_index(index_path)
+                                    print(f"{self.get_time()} Loaded FAISS index with {self.index.ntotal} vectors")
+                                except Exception as e:
+                                    print(f"{self.get_time()} Error loading cached index: {e}")
+                                    # Create empty index
+                                    self._create_index()
+                            else:
+                                # Create empty index
+                                self._create_index()
+                        else:
+                            # Create empty index
+                            self._create_index()
+
+                        # Cache load complete
+                        cache_load_time = time.time() - start_time
+                        item_count = len(self.items)
+                        print(f"{self.get_time()} Quick cache loaded {item_count} item metadata in {cache_load_time:.2f}s")
+
+                        # Start background loading for complete data
+                        thread = threading.Thread(
+                            target=self._background_full_load,
+                            args=(cache_data.get('timestamp', 0),),
+                            daemon=True
+                        )
+                        thread.start()
+
+                        return True
 
                 except Exception as e:
                     print(f"{self.get_time()} Error loading from cache: {e}, falling back to full load")
                     # Fall back to full load
 
-            # No cache or cache failed, do full load
-            success = self._full_load()
-
-            # If full load succeeded, create a cache for next time
-            if success:
-                self._create_quickstart_cache()
-
-            return success
+        # Proceed with full load with migration support
+        return self._full_load(need_migration=need_migration, old_embedding_dim=old_embedding_dim)
 
     def _background_full_load(self, cache_timestamp: float):
         """
@@ -1328,86 +1584,110 @@ class MemoryManager:
             print(f"{self.get_time()} Trying to create quickstart cache")
             cache_path = os.path.join(self.storage_path, "quickstart_cache.pkl")
 
-            # Check if directory exists and is writable
-            if not os.path.exists(self.storage_path):
-                print(f"{self.get_time()} Storage directory doesn't exist, creating...")
-                os.makedirs(self.storage_path, exist_ok=True)
-
-            # Test write permission
-            test_path = os.path.join(self.storage_path, "write_test.tmp")
-            try:
-                with open(test_path, 'w') as f:
-                    f.write("test")
-                os.remove(test_path)
-            except Exception as perm_e:
-                print(f"{self.get_time()} ERROR: Cannot write to storage directory: {perm_e}")
-                return False
-
-            # Prepare cache data
+            # Create basic data dict
             cache_data = {
                 'timestamp': time.time(),
-                'items': self.items,
-                'id_to_index': self.id_to_index,
-                'deleted_ids': list(self.deleted_ids),
                 'embedding_dim': self.embedding_dim,
-                'enable_enhanced_embeddings': self.enable_enhanced_embeddings
+                'item_count': len(self.items),
+                'deleted_count': len(self.deleted_ids)
             }
 
-            # Add index separately as it might not be serializable
-            try:
-                # First test if FAISS index is serializable
-                temp_index_path = os.path.join(self.storage_path, "temp_index.faiss")
-                if self.index is not None:
-                    faiss.write_index(self.index, temp_index_path)
-                    # If successful, include index in cache
-                    cache_data['index'] = self.index
-                    os.remove(temp_index_path)
-                else:
-                    print(f"{self.get_time()} WARNING: No index to cache")
-            except Exception as index_e:
-                print(f"{self.get_time()} Warning: Cannot serialize FAISS index: {index_e}")
-                cache_data['index'] = None
-
-            # Try to save cache with increasing levels of fallback
-            try:
-                print(f"{self.get_time()} Creating quickstart cache for {len(self.items)} items...")
-                with open(cache_path, 'wb') as f:
-                    pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-                cache_size = os.path.getsize(cache_path) / (1024 * 1024)  # Size in MB
-                print(f"{self.get_time()} Quickstart cache created ({cache_size:.1f} MB)")
-                return True
-            except Exception as pickle_e:
-                print(f"{self.get_time()} Failed to pickle full cache: {pickle_e}")
-
-                # Try with minimal data
+            # Don't try to pickle the FAISS index - it's not reliably serializable
+            # Instead, save a separate FAISS index file
+            if self.index and self.index.ntotal > 0:
+                index_path = os.path.join(self.storage_path, "cache_index.faiss")
                 try:
-                    minimal_data = {
-                        'timestamp': time.time(),
-                        'item_count': len(self.items),
-                        'embedding_dim': self.embedding_dim
+                    faiss.write_index(self.index, index_path)
+                    cache_data['has_index'] = True
+                    print(f"{self.get_time()} Saved FAISS index to {index_path}")
+                except Exception as e:
+                    print(f"{self.get_time()} Warning: Could not save FAISS index: {e}")
+                    cache_data['has_index'] = False
+            else:
+                print(f"{self.get_time()} WARNING: No index to cache")
+                cache_data['has_index'] = False
+
+            # Add items (but without embeddings to save space)
+            try:
+                lite_items = []
+                for item in self.items:
+                    # Create a lightweight version without embeddings
+                    lite_item = {
+                        'id': item.id,
+                        'content': item.content,
+                        'metadata': item.metadata
                     }
-                    with open(cache_path, 'wb') as f:
-                        pickle.dump(minimal_data, f)
-                    print(f"{self.get_time()} Created minimal cache (metadata only)")
-                    return True
-                except Exception as min_e:
-                    print(f"{self.get_time()} All cache creation attempts failed: {min_e}")
-                    return False
+                    lite_items.append(lite_item)
+
+                cache_data['lite_items'] = lite_items
+                cache_data['id_to_index'] = self.id_to_index
+                cache_data['deleted_ids'] = list(self.deleted_ids)
+            except Exception as e:
+                print(f"{self.get_time()} Error creating lightweight items: {e}")
+                # Continue anyway - we'll still save basic metadata
+
+            # Save cache
+            with open(cache_path, 'wb') as f:
+                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            cache_size = os.path.getsize(cache_path) / (1024 * 1024)  # Size in MB
+            print(f"{self.get_time()} Quickstart cache created ({cache_size:.1f} MB)")
+            return True
 
         except Exception as e:
             print(f"{self.get_time()} Error creating quickstart cache: {e}")
             traceback.print_exc()
             return False
 
-    def _full_load(self) -> bool:
+    def _migrate_embeddings(self, embeddings, old_dim, new_dim):
         """
-        Perform a full load of all memory data.
+        Migrate embeddings from old dimension to new dimension.
+
+        Args:
+            embeddings: Array of embeddings
+            old_dim: Original dimension
+            new_dim: Target dimension
+
+        Returns:
+            Migrated embeddings
+        """
+        print(f"{self.get_time()} Migrating {len(embeddings)} embeddings from {old_dim}D to {new_dim}D")
+
+        migrated_embeddings = []
+
+        for i, emb in enumerate(embeddings):
+            # Create new embedding with adjusted dimension
+            if new_dim > old_dim:
+                # Padding approach
+                new_emb = np.pad(emb, (0, new_dim - old_dim))
+            else:
+                # Truncation approach
+                new_emb = emb[:new_dim]
+
+            # Normalize after resizing
+            norm = np.linalg.norm(new_emb)
+            if norm > 1e-10:
+                new_emb = new_emb / norm
+
+            migrated_embeddings.append(new_emb)
+
+            # Show progress for large migrations
+            if (i+1) % 1000 == 0 or i+1 == len(embeddings):
+                print(f"{self.get_time()} Migrated {i+1}/{len(embeddings)} embeddings")
+
+        return np.array(migrated_embeddings)
+
+    def _full_load(self, need_migration=False, old_embedding_dim=None) -> bool:
+        """
+        Perform a full load of all memory data with migration support.
+
+        Args:
+            need_migration: Whether dimension migration is needed
+            old_embedding_dim: Old embedding dimension if migration needed
 
         Returns:
             Success status
         """
-        # This is basically the original load method
         start_time = time.time()
         print(f"{self.get_time()} Starting full memory load...")
 
@@ -1419,16 +1699,82 @@ class MemoryManager:
             return False
 
         try:
-            # Rest of original load method...
-            # (Copy the existing load method here, renaming it to _full_load)
+            # Load items data
+            with open(items_path, 'r', encoding='utf-8') as f:
+                items_data = json.load(f)
 
-            print(f"{self.get_time()} Full memory load complete in {time.time() - start_time:.2f}s")
-            print(f"{self.get_time()} Loaded {len(self.items)} items, {len(self.items) - len(self.deleted_ids)} active")
+            print(f"{self.get_time()} Found {len(items_data)} items in storage")
+
+            # Load embeddings with migration support
+            try:
+                embeddings = np.load(embeddings_path)
+                print(f"{self.get_time()} Loaded {len(embeddings)} embeddings")
+
+                # Check if dimensions match
+                if len(embeddings) > 0:
+                    actual_dim = embeddings[0].shape[0]
+                    if actual_dim != self.embedding_dim:
+                        print(f"{self.get_time()} Embedding dimension mismatch: {actual_dim} vs {self.embedding_dim}")
+                        if need_migration:
+                            print(f"{self.get_time()} Performing dimension migration...")
+                            embeddings = self._migrate_embeddings(embeddings, actual_dim, self.embedding_dim)
+                        else:
+                            print(f"{self.get_time()} WARNING: Dimension mismatch but migration not requested")
+                            # Continue anyway - we'll resize embeddings as we load them
+            except Exception as e:
+                print(f"{self.get_time()} Error loading embeddings: {e}")
+                return False
+
+            # Initialize storage
+            self.items = []
+            self.embeddings = []
+            self.id_to_index = {}
+
+            # Process items with dimension handling
+            for i, item_data in enumerate(items_data):
+                try:
+                    # Get embedding with dimension handling
+                    if i < len(embeddings):
+                        embedding = embeddings[i]
+
+                        # Check dimension and resize if needed
+                        if len(embedding) != self.embedding_dim:
+                            if len(embedding) > self.embedding_dim:
+                                # Truncate
+                                embedding = embedding[:self.embedding_dim]
+                            else:
+                                # Pad with zeros
+                                embedding = np.pad(embedding, (0, self.embedding_dim - len(embedding)))
+                    else:
+                        # Create random embedding if no embedding available
+                        print(f"{self.get_time()} No embedding for item {i}, creating random one")
+                        embedding = np.random.randn(self.embedding_dim).astype(np.float32)
+                        embedding = embedding / np.linalg.norm(embedding)
+
+                    # Create memory item
+                    item = MemoryItem.from_dict(item_data, embedding)
+
+                    # Add to storage
+                    self.items.append(item)
+                    self.embeddings.append(embedding)
+                    self.id_to_index[item.id] = len(self.items) - 1
+
+                except Exception as e:
+                    print(f"{self.get_time()} Error processing item {i}: {e}")
+
+            # Create or load FAISS index
+            self._rebuild_index()
+
+            # Load enhanced embeddings if available
+            self._load_enhanced_embeddings()
+
+            print(f"{self.get_time()} Memory load complete: {len(self.items)} items loaded in {time.time() - start_time:.2f}s")
             return True
 
         except Exception as e:
             print(f"{self.get_time()} Error in full memory load: {e}")
-        return False
+            traceback.print_exc()
+            return False
 
     def _load_indices_optimized(self, batch_utils_available: bool = False):
         """Load FAISS indices with optimization for large collections."""

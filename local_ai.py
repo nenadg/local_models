@@ -16,6 +16,7 @@ import tty
 import signal
 import select
 import hashlib
+import traceback
 
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
@@ -220,11 +221,27 @@ class MemoryEnhancedChat:
             print(f"{self.get_time()} Detected embedding dimension: {embedding_dim}")
 
             # Update memory manager's embedding dimension
+            # Update memory manager's embedding dimension
             if hasattr(self.memory_manager, 'embedding_dim'):
                 if self.memory_manager.embedding_dim != embedding_dim:
                     print(f"{self.get_time()} Updating memory manager embedding dimension: "
                           f"{self.memory_manager.embedding_dim} → {embedding_dim}")
+
+                    # Store old dimension for migration
+                    old_dim = self.memory_manager.embedding_dim
+
+                    # Update dimension
                     self.memory_manager.embedding_dim = embedding_dim
+
+                    # Important: Rebuild index with new dimension
+                    if hasattr(self.memory_manager, 'items') and self.memory_manager.items:
+                        print(f"{self.get_time()} Rebuilding memory index for new dimension")
+
+                        # Resize all existing embeddings
+                        self.memory_manager._resize_all_embeddings(old_dim, embedding_dim)
+
+                        # Rebuild the index
+                        self.memory_manager._rebuild_index()
         except Exception as e:
             print(f"{self.get_time()} Error detecting embedding dimension: {e}")
             embedding_dim = 2048  # Fall back to TinyLlama's dimension
@@ -735,7 +752,6 @@ class MemoryEnhancedChat:
             return "Generation interrupted."
         except Exception as e:
             print(f"\n{self.get_time()} Error during generation: {e}")
-            import traceback
             traceback.print_exc()
             return f"Error during generation: {str(e)}"
 
@@ -898,6 +914,7 @@ class MemoryEnhancedChat:
             return messages
         except Exception as e:
             print(f"{self.get_time()} Error integrating memory: {e}")
+            traceback.print_exc()
             return messages
 
     def _save_to_memory(self, query: str, response: str) -> bool:
@@ -1093,7 +1110,6 @@ class MemoryEnhancedChat:
 
         except Exception as e:
             print(f"{self.get_time()} Error in generation thread: {str(e)}")
-            import traceback
             traceback.print_exc()
             try:
                 streamer.end()
@@ -1607,7 +1623,6 @@ def main():
 
     except Exception as e:
         print(f"\n{chat.get_time()} Unexpected error: {e}")
-        import traceback
         traceback.print_exc()
 
     finally:
