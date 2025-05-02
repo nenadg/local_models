@@ -472,7 +472,6 @@ class TinyLlamaChat:
 
             print(f"{self.get_time()} Sharpening factor set to {sharpening_factor}")
 
-
     def set_embedding_function(self):
         """
         Set up an optimized embedding function for the memory manager with batching support.
@@ -749,6 +748,21 @@ class TinyLlamaChat:
             # Shouldn't happen, but just in case
             print(f"{self.get_time()} Draft model status unchanged")
             return self.use_draft_model
+
+    def toggle_auto_memorize(self):
+        """Toggle automatic memorization on/off"""
+        self.auto_memorize = not self.auto_memorize
+        return self.auto_memorize
+
+    def toggle_sharpening(self):
+        """Toggle vector space sharpening on/off"""
+        new_state = not self.memory_manager.use_fractal
+        self.set_memory_parameters(use_fractal=new_state)
+        return new_state
+
+    def set_sharpening_factor(self, factor: float) -> None:
+        """Set the sharpening factor"""
+        self.set_memory_parameters(sharpening_factor=factor)
 
     def get_domain_specific_generation_config(self, query, base_config):
         """
@@ -1305,8 +1319,6 @@ class TinyLlamaChat:
             self.resource_manager.clear_cache()
             termios.tcsetattr(fd, termios.TCSADRAIN, self.old_settings)
 
-
-
     def ensure_metrics(self, response_length=None):
         """
         Ensure confidence metrics exist with reasonable values.
@@ -1345,21 +1357,6 @@ class TinyLlamaChat:
             return True
         return False
 
-    def save_conversation(self, conversation):
-        """Save the conversation for future reference"""
-        conversation_file = os.path.join(
-            self.memory_dir,
-            f"conversation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        )
-
-        try:
-            with open(conversation_file, 'w') as f:
-                json.dump(conversation, f, indent=2)
-        except Exception as e:
-            print(f"{self.get_time()} Error saving conversation: {e}")
-
-        return len(conversation)
-
     def calculate_response_metrics(self, response, generation_time):
         """
         Calculate metrics for the response, excluding boilerplate text.
@@ -1389,24 +1386,6 @@ class TinyLlamaChat:
             tokens_per_second = 0
 
         return response_tokens, tokens_per_second
-
-    def quality_score(self, confidence, perplexity=None, entropy=None, max_perplexity=10, max_entropy=3, w1=0.4, w2=0.4, w3=0.2):
-         # If all metrics are available
-        if perplexity is not None and entropy is not None:
-            # Use sigmoid function to get better distribution for perplexity
-            perplexity_score = 1 / (1 + np.exp((perplexity - 3) / 0.5))
-
-            # Use sigmoid for entropy too
-            entropy_score = 1 / (1 + np.exp((entropy - 1.5) / 0.3))
-
-            # Adjust confidence to be more critical
-            adjusted_confidence = confidence * 0.8  # Reduce the impact of inflated confidence
-
-            return (w1 * adjusted_confidence) + (w2 * perplexity_score) + (w3 * entropy_score)
-
-        # Fallback to using just confidence if other metrics aren't available
-        else:
-            return confidence
 
     def format_metric_bar(self, value, min_val=0.0, max_val=1.0, width=20, label="", reverse=False):
         """
@@ -1564,124 +1543,6 @@ class TinyLlamaChat:
 
         return memories_added
 
-    def _extract_memory_worthy_content(self, query, response):
-        """
-        Extract content worthy of memorization with improved context preservation.
-
-        Returns:
-            List of (content, memory_type) tuples
-        """
-        memories = []
-
-        # First, check if we should memorize the entire exchange
-        if len(query) <= 100 and len(response) <= 200:
-            # For short exchanges, memorize the complete Q&A
-            memories.append((f"Q: {query}\nA: {response}", "qa_pair"))
-            return memories
-
-        # For longer exchanges, extract key information
-
-        # 1. Try to extract factual statements
-        factual_pattern = r'(?:is|are|was|were|has|have|had|will be)\s+([A-Z][a-z]+\s+(?:is|are|was|were|has|have|had)\s+[^.!?]+[.!?])'
-        matches = re.findall(factual_pattern, response)
-        for match in matches:
-            if len(match) > 10 and len(match) < 200:
-                memories.append((match, "factual"))
-
-        # 2. Extract definitions
-        definition_pattern = r'([A-Z][a-z]+\s+(?:refers to|is defined as|means|is|are)\s+[^.!?]+[.!?])'
-        matches = re.findall(definition_pattern, response)
-        for match in matches:
-            if len(match) > 10 and len(match) < 200:
-                memories.append((match, "definition"))
-
-        # 3. Extract named entities
-        entity_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,5})\s+(?:is|was|were|are|has|have|had)\s+[^.!?]{10,100}[.!?]'
-        matches = re.findall(entity_pattern, response)
-        for match in matches:
-            if len(match) > 3:  # Reasonable entity name
-                # Find the complete sentence containing this entity
-                sentences = re.split(r'[.!?]', response)
-                for sentence in sentences:
-                    if match in sentence and 10 < len(sentence) < 200:
-                        memories.append((sentence.strip() + ".", "entity"))
-                        break
-
-        # 4. Extract lists and enumerations
-        lines = response.split('\n')
-        list_items = []
-        in_list = False
-        list_topic = ""
-
-        for line in lines:
-            # Check for list headers
-            if re.match(r'^[^-*\d]*:$', line) or re.match(r'^[^-*\d]*:$', line.strip()):
-                list_topic = line.strip()
-                in_list = True
-                list_items = []
-            # Check for list items
-            elif in_list and (line.strip().startswith('-') or line.strip().startswith('*') or
-                             re.match(r'^\d+\.', line.strip())):
-                list_items.append(line.strip())
-            # List ended
-            elif in_list and line.strip() and not (line.strip().startswith('-') or
-                                                  line.strip().startswith('*') or
-                                                  re.match(r'^\d+\.', line.strip())):
-                if list_topic and list_items and len(list_items) >= 2:
-                    content = f"{list_topic}\n" + "\n".join(list_items)
-                    if 20 < len(content) < 300:
-                        memories.append((content, "list"))
-                in_list = False
-
-        # 5. If no structured content found, extract key sentences
-        if not memories:
-            sentences = re.split(r'[.!?]', response)
-            key_sentences = []
-
-            for sentence in sentences:
-                sentence = sentence.strip()
-                if len(sentence) < 10:
-                    continue
-
-                # Look for sentences with informational value
-                if (re.search(r'\b(?:key|important|significant|essential|critical)\b', sentence) or
-                    re.search(r'\b(?:always|never|must|should|typically|generally)\b', sentence)):
-                    key_sentences.append(sentence + ".")
-
-            # Take the top 3 most informative sentences
-            for sentence in key_sentences[:3]:
-                if 10 < len(sentence) < 200:
-                    memories.append((sentence, "key_info"))
-
-        # De-duplicate memories
-        unique_memories = []
-        seen_content = set()
-
-        for content, memory_type in memories:
-            # Normalize to avoid near-duplicates
-            normalized = re.sub(r'\s+', ' ', content.lower())
-            if normalized not in seen_content:
-                seen_content.add(normalized)
-                unique_memories.append((content, memory_type))
-
-        # Limit total memories from a single exchange
-        return unique_memories[:10]  # Cap at 10 memories per exchange
-
-    def toggle_auto_memorize(self):
-        """Toggle automatic memorization on/off"""
-        self.auto_memorize = not self.auto_memorize
-        return self.auto_memorize
-
-    def toggle_sharpening(self):
-        """Toggle vector space sharpening on/off"""
-        new_state = not self.memory_manager.use_fractal
-        self.set_memory_parameters(use_fractal=new_state)
-        return new_state
-
-    def set_sharpening_factor(self, factor: float) -> None:
-        """Set the sharpening factor"""
-        self.set_memory_parameters(sharpening_factor=factor)
-
     def post_process_response(self, response, query, domain=None):
         """
         Clean up the response after generation.
@@ -1711,139 +1572,6 @@ class TinyLlamaChat:
 
         # General cleanup for all responses
         return self._clean_general_response(response)
-
-    def _clean_translation_response(self, response, query):
-        """Clean up translation responses"""
-        # Extract the core translation from verbose responses
-        first_line = response.split('\n')[0].strip()
-
-        # If the response has notes or explanations, keep only the essential part
-        if len(response.split('\n')) > 1:
-            # Use regex to find the translation pattern
-            match = re.search(r'["\'«]([^"\'»]+)["\'\»]\s+(?:in|en|na|в|på)\s+\w+', first_line)
-            if match:
-                translation = match.group(1).strip()
-                # Return a cleaner version
-                lang_match = re.search(r'(?:in|to|into)\s+(\w+)', query)
-                if lang_match:
-                    language = lang_match.group(1)
-                    return f'"{translation}" in {language}'
-
-        # Remove duplicated text like "Prikaz:" and redundant notes
-        response = re.sub(r'Prikaz:\s*-\s*', '', response)
-        response = re.sub(r'(?:Note|Примечание):\s*"[^"]+"\s+(?:may|peut|puede|может|kan).*?$', '', response, flags=re.MULTILINE)
-
-        # Remove duplicated translations
-        lines = response.split('\n')
-        unique_lines = []
-        seen = set()
-        for line in lines:
-            # Create a simplified key for comparison
-            simplified = re.sub(r'[^\w\s]', '', line.lower())
-            if simplified and simplified not in seen:
-                seen.add(simplified)
-                unique_lines.append(line)
-
-        return '\n'.join(unique_lines)
-
-    def _clean_arithmetic_response(self, response, query):
-        """Clean up arithmetic responses"""
-        # Extract the expression from the query
-        expression = None
-
-        if not expression:
-            # Try a simple regex fallback
-            match = re.search(r'(\d+\s*[\+\-\*\/]\s*\d+)', query)
-            if match:
-                expression = match.group(1).replace(' ', '')
-
-        if expression:
-            # Calculate the correct result
-            try:
-                correct_result = eval(expression)
-
-                # Check if the response has the correct result
-                if str(correct_result) not in response:
-                    # Replace with correct calculation
-                    return f"The result of {expression} is {correct_result}."
-
-                # If it has the correct result, just clean up any verbose explanations
-                match = re.search(r'.*?(\d+\s*[\+\-\*\/]\s*\d+).*?(\d+)', response)
-                if match:
-                    return f"The result of {expression} is {correct_result}."
-            except:
-                pass
-
-        return response
-
-    def _clean_general_response(self, response):
-        """General cleanup for all responses"""
-        # Remove repeated paragraphs (not just lines)
-        lines = response.split('\n')
-        paragraphs = []
-        current_paragraph = []
-
-        # Group lines into paragraphs
-        for line in lines:
-            if line.strip():
-                current_paragraph.append(line)
-            else:
-                if current_paragraph:
-                    paragraphs.append('\n'.join(current_paragraph))
-                    current_paragraph = []
-                paragraphs.append('')  # Keep empty lines
-
-        if current_paragraph:
-            paragraphs.append('\n'.join(current_paragraph))
-
-        # Remove duplicate paragraphs
-        unique_paragraphs = []
-        seen_paragraphs = set()
-
-        for paragraph in paragraphs:
-            # Create a simplified key for comparison
-            if paragraph:
-                simplified = re.sub(r'[^\w\s]', '', paragraph.lower())
-                if simplified and simplified not in seen_paragraphs:
-                    seen_paragraphs.add(simplified)
-                    unique_paragraphs.append(paragraph)
-                elif not simplified:
-                    unique_paragraphs.append(paragraph)  # Keep formatting paragraphs
-            else:
-                unique_paragraphs.append(paragraph)  # Keep empty lines
-
-        cleaned = '\n'.join(unique_paragraphs)
-
-        # Remove any debugging information that might have leaked
-        cleaned = re.sub(r'(?:relevance|similarity)\s+(?:increased|decreased)\s+by\s+[\d\.]+%.*?$', '', cleaned, flags=re.MULTILINE)
-
-        return cleaned
-
-    def _clean_boilerplate_messages(self, response):
-        """
-        Clean boilerplate UI messages from the response before metric calculation.
-
-        Args:
-            response: The original response text
-
-        Returns:
-            Cleaned response without boilerplate
-        """
-        # Additional patterns to clean if needed
-        patterns = [
-            r'Confidence Heatmap Legend.*?Confidence range:.*?\d+\.\d+',  # Entire legend block
-            r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Memory\] Added \d+ new',  # Memory adding info
-            r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Generated.*?tokens\/sec\]',  # Generation stats
-            r'\[█+░*\] Quality:.*?\d+\.\d+',                           # quality bar
-            r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Sharpening enabled:.*?\]',  # Sharpening info
-        ]
-
-        # Apply each pattern
-        cleaned = response
-        for pattern in patterns:
-            cleaned = re.sub(pattern, '', cleaned, flags=re.DOTALL|re.MULTILINE)
-
-        return cleaned.strip()
 
     def add_command_to_memory(self, command: str, output: str, error: str = None, output_file: str = None):
         """Add command output to unified knowledge system."""
@@ -2007,6 +1735,242 @@ class TinyLlamaChat:
             print(f"\n{self.get_time()} Error during input: {e}")
             return ""
 
+    def _extract_memory_worthy_content(self, query, response):
+        """
+        Extract content worthy of memorization with improved context preservation.
+
+        Returns:
+            List of (content, memory_type) tuples
+        """
+        memories = []
+
+        # First, check if we should memorize the entire exchange
+        if len(query) <= 100 and len(response) <= 200:
+            # For short exchanges, memorize the complete Q&A
+            memories.append((f"Q: {query}\nA: {response}", "qa_pair"))
+            return memories
+
+        # For longer exchanges, extract key information
+
+        # 1. Try to extract factual statements
+        factual_pattern = r'(?:is|are|was|were|has|have|had|will be)\s+([A-Z][a-z]+\s+(?:is|are|was|were|has|have|had)\s+[^.!?]+[.!?])'
+        matches = re.findall(factual_pattern, response)
+        for match in matches:
+            if len(match) > 10 and len(match) < 200:
+                memories.append((match, "factual"))
+
+        # 2. Extract definitions
+        definition_pattern = r'([A-Z][a-z]+\s+(?:refers to|is defined as|means|is|are)\s+[^.!?]+[.!?])'
+        matches = re.findall(definition_pattern, response)
+        for match in matches:
+            if len(match) > 10 and len(match) < 200:
+                memories.append((match, "definition"))
+
+        # 3. Extract named entities
+        entity_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,5})\s+(?:is|was|were|are|has|have|had)\s+[^.!?]{10,100}[.!?]'
+        matches = re.findall(entity_pattern, response)
+        for match in matches:
+            if len(match) > 3:  # Reasonable entity name
+                # Find the complete sentence containing this entity
+                sentences = re.split(r'[.!?]', response)
+                for sentence in sentences:
+                    if match in sentence and 10 < len(sentence) < 200:
+                        memories.append((sentence.strip() + ".", "entity"))
+                        break
+
+        # 4. Extract lists and enumerations
+        lines = response.split('\n')
+        list_items = []
+        in_list = False
+        list_topic = ""
+
+        for line in lines:
+            # Check for list headers
+            if re.match(r'^[^-*\d]*:$', line) or re.match(r'^[^-*\d]*:$', line.strip()):
+                list_topic = line.strip()
+                in_list = True
+                list_items = []
+            # Check for list items
+            elif in_list and (line.strip().startswith('-') or line.strip().startswith('*') or
+                             re.match(r'^\d+\.', line.strip())):
+                list_items.append(line.strip())
+            # List ended
+            elif in_list and line.strip() and not (line.strip().startswith('-') or
+                                                  line.strip().startswith('*') or
+                                                  re.match(r'^\d+\.', line.strip())):
+                if list_topic and list_items and len(list_items) >= 2:
+                    content = f"{list_topic}\n" + "\n".join(list_items)
+                    if 20 < len(content) < 300:
+                        memories.append((content, "list"))
+                in_list = False
+
+        # 5. If no structured content found, extract key sentences
+        if not memories:
+            sentences = re.split(r'[.!?]', response)
+            key_sentences = []
+
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if len(sentence) < 10:
+                    continue
+
+                # Look for sentences with informational value
+                if (re.search(r'\b(?:key|important|significant|essential|critical)\b', sentence) or
+                    re.search(r'\b(?:always|never|must|should|typically|generally)\b', sentence)):
+                    key_sentences.append(sentence + ".")
+
+            # Take the top 3 most informative sentences
+            for sentence in key_sentences[:3]:
+                if 10 < len(sentence) < 200:
+                    memories.append((sentence, "key_info"))
+
+        # De-duplicate memories
+        unique_memories = []
+        seen_content = set()
+
+        for content, memory_type in memories:
+            # Normalize to avoid near-duplicates
+            normalized = re.sub(r'\s+', ' ', content.lower())
+            if normalized not in seen_content:
+                seen_content.add(normalized)
+                unique_memories.append((content, memory_type))
+
+        # Limit total memories from a single exchange
+        return unique_memories[:10]  # Cap at 10 memories per exchange
+
+    def _clean_translation_response(self, response, query):
+        """Clean up translation responses"""
+        # Extract the core translation from verbose responses
+        first_line = response.split('\n')[0].strip()
+
+        # If the response has notes or explanations, keep only the essential part
+        if len(response.split('\n')) > 1:
+            # Use regex to find the translation pattern
+            match = re.search(r'["\'«]([^"\'»]+)["\'\»]\s+(?:in|en|na|в|på)\s+\w+', first_line)
+            if match:
+                translation = match.group(1).strip()
+                # Return a cleaner version
+                lang_match = re.search(r'(?:in|to|into)\s+(\w+)', query)
+                if lang_match:
+                    language = lang_match.group(1)
+                    return f'"{translation}" in {language}'
+
+        # Remove duplicated text like "Prikaz:" and redundant notes
+        response = re.sub(r'Prikaz:\s*-\s*', '', response)
+        response = re.sub(r'(?:Note|Примечание):\s*"[^"]+"\s+(?:may|peut|puede|может|kan).*?$', '', response, flags=re.MULTILINE)
+
+        # Remove duplicated translations
+        lines = response.split('\n')
+        unique_lines = []
+        seen = set()
+        for line in lines:
+            # Create a simplified key for comparison
+            simplified = re.sub(r'[^\w\s]', '', line.lower())
+            if simplified and simplified not in seen:
+                seen.add(simplified)
+                unique_lines.append(line)
+
+        return '\n'.join(unique_lines)
+
+    def _clean_arithmetic_response(self, response, query):
+        """Clean up arithmetic responses"""
+        # Extract the expression from the query
+        expression = None
+
+        if not expression:
+            # Try a simple regex fallback
+            match = re.search(r'(\d+\s*[\+\-\*\/]\s*\d+)', query)
+            if match:
+                expression = match.group(1).replace(' ', '')
+
+        if expression:
+            # Calculate the correct result
+            try:
+                correct_result = eval(expression)
+
+                # Check if the response has the correct result
+                if str(correct_result) not in response:
+                    # Replace with correct calculation
+                    return f"The result of {expression} is {correct_result}."
+
+                # If it has the correct result, just clean up any verbose explanations
+                match = re.search(r'.*?(\d+\s*[\+\-\*\/]\s*\d+).*?(\d+)', response)
+                if match:
+                    return f"The result of {expression} is {correct_result}."
+            except:
+                pass
+
+        return response
+
+    def _clean_general_response(self, response):
+        """General cleanup for all responses"""
+        # Remove repeated paragraphs (not just lines)
+        lines = response.split('\n')
+        paragraphs = []
+        current_paragraph = []
+
+        # Group lines into paragraphs
+        for line in lines:
+            if line.strip():
+                current_paragraph.append(line)
+            else:
+                if current_paragraph:
+                    paragraphs.append('\n'.join(current_paragraph))
+                    current_paragraph = []
+                paragraphs.append('')  # Keep empty lines
+
+        if current_paragraph:
+            paragraphs.append('\n'.join(current_paragraph))
+
+        # Remove duplicate paragraphs
+        unique_paragraphs = []
+        seen_paragraphs = set()
+
+        for paragraph in paragraphs:
+            # Create a simplified key for comparison
+            if paragraph:
+                simplified = re.sub(r'[^\w\s]', '', paragraph.lower())
+                if simplified and simplified not in seen_paragraphs:
+                    seen_paragraphs.add(simplified)
+                    unique_paragraphs.append(paragraph)
+                elif not simplified:
+                    unique_paragraphs.append(paragraph)  # Keep formatting paragraphs
+            else:
+                unique_paragraphs.append(paragraph)  # Keep empty lines
+
+        cleaned = '\n'.join(unique_paragraphs)
+
+        # Remove any debugging information that might have leaked
+        cleaned = re.sub(r'(?:relevance|similarity)\s+(?:increased|decreased)\s+by\s+[\d\.]+%.*?$', '', cleaned, flags=re.MULTILINE)
+
+        return cleaned
+
+    def _clean_boilerplate_messages(self, response):
+        """
+        Clean boilerplate UI messages from the response before metric calculation.
+
+        Args:
+            response: The original response text
+
+        Returns:
+            Cleaned response without boilerplate
+        """
+        # Additional patterns to clean if needed
+        patterns = [
+            r'Confidence Heatmap Legend.*?Confidence range:.*?\d+\.\d+',  # Entire legend block
+            r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Memory\] Added \d+ new',  # Memory adding info
+            r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Generated.*?tokens\/sec\]',  # Generation stats
+            r'\[█+░*\] Quality:.*?\d+\.\d+',                           # quality bar
+            r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Sharpening enabled:.*?\]',  # Sharpening info
+        ]
+
+        # Apply each pattern
+        cleaned = response
+        for pattern in patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.DOTALL|re.MULTILINE)
+
+        return cleaned.strip()
+
     # handles "Already borrowed" error in tokenization
     def safe_tokenize(self, text, **kwargs):
         """
@@ -2106,7 +2070,7 @@ def main():
     # for testing fractal embedding
     #return chat.memory_manager.print_fractal_embedding_diagnostics()
 
-    return chat.test_memory_system()
+    # return chat.test_memory_system()
 
     try:
         if args.test_fractal:
@@ -2407,15 +2371,6 @@ def main():
 
                 # Estimate tokens generated
                 try:
-                    # response_tokens = len(chat.tokenizer.encode(response))
-                    # # tokens_per_second = response_tokens / generation_time
-                    # tokens_per_second = response_tokens / max(0.01, generation_time)
-                    # quality = chat.quality_score(
-                    #     confidence_data.get('confidence', 0),
-                    #     confidence_data.get('perplexity', 0),
-                    #     confidence_data.get('entropy', 0)
-                    # )
-
                     # Calculate metrics on the clean response
                     response_tokens, tokens_per_second = chat.calculate_response_metrics(response, generation_time)
 
