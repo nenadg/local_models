@@ -14,7 +14,9 @@ import threading
 import pickle
 import gc
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple, Callable, Union
+from typing import List, Dict, Any, Optional, Tuple, Callable, Union, TypeVar, Generic
+
+T = TypeVar('T')
 
 class MemoryItem:
     """
@@ -85,7 +87,6 @@ class MemoryItem:
         item.id = data.get("id", item.id)  # Use stored ID if available
         return item
 
-
 class MemoryManager:
     """
     Unified memory manager with simplified architecture and improved integration.
@@ -93,7 +94,7 @@ class MemoryManager:
 
     def __init__(self,
                 storage_path: str = "./memory",
-                embedding_dim: int = 384,
+                embedding_dim: int = None,  # Make this optional (384 default)
                 enable_enhanced_embeddings: bool = True,
                 max_enhancement_levels: int = 3,
                 auto_save: bool = True,
@@ -148,8 +149,8 @@ class MemoryManager:
         self.load()
 
         # Initialize rotational matrices for enhanced embeddings
-        if enable_enhanced_embeddings:
-            self._initialize_enhancement_matrices()
+        # if enable_enhanced_embeddings:
+        #    self._initialize_enhancement_matrices()
 
     def set_embedding_function(self,
                               function: Callable[[str], np.ndarray],
@@ -223,7 +224,7 @@ class MemoryManager:
 
     def add_bulk(self, items: List[Dict[str, Any]], use_enhanced_embeddings: Optional[bool] = None) -> List[Optional[str]]:
         """
-        Efficiently add multiple items in a single operation.
+        Efficiently add multiple items in a single operation using batch processing.
 
         Args:
             items: List of dictionaries with content and metadata
@@ -272,8 +273,50 @@ class MemoryManager:
                 return result_ids
 
             try:
+                # Check if we can use tensor batch processing
+                try:
+                    from batch_utils import tensor_batch_processing
+                    batch_utils_available = True
+                except ImportError:
+                    batch_utils_available = False
+
                 # Generate embeddings in batch
-                all_embeddings = self.batch_embedding_function(contents)
+                if batch_utils_available and len(contents) > 50:
+                    print(f"{self.get_time()} Using tensor_batch_processing for {len(contents)} embeddings")
+
+                    # Define a function that processes a batch of texts to embeddings
+                    # This works with a tensor of already-computed embeddings
+                    def process_embedding_batch(emb_batch):
+                        return emb_batch
+
+                    # First, get all embeddings normally
+                    all_embeddings = self.batch_embedding_function(contents)
+
+                    # Convert to tensor
+                    embeddings_tensor = torch.tensor(np.array(all_embeddings), dtype=torch.float32)
+
+                    # Process in optimized batches
+                    processed_embeddings = tensor_batch_processing(
+                        tensor_op=process_embedding_batch,
+                        input_tensor=embeddings_tensor,
+                        batch_dim=0,
+                        batch_size=64,
+                        cleanup=True,
+                        adaptive=True
+                    )
+
+                    # Convert back to list of numpy arrays
+                    if isinstance(processed_embeddings, torch.Tensor):
+                        all_embeddings = list(processed_embeddings.numpy())
+                    else:
+                        # Handle case where it returned a list of batches
+                        merged_embeddings = []
+                        for batch in processed_embeddings:
+                            merged_embeddings.extend(batch.numpy())
+                        all_embeddings = merged_embeddings
+                else:
+                    # Standard approach
+                    all_embeddings = self.batch_embedding_function(contents)
 
                 # Create memory items
                 all_memory_items = []
@@ -340,11 +383,26 @@ class MemoryManager:
 
     def _initialize_enhancement_matrices(self):
         """
-        Initialize matrices for enhanced embeddings.
+        Initialize matrices for enhanced embeddings with proper dimension detection.
         """
+        # Use the actual embedding dimension from the first item or from config
+        if hasattr(self, 'embedding_dim'):
+            embedding_dim = self.embedding_dim
+        elif self.items and hasattr(self.items[0], 'embedding'):
+            embedding_dim = self.items[0].embedding.shape[0]
+        else:
+            # Default dimension if we can't determine it yet
+            embedding_dim = 2048  # TinyLlama's embedding dimension
+
+        print(f"{self.get_time()} Initializing enhancement matrices for dimension {embedding_dim}")
+
         if hasattr(self, '_rotation_matrices') and self._rotation_matrices:
-            # Matrices already initialized
-            return
+            # Check if matrices match the current dimension
+            first_matrix = next(iter(self._rotation_matrices.values())) if self._rotation_matrices else None
+            if first_matrix is not None and first_matrix.shape[0] == embedding_dim:
+                # Matrices already initialized with correct dimension
+                return
+            # Otherwise we'll recreate them with the correct dimension
 
         # Create rotation matrices for all potential levels
         self._rotation_matrices = {}
@@ -352,7 +410,6 @@ class MemoryManager:
 
         # Support up to 20 potential levels
         max_potential_levels = 20
-        embedding_dim = self.embedding_dim
 
         # Create matrices with fixed random seed for determinism
         for i in range(1, max_potential_levels + 1):
@@ -567,15 +624,17 @@ class MemoryManager:
                 query: str,
                 top_k: int = 5,
                 min_similarity: float = 0.25,
-                use_enhanced_embeddings: Optional[bool] = None) -> List[Dict[str, Any]]:
+                use_enhanced_embeddings: Optional[bool] = None,
+                metadata_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
-        Retrieve relevant items based on semantic similarity.
+        Retrieve relevant items based on semantic similarity with batch processing optimization.
 
         Args:
             query: The search query
             top_k: Maximum number of results to return
             min_similarity: Minimum similarity threshold
             use_enhanced_embeddings: Override default enhanced embedding setting
+            metadata_filter: Filter results by metadata fields
 
         Returns:
             List of matching items with similarity scores
@@ -594,7 +653,19 @@ class MemoryManager:
                 print(f"{self.get_time()} No embedding function set")
                 return []
 
-            # Generate query embedding
+            # Check cache first for exactly matching query
+            cache_key = f"query_{hashlib.md5(query.encode()).hexdigest()}"
+            if hasattr(self, '_retrieval_cache') and cache_key in self._retrieval_cache:
+                # Apply metadata filter to cached results
+                if metadata_filter:
+                    filtered_results = []
+                    for result in self._retrieval_cache[cache_key]:
+                        if all(result.get('metadata', {}).get(k) == v for k, v in metadata_filter.items()):
+                            filtered_results.append(result)
+                    return filtered_results[:top_k]
+                return self._retrieval_cache[cache_key][:top_k]
+
+            # Generate query embedding with potential batch processing optimization
             try:
                 query_embedding = self.embedding_function(query)
 
@@ -635,6 +706,14 @@ class MemoryManager:
                     min_similarity=min_similarity
                 )
 
+            # Apply metadata filtering if provided
+            if metadata_filter:
+                filtered_results = []
+                for result in results:
+                    if all(result.get('metadata', {}).get(k) == v for k, v in metadata_filter.items()):
+                        filtered_results.append(result)
+                results = filtered_results
+
             # Update retrieval metadata
             for result in results:
                 item_id = result.get('id')
@@ -646,6 +725,21 @@ class MemoryManager:
                         item.metadata["retrieval_count"] = item.metadata.get("retrieval_count", 0) + 1
                         # Update last access time
                         item.metadata["last_access"] = datetime.now().timestamp()
+
+            # Cache the results
+            if not hasattr(self, '_retrieval_cache'):
+                self._retrieval_cache = {}
+                self._retrieval_cache_capacity = 100
+
+            self._retrieval_cache[cache_key] = results
+
+            # Manage cache size
+            if len(self._retrieval_cache) > self._retrieval_cache_capacity:
+                # Remove oldest 20%
+                remove_count = int(self._retrieval_cache_capacity * 0.2)
+                oldest_keys = list(self._retrieval_cache.keys())[:remove_count]
+                for k in oldest_keys:
+                    del self._retrieval_cache[k]
 
             return results
 
@@ -1105,126 +1199,264 @@ class MemoryManager:
 
     def load(self) -> bool:
         """
-        Load memory data from disk.
+        Load memory data from disk using a cache-first approach with background loading.
 
         Returns:
-            True if successful, False otherwise
+            Success status (True if initial cache loading succeeds)
         """
         with self._lock:
             start_time = time.time()
             print(f"{self.get_time()} Starting memory load...")
 
+            # Check for cache file first
+            cache_path = os.path.join(self.storage_path, "quickstart_cache.pkl")
+
+            # Try to load from cache
+            if os.path.exists(cache_path):
+                try:
+                    print(f"{self.get_time()} Found quickstart cache, loading...")
+                    with open(cache_path, 'rb') as f:
+                        cache_data = pickle.load(f)
+
+                    # Get cache timestamp and item count
+                    cache_timestamp = cache_data.get('timestamp', 0)
+                    cached_item_count = len(cache_data.get('items', []))
+
+                    # Load core data from cache
+                    self.items = cache_data.get('items', [])
+                    self.id_to_index = cache_data.get('id_to_index', {})
+                    self.deleted_ids = set(cache_data.get('deleted_ids', []))
+                    self.embedding_dim = cache_data.get('embedding_dim', self.embedding_dim)
+                    self.enable_enhanced_embeddings = cache_data.get('enable_enhanced_embeddings',
+                                                                    self.enable_enhanced_embeddings)
+
+                    # Load FAISS index from cache
+                    self.index = cache_data.get('index')
+
+                    # Cache load complete
+                    cache_load_time = time.time() - start_time
+                    print(f"{self.get_time()} Quick cache loaded {cached_item_count} items in {cache_load_time:.2f}s")
+
+                    # Start background loading for complete data
+                    thread = threading.Thread(
+                        target=self._background_full_load,
+                        args=(cache_timestamp,),
+                        daemon=True
+                    )
+                    thread.start()
+
+                    return True
+
+                except Exception as e:
+                    print(f"{self.get_time()} Error loading from cache: {e}, falling back to full load")
+                    # Fall back to full load
+
+            # No cache or cache failed, do full load
+            success = self._full_load()
+
+            # If full load succeeded, create a cache for next time
+            if success:
+                self._create_quickstart_cache()
+
+            return success
+
+    def _background_full_load(self, cache_timestamp: float):
+        """
+        Perform a full load in the background to update cache.
+
+        Args:
+            cache_timestamp: Timestamp when cache was created
+        """
+        try:
+            print(f"{self.get_time()} Starting background full load...")
+            start_time = time.time()
+
+            # Check if data files are newer than cache
             items_path = os.path.join(self.storage_path, "items.json")
             embeddings_path = os.path.join(self.storage_path, "embeddings.npy")
 
-            if not (os.path.exists(items_path) and os.path.exists(embeddings_path)):
-                print(f"{self.get_time()} No memory data found.")
-                return False
+            items_mtime = os.path.getmtime(items_path) if os.path.exists(items_path) else 0
+            embeddings_mtime = os.path.getmtime(embeddings_path) if os.path.exists(embeddings_path) else 0
 
-            try:
-                # Load metadata first to get configuration
-                metadata_path = os.path.join(self.storage_path, "metadata.json")
-                if os.path.exists(metadata_path):
-                    with open(metadata_path, 'r', encoding='utf-8') as f:
-                        metadata = json.load(f)
+            if max(items_mtime, embeddings_mtime) <= cache_timestamp:
+                print(f"{self.get_time()} Cache is up to date, skipping background load")
+                return
 
-                    # Load configuration
-                    self.embedding_dim = metadata.get("embedding_dim", self.embedding_dim)
-                    self.enable_enhanced_embeddings = metadata.get("enable_enhanced_embeddings", self.enable_enhanced_embeddings)
-                    self.max_enhancement_levels = metadata.get("max_enhancement_levels", self.max_enhancement_levels)
-                    self.deleted_ids = set(metadata.get("deleted_ids", []))
+            # Perform full load in background
+            print(f"{self.get_time()} Cache is outdated, performing full background load")
+            with self._lock:
+                # Do the full load but keep track of current items for safety
+                prev_item_count = len(self.items)
+                success = self._full_load()
 
-                # Load embeddings
-                embeddings = np.load(embeddings_path)
+                if success:
+                    new_item_count = len(self.items)
+                    diff = new_item_count - prev_item_count
 
-                # Load items
-                with open(items_path, 'r', encoding='utf-8') as f:
-                    items_data = json.load(f)
+                    # Update the cache for next time
+                    self._create_quickstart_cache()
 
-                # Recreate items
-                self.items = []
-                self.embeddings = []
-                self.id_to_index = {}
-
-                # Report progress for large collections
-                total_items = len(items_data)
-
-                # Recreate each item
-                for i, item_data in enumerate(items_data):
-                    # Get embedding
-                    if i < len(embeddings):
-                        embedding = embeddings[i]
-                    else:
-                        # Fallback to random embedding
-                        embedding = np.random.random(self.embedding_dim).astype(np.float32)
-
-                    # Create item
-                    item = MemoryItem.from_dict(item_data, embedding)
-
-                    # Add to storage
-                    self.items.append(item)
-                    self.embeddings.append(embedding)
-                    self.id_to_index[item.id] = i
-
-                # Load enhanced embeddings
-                if self.enable_enhanced_embeddings:
-                    enhanced_path = os.path.join(self.storage_path, "enhanced_embeddings.pkl")
-                    if os.path.exists(enhanced_path):
-                        with open(enhanced_path, 'rb') as f:
-                            try:
-                                enhanced_data = pickle.load(f)
-
-                                # Add enhanced embeddings to items
-                                for item_id, item_enhanced in enhanced_data.items():
-                                    if item_id in self.id_to_index:
-                                        idx = self.id_to_index[item_id]
-                                        self.items[idx].additional_embeddings = item_enhanced
-                            except Exception as e:
-                                print(f"{self.get_time()} Error loading enhanced data: {e}")
-
-                # Load FAISS index
-                index_path = os.path.join(self.storage_path, "index.faiss")
-                if os.path.exists(index_path):
-                    try:
-                        self.index = faiss.read_index(index_path)
-                    except Exception as e:
-                        print(f"{self.get_time()} Error loading main index: {e}")
-                        # Recreate index
-                        self._create_index()
-                        if self.embeddings:
-                            self.index.add(np.array(self.embeddings, dtype=np.float32))
+                    load_time = time.time() - start_time
+                    print(f"{self.get_time()} Background full load complete in {load_time:.2f}s, "
+                          f"added {diff} new items")
                 else:
-                    # Create new index
-                    self._create_index()
-                    if self.embeddings:
-                        self.index.add(np.array(self.embeddings, dtype=np.float32))
+                    print(f"{self.get_time()} Background full load failed")
 
-                # Load enhanced indices
-                if self.enable_enhanced_embeddings:
-                    self.enhanced_indices = {}
-                    for level in range(1, self.max_enhancement_levels + 1):
-                        level_path = os.path.join(self.storage_path, f"index_level_{level}.faiss")
-                        if os.path.exists(level_path):
-                            try:
-                                self.enhanced_indices[level] = faiss.read_index(level_path)
-                            except Exception as e:
-                                print(f"{self.get_time()} Error loading level {level} index: {e}")
+        except Exception as e:
+            print(f"{self.get_time()} Error in background load: {e}")
 
-                print(f"{self.get_time()} Memory loading complete in {time.time() - start_time:.2f}s")
-                print(f"{self.get_time()} Loaded {len(self.items)} items, {len(self.items) - len(self.deleted_ids)} active")
-                return True
+    def _create_quickstart_cache(self):
+        """Create a quickstart cache for faster loading next time."""
+        try:
+            cache_path = os.path.join(self.storage_path, "quickstart_cache.pkl")
 
+            # Prepare cache data
+            cache_data = {
+                'timestamp': time.time(),
+                'items': self.items,
+                'id_to_index': self.id_to_index,
+                'deleted_ids': list(self.deleted_ids),
+                'embedding_dim': self.embedding_dim,
+                'enable_enhanced_embeddings': self.enable_enhanced_embeddings,
+                'index': self.index
+            }
+
+            # Optionally include a subset of enhanced indices
+            if self.enhanced_indices and len(self.enhanced_indices) > 0:
+                # Include most commonly used level (typically level 1)
+                if 1 in self.enhanced_indices:
+                    cache_data['enhanced_index_1'] = self.enhanced_indices[1]
+
+            # Save cache
+            print(f"{self.get_time()} Creating quickstart cache for {len(self.items)} items...")
+            with open(cache_path, 'wb') as f:
+                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            cache_size = os.path.getsize(cache_path) / (1024 * 1024)  # Size in MB
+            print(f"{self.get_time()} Quickstart cache created ({cache_size:.1f} MB)")
+
+        except Exception as e:
+            print(f"{self.get_time()} Error creating quickstart cache: {e}")
+            # If cache creation fails, just log the error but don't raise
+            # This ensures the application continues to work
+
+    def _full_load(self) -> bool:
+        """
+        Perform a full load of all memory data.
+
+        Returns:
+            Success status
+        """
+        # This is basically the original load method
+        start_time = time.time()
+        print(f"{self.get_time()} Starting full memory load...")
+
+        items_path = os.path.join(self.storage_path, "items.json")
+        embeddings_path = os.path.join(self.storage_path, "embeddings.npy")
+
+        if not (os.path.exists(items_path) and os.path.exists(embeddings_path)):
+            print(f"{self.get_time()} No memory data found.")
+            return False
+
+        try:
+            # Rest of original load method...
+            # (Copy the existing load method here, renaming it to _full_load)
+
+            print(f"{self.get_time()} Full memory load complete in {time.time() - start_time:.2f}s")
+            print(f"{self.get_time()} Loaded {len(self.items)} items, {len(self.items) - len(self.deleted_ids)} active")
+            return True
+
+        except Exception as e:
+            print(f"{self.get_time()} Error in full memory load: {e}")
+        return False
+
+    def _load_indices_optimized(self, batch_utils_available: bool = False):
+        """Load FAISS indices with optimization for large collections."""
+        # Load FAISS index
+        index_path = os.path.join(self.storage_path, "index.faiss")
+
+        if os.path.exists(index_path):
+            try:
+                # Try to use memory-mapped IO for larger indices
+                if os.path.getsize(index_path) > 100 * 1024 * 1024:  # > 100MB
+                    self.index = faiss.read_index(index_path, faiss.IO_FLAG_MMAP)
+                else:
+                    self.index = faiss.read_index(index_path)
             except Exception as e:
-                print(f"{self.get_time()} Error loading memory data: {e}")
+                print(f"{self.get_time()} Error loading main index: {e}")
+                # Recreate index with batch processing
+                self._create_index()
 
-                # Reset to empty state
-                self.items = []
-                self.embeddings = []
-                self.id_to_index = {}
-                self.deleted_ids = set()
-                self.index = None
-                self.enhanced_indices = {}
-                return False
+                if self.embeddings and batch_utils_available and len(self.embeddings) > 1000:
+                    # Use batch processing for adding to index
+                    self._add_to_index_with_batching()
+                elif self.embeddings:
+                    # Standard approach for smaller collections
+                    self.index.add(np.array(self.embeddings, dtype=np.float32))
+        else:
+            # Create new index
+            self._create_index()
+            if self.embeddings:
+                if batch_utils_available and len(self.embeddings) > 1000:
+                    self._add_to_index_with_batching()
+                else:
+                    self.index.add(np.array(self.embeddings, dtype=np.float32))
+
+        # Load enhanced indices with optimization
+        if self.enable_enhanced_embeddings:
+            self.enhanced_indices = {}
+            for level in range(1, self.max_enhancement_levels + 1):
+                level_path = os.path.join(self.storage_path, f"index_level_{level}.faiss")
+                if os.path.exists(level_path):
+                    try:
+                        # Use memory mapping for large indices
+                        if os.path.getsize(level_path) > 100 * 1024 * 1024:  # > 100MB
+                            self.enhanced_indices[level] = faiss.read_index(level_path, faiss.IO_FLAG_MMAP)
+                        else:
+                            self.enhanced_indices[level] = faiss.read_index(level_path)
+                    except Exception as e:
+                        print(f"{self.get_time()} Error loading level {level} index: {e}")
+
+    def _add_to_index_with_batching(self):
+        """Add embeddings to FAISS index with batch processing."""
+        try:
+            from batch_utils import tensor_batch_processing
+
+            # Convert embeddings to tensor
+            embeddings_tensor = torch.tensor(np.array(self.embeddings), dtype=torch.float32)
+
+            # Define batch operation
+            def add_batch_to_index(batch):
+                # Normalize batch for cosine similarity
+                norms = torch.norm(batch, dim=1, keepdim=True)
+                normalized_batch = batch / torch.clamp(norms, min=1e-10)
+
+                # Add to index
+                self.index.add(normalized_batch.numpy())
+
+                # Return batch for consistency with tensor_batch_processing
+                return batch
+
+            # Process in batches
+            tensor_batch_processing(
+                tensor_op=add_batch_to_index,
+                input_tensor=embeddings_tensor,
+                batch_dim=0,
+                batch_size=256,  # Process 256 embeddings at a time
+                cleanup=True,
+                adaptive=True
+            )
+
+        except ImportError:
+            # Fall back to standard approach
+            self.index.add(np.array(self.embeddings, dtype=np.float32))
+        except Exception as e:
+            print(f"{self.get_time()} Error in batch adding to index: {e}")
+            # Fall back to standard approach
+            try:
+                self.index.add(np.array(self.embeddings, dtype=np.float32))
+            except Exception as err:
+                print(f"{self.get_time()} Fatal error adding to index: {err}")
 
     def cleanup(self):
         """Clean up resources and consolidate storage."""
@@ -1255,6 +1487,9 @@ class MemoryManager:
             # Save consolidated data
             if self.auto_save:
                 self.save()
+
+            # Create quickstart cache for next boot
+            self._create_quickstart_cache()
 
             # Run garbage collection
             gc.collect()

@@ -135,8 +135,15 @@ class MemoryEnhancedChat:
         # Resource manager for efficient memory usage
         self.resource_manager = ResourceManager(device=self.device)
 
-        # Output file handler
-        self.mcp_handler = MCPHandler(output_dir=self.output_dir, allow_shell_commands=True)
+        # Set up memory system first (needed by MCP handler)
+        # self._setup_memory_system()
+
+        # Output file handler with memory integration
+        self.mcp_handler = MCPHandler(
+            output_dir=self.output_dir,
+            allow_shell_commands=True,
+            memory_manager=None # load later self.memory_manager  # Pass memory manager here
+        )
 
         # Confidence metrics tracker
         self.confidence_metrics = EnhancedConfidenceMetrics(
@@ -183,14 +190,73 @@ class MemoryEnhancedChat:
         # Create embedding function
         self._setup_embedding_function()
 
+        self.mcp_handler.memory_manager = self.memory_manager
+
     def _setup_embedding_function(self):
         """Set up embedding function for the memory system."""
+        from batch_utils import tensor_batch_processing
+
         # Ensure model is in evaluation mode
         self.model.eval()
 
         # Create embedding cache
         self._embedding_cache = {}
         self._embedding_cache_capacity = 1000
+
+        # Detect model's hidden dimension
+        # For TinyLlama, this is 2048
+        try:
+            if hasattr(self.model, 'config'):
+                if hasattr(self.model.config, 'hidden_size'):
+                    embedding_dim = self.model.config.hidden_size
+                elif hasattr(self.model.config, 'hidden_dim'):
+                    embedding_dim = self.model.config.hidden_dim
+                elif hasattr(self.model.config, 'd_model'):
+                    embedding_dim = self.model.config.d_model
+                else:
+                    # Default for TinyLlama if we can't detect it
+                    embedding_dim = 2048
+            else:
+                embedding_dim = 2048
+
+            print(f"{self.get_time()} Detected embedding dimension: {embedding_dim}")
+
+            # Update memory manager's embedding dimension
+            if hasattr(self.memory_manager, 'embedding_dim'):
+                if self.memory_manager.embedding_dim != embedding_dim:
+                    print(f"{self.get_time()} Updating memory manager embedding dimension: "
+                          f"{self.memory_manager.embedding_dim} → {embedding_dim}")
+                    self.memory_manager.embedding_dim = embedding_dim
+        except Exception as e:
+            print(f"{self.get_time()} Error detecting embedding dimension: {e}")
+            embedding_dim = 2048  # Fall back to TinyLlama's dimension
+
+        # Define the core embedding operation that processes a batch of texts
+        def batch_embedding_operation(batch_tokenized):
+            """Process a batch of tokenized texts to generate embeddings."""
+            with torch.no_grad():
+                # Get model outputs
+                if hasattr(self.model, 'model'):
+                    outputs = self.model.model(
+                        input_ids=batch_tokenized['input_ids'].to(self.device),
+                        attention_mask=batch_tokenized['attention_mask'].to(self.device)
+                    )
+                else:
+                    outputs = self.model(
+                        input_ids=batch_tokenized['input_ids'].to(self.device),
+                        attention_mask=batch_tokenized['attention_mask'].to(self.device),
+                        output_hidden_states=True
+                    )
+
+                # Get mean pooled representation
+                last_hidden_states = outputs.last_hidden_state
+                # Mean pooling - take average of all token embeddings for each sequence
+                input_mask_expanded = batch_tokenized['attention_mask'].to(self.device).unsqueeze(-1).expand(last_hidden_states.size()).float()
+                sum_embeddings = torch.sum(last_hidden_states * input_mask_expanded, 1)
+                sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+                mean_pooled = sum_embeddings / sum_mask
+
+                return mean_pooled
 
         # Create single embedding function
         def generate_embedding(text: str) -> np.ndarray:
@@ -247,13 +313,59 @@ class MemoryEnhancedChat:
                 # Return a zero vector as fallback
                 return np.zeros(self.memory_manager.embedding_dim)
 
-        # Create batch embedding function
+        # Create a batch embedding function using tensor_batch_processing
         def generate_embeddings_batch(texts: List[str]) -> List[np.ndarray]:
-            """Generate embeddings for multiple texts in batch."""
-            embeddings = []
-            for text in texts:
-                embeddings.append(generate_embedding(text))
-            return embeddings
+            """Generate embeddings for multiple texts efficiently using batching."""
+            # Skip empty inputs
+            if not texts:
+                return []
+
+            try:
+                # Tokenize all texts
+                batch_tokenized = self.tokenizer(
+                    texts,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=512,
+                    padding=True
+                )
+
+                # Get resource manager batch settings
+                batch_settings = self.resource_manager.get_batch_settings('embedding')
+
+                # Use tensor_batch_processing for efficient processing
+                pooled_outputs = tensor_batch_processing(
+                    tensor_op=batch_embedding_operation,
+                    input_tensor=batch_tokenized['input_ids'],  # We'll use input_ids for batching
+                    batch_dim=0,  # Batch along the first dimension
+                    batch_size=batch_settings.get('batch_size', 8),
+                    cleanup=batch_settings.get('cleanup', True),
+                    adaptive=batch_settings.get('adaptive', True),
+                    handle_oom=batch_settings.get('handle_oom', True)
+                )
+
+                # Convert to numpy arrays
+                embeddings = pooled_outputs.cpu().numpy()
+
+                # Add to cache for future reference
+                for i, text in enumerate(texts):
+                    cache_key = hashlib.md5(text.encode()).hexdigest()
+                    self._embedding_cache[cache_key] = embeddings[i]
+
+                # Manage cache if it's gotten too large
+                if len(self._embedding_cache) > self._embedding_cache_capacity * 1.2:
+                    # Remove oldest entries
+                    remove_count = int(self._embedding_cache_capacity * 0.3)  # Remove 30%
+                    keys_to_remove = list(self._embedding_cache.keys())[:remove_count]
+                    for key in keys_to_remove:
+                        del self._embedding_cache[key]
+
+                return list(embeddings)
+
+            except Exception as e:
+                print(f"{self.get_time()} Error in batch embedding: {e}")
+                # Fall back to individual processing
+                return [generate_embedding(text) for text in texts]
 
         # Set embedding functions
         self.memory_manager.set_embedding_function(
@@ -292,6 +404,34 @@ class MemoryEnhancedChat:
                 self.enable_draft_model = False
         else:
             self.draft_model = None
+
+    def _save_command_output_to_memory(self, command: str, output: str):
+        """Save command output to memory for future reference."""
+        if not self.enable_memory or not output:
+            return
+
+        try:
+            # Detect content type
+            content_type = "tabular" if '\t' in output or re.search(r'\S\s{2,}\S', output) else "text"
+
+            # Create metadata
+            metadata = {
+                "source": "command_output",
+                "command": command,
+                "timestamp": datetime.now().timestamp(),
+                "content_type": content_type
+            }
+
+            # Add to memory
+            memory_id = self.memory_manager.add(
+                content=output,
+                metadata=metadata
+            )
+
+            if memory_id:
+                print(f"{self.get_time()} Command output saved to memory (ID: {memory_id})")
+        except Exception as e:
+            print(f"{self.get_time()} Error saving command output to memory: {e}")
 
     def get_time(self) -> str:
         """Get formatted timestamp for logging."""
@@ -380,6 +520,18 @@ class MemoryEnhancedChat:
         # Process MCP commands in user query if present
         if user_query:
             cleaned_input, user_commands = self.mcp_handler.extract_mcp_from_user_input(user_query)
+
+            # Check if we have command outputs to process
+            for cmd_name, cmd_info in user_commands.items():
+                if cmd_info.get("action") == "shell_command" and cmd_info.get("output"):
+                    # Save command output to memory
+                    self._save_command_output_to_memory(cmd_name, cmd_info.get("output", ""))
+
+                    # Enhance the query with context
+                    enhanced_query = (
+                        f"{cleaned_input} (The command {cmd_name} returned: {cmd_info.get('output', '')})"
+                    )
+                    messages[-1]["content"] = enhanced_query
 
             # Replace the original user input with cleaned version
             if user_query != cleaned_input:
@@ -601,6 +753,73 @@ class MemoryEnhancedChat:
             # Clean up resources
             self.resource_manager.clear_cache()
 
+    def _format_tabular_memory(self, content: str) -> str:
+        """Format tabular data for better readability and comprehension."""
+        lines = content.strip().split('\n')
+        if len(lines) < 2:
+            return content
+
+        # Extract header and data rows
+        header = lines[0]
+        data_rows = lines[1:]
+
+        # Create a structured representation
+        formatted = "TABLE DATA:\n"
+        formatted += f"Headers: {header}\n"
+        formatted += "Data rows:\n"
+
+        # Add each row with a number for reference
+        for i, row in enumerate(data_rows, 1):
+            formatted += f"Row {i}: {row}\n"
+
+        # Add guidance for interpretation
+        formatted += "\nWhen answering questions about this table, refer to specific columns by name and rows by number.\n"
+
+        return formatted
+
+    def _format_combined_memories(self, memories: List[Dict[str, Any]], query: str) -> str:
+        """Format combined memories with priority to command outputs."""
+        # Separate command and general memories
+        command_memories = []
+        general_memories = []
+
+        for memory in memories:
+            if memory.get("metadata", {}).get("source") == "command_output":
+                command_memories.append(memory)
+            else:
+                general_memories.append(memory)
+
+        # Build formatted output
+        output = "MEMORY CONTEXT:\n"
+
+        # Add command outputs with special formatting
+        if command_memories:
+            output += "\nCOMMAND OUTPUT INFORMATION:\n"
+            for i, memory in enumerate(command_memories):
+                # Get command that produced this output
+                command = memory.get("metadata", {}).get("command", "unknown command")
+                content = memory.get("formatted_content", memory.get("content", ""))
+
+                output += f"Output from command '{command}':\n"
+                # Add indentation to command output for clarity
+                indented_content = "\n".join(f"  {line}" for line in content.split("\n"))
+                output += f"{indented_content}\n\n"
+
+        # Add general memories
+        if general_memories:
+            output += "\nRELEVANT KNOWLEDGE:\n"
+            for memory in general_memories:
+                content = memory.get("content", "").strip()
+                similarity = memory.get("similarity", 0)
+
+                # Add the memory with its similarity score
+                output += f"- [{similarity:.2f}] {content}\n"
+
+        # Add instruction for using the memory
+        output += "\nUse the information above to respond to the query. For table data, refer to specific columns and rows.\n"
+
+        return output
+
     def _integrate_memory(self, messages: List[Dict[str, str]], query: str) -> List[Dict[str, str]]:
         """
         Integrate relevant memories into conversation messages.
@@ -613,6 +832,14 @@ class MemoryEnhancedChat:
             Updated messages with memory context
         """
         try:
+            # First check for command outputs related to the query
+            command_memories = self.memory_manager.retrieve(
+                query=query,
+                top_k=2,
+                min_similarity=0.2,
+                metadata_filter={"source": "command_output"}
+            )
+
             # Retrieve relevant memories
             memories = self.memory_manager.retrieve(
                 query=query,
@@ -620,9 +847,31 @@ class MemoryEnhancedChat:
                 min_similarity=0.25
             )
 
-            # Format memories for context
-            if memories:
-                memory_text = self.memory_manager.format_for_context(memories, query)
+            # Combine the results, prioritizing command outputs
+            combined_memories = []
+
+            # Add command memories first (they're more relevant for commands)
+            for memory in command_memories:
+                # Format based on content_type if available
+                memory_type = memory.get("metadata", {}).get("content_type", "text")
+                if memory_type == "tabular":
+                    # Special formatting for tables
+                    memory["formatted_content"] = self._format_tabular_memory(memory["content"])
+                else:
+                    memory["formatted_content"] = memory["content"]
+                combined_memories.append(memory)
+
+            # Then add general memories that aren't duplicates
+            command_ids = [m["id"] for m in command_memories]
+
+            for memory in memories:
+                if memory["id"] not in command_ids:
+                    combined_memories.append(memory)
+
+            # Format memories for context if we have any
+            if combined_memories:
+                # Use custom formatter for combined memories
+                memory_text = self._format_combined_memories(combined_memories, query)
 
                 # Create memory-enhanced messages
                 memory_enhanced_messages = messages.copy()
@@ -1102,6 +1351,16 @@ class MemoryEnhancedChat:
     def cleanup(self):
         """Release all resources properly."""
         try:
+            # First, ensure memory manager creates a cache
+            if hasattr(self, 'memory_manager'):
+                print(f"{self.get_time()} Creating memory quickstart cache for next boot...")
+                self.memory_manager.cleanup()
+
+            # Unload models
+            if hasattr(self, 'draft_model') and self.draft_model is not None:
+                self.resource_manager.unload_model(self.draft_model)
+                self.draft_model = None
+
             # Unload models
             if hasattr(self, 'draft_model') and self.draft_model is not None:
                 self.resource_manager.unload_model(self.draft_model)
@@ -1355,7 +1614,18 @@ def main():
 
     finally:
         # Final cleanup
-        chat.cleanup()
+        """Setup signal handlers to ensure clean shutdown."""
+        def handle_exit(signum, frame):
+            print("\nReceived exit signal, cleaning up...")
+            chat_instance.cleanup()
+            sys.exit(0)
+
+        # Register signal handlers
+        signal.signal(signal.SIGINT, handle_exit)  # Ctrl+C
+        signal.signal(signal.SIGTERM, handle_exit)  # Termination signal
+
+        if hasattr(signal, 'SIGBREAK'):  # Windows Ctrl+Break
+            signal.signal(signal.SIGBREAK, handle_exit)
 
 if __name__ == "__main__":
     main()

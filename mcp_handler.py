@@ -19,9 +19,10 @@ class MCPHandler:
       content to save
       <<<
     """
-    def __init__(self, output_dir: str = "./output", allow_shell_commands: bool = False):
+    def __init__(self, output_dir: str = "./output", allow_shell_commands: bool = False, memory_manager = None):
         self.output_dir = output_dir
         self.allow_shell_commands = allow_shell_commands
+        self.memory_manager = memory_manager
         os.makedirs(output_dir, exist_ok=True)
 
         # The regex pattern for detecting MCP in model output
@@ -35,6 +36,8 @@ class MCPHandler:
 
         # Buffer for accumulating MCP content during streaming
         self.current_mcp_blocks = {}
+
+        self.memory_manager = memory_manager
 
     def extract_mcp_blocks(self, content: str) -> Tuple[str, Dict[str, str]]:
         """
@@ -323,26 +326,31 @@ Output files are saved to: {os.path.abspath(self.output_dir)}
                     output = result.stdout
                     error = result.stderr
 
-                    # Save to temp file for large outputs
-                    output_file = None
-                    if len(output) > 1000:  # If output is large
-                        output_file = os.path.join(self.output_dir, f"cmd_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-                        try:
-                            with open(output_file, 'w', encoding='utf-8') as f:
-                                f.write(output)
-                            print(f"[Large output saved to: {output_file}]")
-                        except Exception as e:
-                            print(f"[Error saving output: {str(e)}]")
-                            output_file = None
+                    # Save to memory if memory_manager is available
+                    if hasattr(self, 'memory_manager') and self.memory_manager:
+                        # Detect content type
+                        content_type = self._detect_content_type(output)
 
-                    # Store command output for memory integration
-                    commands[match] = {
-                        "action": "shell_command",
-                        "output": output,
-                        "error": error,
-                        "timestamp": datetime.now().isoformat(),
-                        "output_file": output_file
-                    }
+                        # Create metadata for memory item
+                        metadata = {
+                            "source": "command_output",
+                            "command": match,
+                            "timestamp": datetime.now().timestamp(),
+                            "content_type": content_type,
+                            "error": error if error else None
+                        }
+
+                        # Add to memory
+                        memory_id = self.memory_manager.add(
+                            content=output,
+                            metadata=metadata
+                        )
+
+                        if memory_id:
+                            print(f"[Command output saved to memory with ID: {memory_id}]")
+
+                        # Store memory ID for reference
+                        # commands[match]["memory_id"] = memory_id
 
                     # Display the output (truncated for very large outputs)
                     # print("\n--- Command Output ---")
@@ -375,6 +383,8 @@ Output files are saved to: {os.path.abspath(self.output_dir)}
 
                 except Exception as e:
                     print(f"[Error executing command: {str(e)}]")
+                    import traceback
+                    traceback.print_exc()
                     # Remove the command from input but leave an error message
                     clean_input = clean_input.replace(f"!{{{match}}}", f"[Command error: {str(e)}]")
             else:
@@ -386,3 +396,25 @@ Output files are saved to: {os.path.abspath(self.output_dir)}
         clean_input = clean_input.strip()
 
         return clean_input, commands
+
+    def _detect_content_type(self, content: str) -> str:
+        """Detect the type of content from command output."""
+        # Check for table-like structures (tab or multiple spaces between items)
+        if '\t' in content or re.search(r'\S\s{2,}\S', content):
+            return "tabular"
+
+        # Check for filesystem info
+        if any(fs in content for fs in ['Filesystem', 'Mounted on', '/dev/']):
+            return "filesystem"
+
+        # Check for JSON structure
+        if content.strip().startswith('{') and content.strip().endswith('}'):
+            return "json"
+
+        # Check for code (simple heuristic)
+        code_indicators = ['def ', 'function', 'class ', 'import ', 'from ', '#!/bin/']
+        if any(indicator in content for indicator in code_indicators):
+            return "code"
+
+        # Default
+        return "text"

@@ -71,7 +71,6 @@ class SpeculativeDecodingStats:
             "fallbacks": self.fallbacks
         }
 
-
 class SpeculativeDecoder:
     """
     Implements speculative decoding to accelerate text generation using a draft model.
