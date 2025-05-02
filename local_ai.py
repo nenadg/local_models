@@ -181,7 +181,7 @@ class MemoryEnhancedChat:
         # Initialize memory manager
         self.memory_manager = MemoryManager(
             storage_path=self.memory_dir,
-            embedding_dim=384,  # Adjust based on model's hidden size
+            embedding_dim=2048,  # Adjust based on model's hidden size (initially 384)
             enable_enhanced_embeddings=self.enable_enhanced_embeddings,
             max_enhancement_levels=3,
             auto_save=True,
@@ -407,6 +407,26 @@ class MemoryEnhancedChat:
         else:
             self.draft_model = None
 
+    def _setup_web_integration(self):
+        """Set up web search integration."""
+        try:
+            from web_integration import WebIntegration
+
+            # Initialize web integration
+            self.web_integration = WebIntegration(
+                memory_enhanced_chat=self,
+                similarity_enhancement_factor=self.similarity_enhancement_factor,
+                max_web_results=5,
+                add_to_memory=self.enable_memory
+            )
+
+            print(f"{self.get_time()} Web search integration enabled")
+            self.web_enabled = True
+        except ImportError as e:
+            print(f"{self.get_time()} Web search integration not available: {e}")
+            self.web_enabled = False
+
+
     def _save_command_output_to_memory(self, command: str, output: str):
         """Save command output to memory for future reference."""
         if not self.enable_memory or not output:
@@ -497,6 +517,7 @@ class MemoryEnhancedChat:
             temperature: float = 0.7,
             enable_memory: Optional[bool] = None,
             show_confidence: bool = False,
+            enable_web_search: Optional[bool] = None,
             response_filter: Optional[ResponseFilter] = None) -> str:
         """
         Generate a response with memory integration and streaming.
@@ -543,10 +564,20 @@ class MemoryEnhancedChat:
             if cleaned_input == "_COMMAND_ONLY_":
                 return "Command processed."
 
+        # Check for web search commands
+        if hasattr(self, 'web_integration') and user_query:
+            web_command_response = self.web_integration.process_web_command(user_query)
+            if web_command_response:
+                return web_command_response
+
         # Create memory-enhanced messages if memory is enabled
         memory_enabled = self.enable_memory if enable_memory is None else enable_memory
         if memory_enabled and user_query:
             messages = self._integrate_memory(messages, user_query)
+
+        web_enabled = self.web_enabled if enable_web_search is None else enable_web_search
+        if web_enabled and hasattr(self, 'web_integration') and user_query:
+            messages = self.web_integration.enhance_conversation_with_web(messages, user_query)
 
         # Setup streaming
         fd = sys.stdin.fileno()
@@ -1421,6 +1452,8 @@ def main():
     # Feature flags
     parser.add_argument("--no-memory", action="store_true",
                        help="Disable memory features")
+    parser.add_argument("--no-web", action="store_true",
+                       help="Disable web search features")
     parser.add_argument("--heatmap", action="store_true", default=True,
                        help="Show confidence heatmap")
     parser.add_argument("--do-sample", action="store_true", default=True,
@@ -1463,6 +1496,10 @@ def main():
         system_message=args.system_prompt
     )
 
+    # Set up web integration
+    if not args.no_web:
+        chat._setup_web_integration()
+
     # Initialize response filter
     response_filter = ResponseFilter(
         confidence_threshold=args.confidence_threshold,
@@ -1493,13 +1530,16 @@ def main():
     print("Type 'exit' to end the conversation")
     print("Special commands:")
     print("  !system: [message] - Change the system message")
-    print("  !mcp-help - Show MCP commands for file output")
     print("  !toggle-memory - Toggle memory system on/off")
     print("  !toggle-heatmap - Toggle confidence heatmap visualization")
     print("  !toggle-draft - Toggle draft model for speculative decoding")
-    print("  !memory-stats - Display info about memories")
-    print("  !enhance-factor: [0.0-1.0] - Set similarity enhancement factor")
     print("  !toggle-filter - Toggle confidence filtering")
+    print("  !toggle-web - Toggle web search integration on/off")
+    print("  !mcp-help - Show MCP commands for file output")
+    print("  !memory-stats - Display info about memories")
+    print("  !web-stats - Display info about web searches")
+    print("  !enhance-factor: [0.0-1.0] - Set similarity enhancement factor")
+    print("  !web: [query] - Perform a direct web search")
     print("="*50 + "\n")
 
     # Initialize chat state
@@ -1576,6 +1616,25 @@ def main():
                 print(f"  Items added this session: {chat.memory_stats['items_added']}")
                 print(f"  Retrievals this session: {chat.memory_stats['retrievals']}")
                 print(f"  Enhanced embeddings: {'Enabled' if stats['enhanced_enabled'] else 'Disabled'}")
+                continue
+
+            elif user_input.lower() == '!toggle-web':
+                if hasattr(chat, 'web_integration'):
+                    is_enabled = chat.web_integration.toggle_web_search()
+                    print(f"{chat.get_time()} Web search {'enabled' if is_enabled else 'disabled'}")
+                else:
+                    print(f"{chat.get_time()} Web search integration not available")
+                continue
+
+            elif user_input.lower() == '!web-stats':
+                if hasattr(chat, 'web_integration'):
+                    stats = chat.web_integration.get_stats()
+                    print(f"\n{chat.get_time()} Web Search Statistics:")
+                    print(f"  Searches performed: {stats['searches_performed']}")
+                    print(f"  Items added to memory: {stats['items_added_to_memory']}")
+                    print(f"  Web search enabled: {'Yes' if stats['web_enabled'] else 'No'}")
+                else:
+                    print(f"{chat.get_time()} Web search integration not available")
                 continue
 
             # Add user message to conversation
