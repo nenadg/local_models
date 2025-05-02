@@ -98,9 +98,10 @@ class MemoryEnhancedChat:
 
         # Set up components
         self._setup_device(device)
-        self._setup_utility_components()
+        self._setup_resource_manager()
         self._setup_model_and_tokenizer()
         self._setup_memory_system()
+        self._setup_utility_components()
         self._setup_speculative_decoding()
 
         # Initialize stats and state
@@ -130,19 +131,18 @@ class MemoryEnhancedChat:
         # Set appropriate torch dtype
         self.torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
 
-    def _setup_utility_components(self):
-        """Set up utility components for the chat system."""
+    def _setup_resource_manager(self):
         # Resource manager for efficient memory usage
         self.resource_manager = ResourceManager(device=self.device)
 
-        # Set up memory system first (needed by MCP handler)
-        # self._setup_memory_system()
+    def _setup_utility_components(self):
+        """Set up utility components for the chat system."""
 
         # Output file handler with memory integration
         self.mcp_handler = MCPHandler(
             output_dir=self.output_dir,
             allow_shell_commands=True,
-            memory_manager=None # load later self.memory_manager  # Pass memory manager here
+            memory_manager=self.memory_manager  # Pass memory manager here
         )
 
         # Confidence metrics tracker
@@ -189,8 +189,6 @@ class MemoryEnhancedChat:
 
         # Create embedding function
         self._setup_embedding_function()
-
-        self.mcp_handler.memory_manager = self.memory_manager
 
     def _setup_embedding_function(self):
         """Set up embedding function for the memory system."""

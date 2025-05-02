@@ -437,19 +437,36 @@ class MemoryManager:
 
     def _add_enhanced_embeddings(self, item: MemoryItem):
         """
-        Generate and add enhanced embeddings to a memory item.
+        Generate and add enhanced embeddings to a memory item with dimension validation.
         """
         # Skip if enhanced embeddings are disabled
         if not self.enable_enhanced_embeddings:
             return
 
-        # Ensure matrices are initialized
-        self._initialize_enhancement_matrices()
+        # Ensure matrices are initialized with current embedding dimension
+        if not hasattr(self, '_rotation_matrices') or not self._rotation_matrices:
+            self._initialize_enhancement_matrices()
+        else:
+            # Check if dimensions match
+            first_matrix = next(iter(self._rotation_matrices.values()))
+            if first_matrix.shape[0] != self.embedding_dim:
+                print(f"{self.get_time()} Rotation matrix dimension ({first_matrix.shape[0]}) does not match current embedding dimension ({self.embedding_dim}), reinitializing...")
+                self._initialize_enhancement_matrices()
 
         # Skip if no base embedding available
         if item.embedding is None or len(item.embedding) == 0:
             print(f"{self.get_time()} Warning: Cannot generate enhanced embeddings - no base embedding")
             return
+
+        # Check embedding dimension
+        if len(item.embedding) != self.embedding_dim:
+            print(f"{self.get_time()} Warning: Embedding dimension mismatch: {len(item.embedding)} vs {self.embedding_dim}")
+            # Try to resize embedding to match
+            if len(item.embedding) > self.embedding_dim:
+                item.embedding = item.embedding[:self.embedding_dim]
+            else:
+                # Pad with zeros
+                item.embedding = np.pad(item.embedding, (0, self.embedding_dim - len(item.embedding)))
 
         base_embedding = item.embedding
 
@@ -1308,7 +1325,23 @@ class MemoryManager:
     def _create_quickstart_cache(self):
         """Create a quickstart cache for faster loading next time."""
         try:
+            print(f"{self.get_time()} Trying to create quickstart cache")
             cache_path = os.path.join(self.storage_path, "quickstart_cache.pkl")
+
+            # Check if directory exists and is writable
+            if not os.path.exists(self.storage_path):
+                print(f"{self.get_time()} Storage directory doesn't exist, creating...")
+                os.makedirs(self.storage_path, exist_ok=True)
+
+            # Test write permission
+            test_path = os.path.join(self.storage_path, "write_test.tmp")
+            try:
+                with open(test_path, 'w') as f:
+                    f.write("test")
+                os.remove(test_path)
+            except Exception as perm_e:
+                print(f"{self.get_time()} ERROR: Cannot write to storage directory: {perm_e}")
+                return False
 
             # Prepare cache data
             cache_data = {
@@ -1317,28 +1350,55 @@ class MemoryManager:
                 'id_to_index': self.id_to_index,
                 'deleted_ids': list(self.deleted_ids),
                 'embedding_dim': self.embedding_dim,
-                'enable_enhanced_embeddings': self.enable_enhanced_embeddings,
-                'index': self.index
+                'enable_enhanced_embeddings': self.enable_enhanced_embeddings
             }
 
-            # Optionally include a subset of enhanced indices
-            if self.enhanced_indices and len(self.enhanced_indices) > 0:
-                # Include most commonly used level (typically level 1)
-                if 1 in self.enhanced_indices:
-                    cache_data['enhanced_index_1'] = self.enhanced_indices[1]
+            # Add index separately as it might not be serializable
+            try:
+                # First test if FAISS index is serializable
+                temp_index_path = os.path.join(self.storage_path, "temp_index.faiss")
+                if self.index is not None:
+                    faiss.write_index(self.index, temp_index_path)
+                    # If successful, include index in cache
+                    cache_data['index'] = self.index
+                    os.remove(temp_index_path)
+                else:
+                    print(f"{self.get_time()} WARNING: No index to cache")
+            except Exception as index_e:
+                print(f"{self.get_time()} Warning: Cannot serialize FAISS index: {index_e}")
+                cache_data['index'] = None
 
-            # Save cache
-            print(f"{self.get_time()} Creating quickstart cache for {len(self.items)} items...")
-            with open(cache_path, 'wb') as f:
-                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            # Try to save cache with increasing levels of fallback
+            try:
+                print(f"{self.get_time()} Creating quickstart cache for {len(self.items)} items...")
+                with open(cache_path, 'wb') as f:
+                    pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-            cache_size = os.path.getsize(cache_path) / (1024 * 1024)  # Size in MB
-            print(f"{self.get_time()} Quickstart cache created ({cache_size:.1f} MB)")
+                cache_size = os.path.getsize(cache_path) / (1024 * 1024)  # Size in MB
+                print(f"{self.get_time()} Quickstart cache created ({cache_size:.1f} MB)")
+                return True
+            except Exception as pickle_e:
+                print(f"{self.get_time()} Failed to pickle full cache: {pickle_e}")
+
+                # Try with minimal data
+                try:
+                    minimal_data = {
+                        'timestamp': time.time(),
+                        'item_count': len(self.items),
+                        'embedding_dim': self.embedding_dim
+                    }
+                    with open(cache_path, 'wb') as f:
+                        pickle.dump(minimal_data, f)
+                    print(f"{self.get_time()} Created minimal cache (metadata only)")
+                    return True
+                except Exception as min_e:
+                    print(f"{self.get_time()} All cache creation attempts failed: {min_e}")
+                    return False
 
         except Exception as e:
             print(f"{self.get_time()} Error creating quickstart cache: {e}")
-            # If cache creation fails, just log the error but don't raise
-            # This ensures the application continues to work
+            traceback.print_exc()
+            return False
 
     def _full_load(self) -> bool:
         """
