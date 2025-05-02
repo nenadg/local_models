@@ -1222,9 +1222,6 @@ class TinyLlamaChat:
         # Combine all metrics with equal weights to get quality
         quality = metrics.get('quality', (confidence * 0.25) + (perplexity_score * 0.25) + (entropy_score * 0.25) + 0.25)
 
-        # Combine all metrics with equal weights for truthiness
-        truthiness = quality / 2
-
         # If all metrics are toggled on, show individual metrics
         if show_all_metrics:
             print("\nDetailed metrics:")
@@ -1251,8 +1248,8 @@ class TinyLlamaChat:
                 print(self.format_metric_bar(perplexity, 1.0, 10.0, 20, "Perplexity", reverse=True))
                 print(self.format_metric_bar(entropy, 0.0, 3.0, 20, "Entropy", reverse=True))
 
-        # Print truthiness bar
-        print(self.format_metric_bar(truthiness, 0.0, 1.0, 30, "Truthiness"))
+        # Print quality bar
+        print(self.format_metric_bar(quality, 0.0, 1.0, 30, "Quality"))
 
         # Show sharpening status if enabled
         if self.memory_manager.use_fractal:
@@ -1506,7 +1503,7 @@ class TinyLlamaChat:
             r'Confidence Heatmap Legend.*?Confidence range:.*?\d+\.\d+',  # Entire legend block
             r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Memory\] Added \d+ new',  # Memory adding info
             r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Generated.*?tokens\/sec\]',  # Generation stats
-            r'\[█+░*\] Truthiness:.*?\d+\.\d+',                           # Truthiness bar
+            r'\[█+░*\] Quality:.*?\d+\.\d+',                           # quality bar
             r'\[\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\] \[Sharpening enabled:.*?\]',  # Sharpening info
         ]
 
@@ -1729,7 +1726,7 @@ def main():
     parser.add_argument("--no-memory", action="store_true",
                       help="Disable automatic memory features")
     parser.add_argument("--all-metrics", action="store_true", default=False,
-                      help="Show all detailed metrics instead of just truthiness")
+                      help="Show all detailed metrics instead of just quality")
     parser.add_argument("--enable-sharpening", action="store_true", default=True,
                       help="Enable vector space and confidence sharpening")
     parser.add_argument("--sharpening-factor", type=float, default=0.3,
@@ -1840,7 +1837,7 @@ def main():
         print("  !toggle-turbo - Toggle turbo mode on/off")
         print("  !toggle-filter - Toggle uncertainty filtering on/off")
         print("  !toggle-heatmap - Toggle confidence heatmap visualization on/off")
-        print("  !toggle-all-metrics - Toggle between showing all metrics or just truthiness")
+        print("  !toggle-all-metrics - Toggle between showing all metrics or just quality")
         print("  !toggle-sharpening - Toggle vector space sharpening on/off")
         print("  !toggle-memory - Toggle automatic memorization on/off")
         print("  !memory-stats - Display info about memories")
