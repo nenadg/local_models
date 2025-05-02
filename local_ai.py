@@ -882,9 +882,12 @@ class MemoryEnhancedChat:
             config['temperature'] = temperature if temperature > 0.1 else 1.0
         else:
             config['do_sample'] = False
+            del config['top_k']
+            del config['top_k']
+            del config['temperature']
 
         # Get domain settings if classifier is available
-        if hasattr(self, 'question_classifier') and self.question_classifier:
+        if self.do_sample and hasattr(self, 'question_classifier') and self.question_classifier:
             settings = self.question_classifier.get_domain_settings(query)
             domain = settings['domain']
 
