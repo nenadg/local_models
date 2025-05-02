@@ -575,6 +575,7 @@ class MemoryEnhancedChat:
 
             # Save to memory if enabled
             if memory_enabled and user_query and response:
+                print("\n")
                 self._save_to_memory(user_query, response)
 
             return response
@@ -1063,7 +1064,6 @@ class MemoryEnhancedChat:
         os.makedirs(self.memory_dir, exist_ok=True)
         history_file = os.path.join(self.memory_dir, '.multiline_history')
 
-        print(f"\n{prompt}")
         print("(Multiline input mode. Use Ctrl+D or Alt+Enter to submit, Ctrl+C to cancel)")
 
         try:
