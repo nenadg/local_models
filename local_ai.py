@@ -484,6 +484,8 @@ class TinyLlamaChat:
 
         # Set single embedding function
         self.memory_manager.embedding_function = generate_embedding
+        self.memory_manager._embedding_cache = {}
+        self.memory_manager._embedding_cache_capacity = self._embedding_cache_capacity
 
         # Add a method to get embedding stats
         def get_embedding_stats(self):
@@ -668,6 +670,26 @@ class TinyLlamaChat:
                 streamer.end()
             except Exception as specific_e:
                 print(f"{self.get_time()} Error ending streamer: {specific_e}")
+
+    def generate_with_memory(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None):
+        """Generate a response with memory integration."""
+        # Get the most recent user query
+        user_query = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
+
+        # Retrieve relevant memories
+        if user_query:
+            memories = self.memory_manager.retrieve(user_query, top_k=5, min_similarity=0.25)
+
+            # Format memories for inclusion in the prompt
+            if memories:
+                memory_text = self.memory_manager.format_knowledge_for_prompt(memories, user_query)
+
+                # Modify the system message to include memories
+                system_with_memory = self.system_message["content"] + "\n\n" + memory_text
+                messages[0]["content"] = system_with_memory
+
+        # Now generate the response with the enhanced context
+        return self.generate_response(messages, max_new_tokens, temperature, turbo_mode, show_confidence, response_filter)
 
     def generate_response(self, messages, max_new_tokens=128, temperature=0.7, turbo_mode=True, show_confidence=False, response_filter=None):
         """Generate a response with ultra-fast speculative decoding (streaming only)"""
@@ -2013,7 +2035,7 @@ def main():
                 chat.stop_event.clear()  # Reset the event
 
                 # Generate response
-                response = chat.generate_response(
+                response = chat.generate_with_memory(
                     conversation,
                     temperature=args.temperature,
                     max_new_tokens=args.max_tokens,
