@@ -99,6 +99,7 @@ class WebSearchManager:
                 print(f"{self.get_time()} Error getting domain: {e}")
 
         # Clean the query
+        clean_query = re.sub(r'\b(search|look up|google|find online|web search)\b', '', query.lower()) # boilerplate to trigger search
         clean_query = re.sub(r'\b(what|how|who|when|where|why|is|are|do|does|can|could|would|should)\b', '', query.lower())
         clean_query = re.sub(r'\b(the|a|an|in|on|at|by|for|of|with|about)\b', '', clean_query)
         clean_query = re.sub(r'\s+', ' ', clean_query).strip()
@@ -137,6 +138,7 @@ class WebSearchManager:
             String of key terms
         """
         # Remove question words and common stop words
+        clean_query = re.sub(r'\b(search|look up|google|find online|web search)\b', '', query.lower()) # boilerplate to trigger search
         clean_query = re.sub(r'\b(what|how|who|when|where|why|is|are|do|does|can|could|would|should)\b', '', query.lower())
         clean_query = re.sub(r'\b(the|a|an|in|on|at|by|for|of|with|about)\b', '', clean_query)
         clean_query = re.sub(r'[^\w\s]', '', clean_query)  # Remove punctuation

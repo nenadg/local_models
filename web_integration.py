@@ -1,6 +1,6 @@
 """
-Simplified web integration for local LLM chat system.
-Focuses on Google Custom Search API integration with memory enhancement.
+Streamlined web integration for local LLM chat system.
+Eliminates duplicate API calls and focuses on Google Custom Search API.
 """
 
 import re
@@ -12,7 +12,7 @@ from datetime import datetime
 class WebIntegration:
     """
     Integrates web search capabilities with local LLM chat using Google Custom Search API.
-    Works with existing MemoryEnhancedChat class.
+    Optimized to prevent duplicate API calls.
     """
 
     def __init__(
@@ -39,27 +39,24 @@ class WebIntegration:
         """
         self.chat = memory_enhanced_chat
 
+        # Import keyword generation, but don't create full WebSearchManager
+        # This avoids redundancy and multiple search paths
+        from web_search import WebSearchManager
+        self.keyword_generator = WebSearchManager(
+            memory_manager=None,  # Don't need memory access here
+            question_classifier=memory_enhanced_chat.question_classifier,
+            similarity_enhancement_factor=similarity_enhancement_factor
+        )
+
         # Initialize Google Search client
         from google_search_client import GoogleSearchClient
         self.search_client = GoogleSearchClient(
             api_key=api_key,
             cx_id=cx_id,
-            ocr_extractor=None,  # No OCR extractor needed
             memory_manager=memory_enhanced_chat.memory_manager if add_to_memory else None,
             cache_dir=cache_dir,
             similarity_enhancement_factor=similarity_enhancement_factor
         )
-
-        # Initialize the WebSearchManager
-        from web_search import WebSearchManager
-        self.web_search = WebSearchManager(
-            memory_manager=memory_enhanced_chat.memory_manager if add_to_memory else None,
-            question_classifier=memory_enhanced_chat.question_classifier,
-            similarity_enhancement_factor=similarity_enhancement_factor
-        )
-
-        # Connect the WebSearchManager to the GoogleSearchClient
-        self.web_search.set_search_client(self.search_client)
 
         # Settings
         self.max_web_results = max_web_results
@@ -84,6 +81,19 @@ class WebIntegration:
         self.web_enabled = not self.web_enabled
         return self.web_enabled
 
+    def should_search_web(self, query: str) -> bool:
+        """
+        Determine if a web search is needed for this query.
+
+        Args:
+            query: Query text
+
+        Returns:
+            True if web search is recommended
+        """
+        # Reuse the logic from WebSearchManager without creating the whole class
+        return self.keyword_generator.should_search_web(query)
+
     def enhance_conversation_with_web(
         self,
         messages: List[Dict[str, str]],
@@ -92,6 +102,7 @@ class WebIntegration:
     ) -> List[Dict[str, str]]:
         """
         Enhance conversation with web search results.
+        Optimized to prevent duplicate API calls.
 
         Args:
             messages: Current conversation messages
@@ -106,22 +117,17 @@ class WebIntegration:
             return messages
 
         # Check if web search is needed
-        should_search = force_search or self.web_search.should_search_web(query)
+        should_search = force_search or self.should_search_web(query)
 
         if not should_search:
             return messages
 
-        # Track statistics
-        self.web_stats["searches"] += 1
-
-        # IMPORTANT FIX: Don't use web_search.search() as it calls search_client.search again
-        # Instead, call search_client.search directly with the processed keywords
-
         # Generate optimized search keywords
-        optimized_query = self.web_search._generate_search_keywords(query)
+        optimized_query = self.keyword_generator._generate_search_keywords(query)
         print(f"{self.get_time()} Using optimized query: {optimized_query}")
 
-        # Get search results directly from search client
+        # Perform search
+        self.web_stats["searches"] += 1
         results = self.search_client.search(
             query=optimized_query,
             num_results=self.max_web_results,
@@ -132,11 +138,12 @@ class WebIntegration:
         if not results:
             return messages
 
-        # Add to memory if enabled
+        # Add to memory if enabled - REUSE results to avoid duplicate API calls
         if self.add_to_memory and self.chat.memory_manager:
             added_items = self.search_client.search_and_add_to_memory(
                 query=query,
-                max_results=self.max_web_results
+                max_results=self.max_web_results,
+                results=results  # Pass existing results to avoid duplicate API calls
             )
 
             if added_items:
@@ -148,49 +155,50 @@ class WebIntegration:
 
         # Format results for context
         web_context = self.search_client.format_for_context(results, query)
-        
+
         # Extract system message
         system_message = enhanced_messages[0]["content"]
-        
+
         # Check if already contains web context
         if "WEB SEARCH RESULTS:" in system_message:
             # Replace existing web context
             parts = system_message.split("WEB SEARCH RESULTS:")
             system_prefix = parts[0]
-            
+
             # Check if there's a memory context we need to preserve
             if "MEMORY CONTEXT:" in system_prefix:
                 memory_parts = system_prefix.split("MEMORY CONTEXT:")
                 system_content = memory_parts[0].strip()
                 memory_context = "MEMORY CONTEXT:" + memory_parts[1]
-                
+
                 # Create enhanced system message
                 enhanced_system = f"{system_content}\n\n{memory_context}\n\n{web_context}"
             else:
                 # No memory context
                 enhanced_system = f"{system_prefix.strip()}\n\n{web_context}"
-        
+
         elif "MEMORY CONTEXT:" in system_message:
             # Contains memory context but no web context
             parts = system_message.split("MEMORY CONTEXT:")
             system_content = parts[0].strip()
             memory_context = "MEMORY CONTEXT:" + parts[1]
-            
+
             # Create enhanced system message
             enhanced_system = f"{system_content}\n\n{memory_context}\n\n{web_context}"
-            
+
         else:
             # No memory or web context yet
             enhanced_system = f"{system_message}\n\n{web_context}"
-        
+
         # Update system message
         enhanced_messages[0]["content"] = enhanced_system
-        
+
         return enhanced_messages
 
     def process_web_command(self, query: str) -> Optional[str]:
         """
         Process web search commands from user.
+        Optimized to prevent duplicate API calls.
 
         Args:
             query: User query
@@ -206,12 +214,12 @@ class WebIntegration:
             if not search_query:
                 return "Please provide a search query. Example: !web latest climate reports"
 
-            # IMPORTANT FIX: Use a single search operation
-            # Generate optimized keywords
-            optimized_query = self.web_search._generate_search_keywords(search_query)
+            # Generate optimized search keywords
+            optimized_query = self.keyword_generator._generate_search_keywords(search_query)
             print(f"{self.get_time()} Using optimized query: {optimized_query}")
 
-            # Perform search using the optimized query directly from search client
+            # Perform search
+            self.web_stats["searches"] += 1
             results = self.search_client.search(
                 query=optimized_query,
                 num_results=7,  # More results for direct search
@@ -235,45 +243,23 @@ class WebIntegration:
                     response += f"   {snippet}\n"
                 response += f"   {url}\n\n"
 
-            # Add to memory if enabled - reuse existing results instead of searching again
+            # Add to memory if enabled - REUSE results to avoid duplicate API calls
             if self.add_to_memory and self.chat.memory_manager:
-                added = 0
-                for result in results:
-                    content = result.get('content', '')
-                    if not content:
-                        continue
+                added_items = self.search_client.search_and_add_to_memory(
+                    query=search_query,
+                    max_results=7,
+                    results=results  # Pass existing results to avoid duplicate API calls
+                )
 
-                    # Create metadata
-                    metadata = {
-                        'source': 'web_search',
-                        'url': result.get('url', ''),
-                        'title': result.get('title', ''),
-                        'domain': result.get('source', ''),
-                        'query': search_query,
-                        'timestamp': time.time()
-                    }
-
-                    # Add to memory
-                    try:
-                        item_id = self.chat.memory_manager.add(
-                            content=content,
-                            metadata=metadata
-                        )
-
-                        if item_id:
-                            added += 1
-                    except Exception:
-                        pass
-
-                if added > 0:
-                    self.web_stats["items_added"] += added
-                    response += f"Added {added} search results to memory.\n"
+                if added_items:
+                    self.web_stats["items_added"] += len(added_items)
+                    response += f"Added {len(added_items)} search results to memory.\n"
 
             return response
 
-        # URL command handling remains the same
+        # Check for direct URL command
         elif query.startswith("!url:"):
-            # This part is unchanged since it doesn't involve duplicate searches
+            # Extract URL
             url = query[5:].strip()
 
             if not url:
@@ -328,9 +314,9 @@ class WebIntegration:
                         response += f"Content added to memory (ID: {item_id}).\n"
                 except Exception as e:
                     response += f"Error adding to memory: {str(e)}\n"
-            
+
             return response
-            
+
         # Not a web command
         return None
 
@@ -369,5 +355,6 @@ class WebIntegration:
             "direct_url_accesses": self.web_stats["direct_url_accesses"],
             "api_calls": client_stats.get("api_calls", 0),
             "cache_hits": client_stats.get("cache_hits", 0),
+            "session_cache_size": client_stats.get("session_cache_size", 0),
             "web_enabled": self.web_enabled
         }

@@ -408,9 +408,9 @@ class MemoryEnhancedChat:
             self.draft_model = None
 
     def _setup_web_integration(self):
-        """Set up Google Custom Search API integration."""
+        """Set up Google Custom Search API integration with optimizations to prevent duplicate API calls."""
         try:
-            # Import our simplified web integration module
+            # Import our streamlined web integration module
             from web_integration import WebIntegration
 
             # Check for Google API credentials
@@ -422,7 +422,7 @@ class MemoryEnhancedChat:
                 print(f"{self.get_time()} Set GOOGLE_API_KEY and GOOGLE_CX_ID for full functionality.")
                 print(f"{self.get_time()} Web search will be limited.")
 
-            # Initialize web integration
+            # Initialize web integration with streamlined approach
             self.web_integration = WebIntegration(
                 memory_enhanced_chat=self,
                 similarity_enhancement_factor=self.similarity_enhancement_factor,
@@ -433,7 +433,7 @@ class MemoryEnhancedChat:
                 cache_dir="./cache"
             )
 
-            print(f"{self.get_time()} Google Custom Search integration enabled")
+            print(f"{self.get_time()} Google Custom Search integration enabled with session caching")
             self.web_enabled = True
         except Exception as e:
             print(f"{self.get_time()} Web search integration not available: {e}")

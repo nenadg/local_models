@@ -1,6 +1,6 @@
 """
 Google Custom Search API client for integration with TinyLlama Chat.
-Simplified version without OCR dependency.
+Streamlined version to prevent duplicate API calls.
 """
 
 import os
@@ -13,14 +13,13 @@ from datetime import datetime
 
 class GoogleSearchClient:
     """
-    Client for Google Custom Search API.
+    Client for Google Custom Search API with optimizations to prevent duplicate API calls.
     """
 
     def __init__(
         self,
         api_key: str = None,
         cx_id: str = None,
-        ocr_extractor = None,  # Kept for compatibility but not used
         memory_manager = None,
         cache_dir: str = "./cache",
         cache_duration: int = 3600,  # 1 hour cache by default
@@ -32,7 +31,6 @@ class GoogleSearchClient:
         Args:
             api_key: Google API key
             cx_id: Google Custom Search Engine ID
-            ocr_extractor: OCR extraction module (not used)
             memory_manager: Memory manager for storing results
             cache_dir: Directory for caching search results
             cache_duration: Duration in seconds to cache results
@@ -47,6 +45,10 @@ class GoogleSearchClient:
 
         # Create cache directory if it doesn't exist
         os.makedirs(self.cache_dir, exist_ok=True)
+
+        # Cache for the current session to prevent duplicate API calls
+        # This maps query -> results within the same session
+        self._session_cache = {}
 
         # Track statistics
         self.search_stats = {
@@ -82,9 +84,15 @@ class GoogleSearchClient:
             print(f"{self.get_time()} API key or CX ID not set")
             return []
 
-        # Check cache first
-        cache_key = f"gsearch_{hashlib.md5(query.encode()).hexdigest()}"
-        cache_path = os.path.join(self.cache_dir, f"{cache_key}.json")
+        # First check session cache to prevent duplicate API calls within the same session
+        cache_key = query
+        if not force_refresh and cache_key in self._session_cache:
+            print(f"{self.get_time()} Using session-cached results for: {query}")
+            return self._session_cache[cache_key]
+
+        # Then check disk cache
+        disk_cache_key = f"gsearch_{hashlib.md5(query.encode()).hexdigest()}"
+        cache_path = os.path.join(self.cache_dir, f"{disk_cache_key}.json")
 
         if not force_refresh and os.path.exists(cache_path):
             try:
@@ -95,6 +103,8 @@ class GoogleSearchClient:
                 if time.time() - cached_data.get('timestamp', 0) < self.cache_duration:
                     print(f"{self.get_time()} Using cached search results for: {query}")
                     self.search_stats["cache_hits"] += 1
+                    # Store in session cache too
+                    self._session_cache[cache_key] = cached_data.get('results', [])
                     return cached_data.get('results', [])
             except Exception as e:
                 print(f"{self.get_time()} Error reading cache: {e}")
@@ -143,7 +153,10 @@ class GoogleSearchClient:
                     }
                     results.append(result)
 
-            # Cache results
+            # Store in session cache
+            self._session_cache[cache_key] = results
+
+            # Cache results to disk
             try:
                 cache_data = {
                     'timestamp': time.time(),
@@ -160,6 +173,77 @@ class GoogleSearchClient:
         except Exception as e:
             print(f"{self.get_time()} Error performing search: {e}")
             return []
+
+    def search_and_add_to_memory(
+        self,
+        query: str,
+        max_results: int = 5,
+        content_threshold: int = 20,  # Minimum content length to add to memory
+        results: Optional[List[Dict[str, Any]]] = None  # Reuse existing results if available
+    ) -> List[Dict[str, Any]]:
+        """
+        Search and add relevant results to memory.
+
+        Args:
+            query: Search query
+            max_results: Maximum number of results to add to memory
+            content_threshold: Minimum content length to consider adding to memory
+            results: Optional pre-existing search results to reuse (prevents duplicate API calls)
+
+        Returns:
+            List of memory items added
+        """
+        if not self.memory_manager:
+            print(f"{self.get_time()} No memory manager available")
+            return []
+
+        # Use provided results or perform a new search
+        search_results = results
+        if search_results is None:
+            # Check if we have this query in session cache first
+            if query in self._session_cache:
+                print(f"{self.get_time()} Using session-cached results for memory: {query}")
+                search_results = self._session_cache[query]
+            else:
+                # Not in session cache, perform new search
+                search_results = self.search(query, num_results=max_results)
+
+        # Add relevant results to memory
+        added_items = []
+
+        for result in search_results:
+            content = result.get('content', '') or result.get('snippet', '')
+
+            # Skip results with insufficient content
+            if len(content) < content_threshold:
+                continue
+
+            # Create metadata
+            metadata = {
+                'source': 'google_search',
+                'url': result.get('url'),
+                'title': result.get('title'),
+                'domain': result.get('source'),
+                'query': query,
+                'timestamp': time.time()
+            }
+
+            # Add to memory
+            try:
+                item_id = self.memory_manager.add(
+                    content=content,
+                    metadata=metadata
+                )
+
+                if item_id:
+                    result['memory_id'] = item_id
+                    added_items.append(result)
+                    print(f"{self.get_time()} Added to memory: {result.get('title')}")
+                    self.search_stats["memory_additions"] += 1
+            except Exception as e:
+                print(f"{self.get_time()} Error adding to memory: {e}")
+
+        return added_items
 
     def get_url_content(self, url: str, force_refresh: bool = False) -> Dict[str, Any]:
         """
@@ -275,67 +359,6 @@ class GoogleSearchClient:
         except Exception:
             return "unknown"
 
-    def search_and_add_to_memory(
-        self,
-        query: str,
-        max_results: int = 5,
-        content_threshold: int = 20  # Minimum content length to add to memory
-    ) -> List[Dict[str, Any]]:
-        """
-        Search and add relevant results to memory.
-
-        Args:
-            query: Search query
-            max_results: Maximum number of results to add to memory
-            content_threshold: Minimum content length to consider adding to memory
-
-        Returns:
-            List of memory items added
-        """
-        if not self.memory_manager:
-            print(f"{self.get_time()} No memory manager available")
-            return []
-
-        # Perform search
-        results = self.search(query, num_results=max_results)
-
-        # Add relevant results to memory
-        added_items = []
-
-        for result in results:
-            content = result.get('content', '') or result.get('snippet', '')
-
-            # Skip results with insufficient content
-            if len(content) < content_threshold:
-                continue
-
-            # Create metadata
-            metadata = {
-                'source': 'google_search',
-                'url': result.get('url'),
-                'title': result.get('title'),
-                'domain': result.get('source'),
-                'query': query,
-                'timestamp': time.time()
-            }
-
-            # Add to memory
-            try:
-                item_id = self.memory_manager.add(
-                    content=content,
-                    metadata=metadata
-                )
-
-                if item_id:
-                    result['memory_id'] = item_id
-                    added_items.append(result)
-                    print(f"{self.get_time()} Added to memory: {result.get('title')}")
-                    self.search_stats["memory_additions"] += 1
-            except Exception as e:
-                print(f"{self.get_time()} Error adding to memory: {e}")
-
-        return added_items
-
     def format_for_context(self, results: List[Dict[str, Any]], query: str) -> str:
         """
         Format search results for inclusion in context.
@@ -373,5 +396,6 @@ class GoogleSearchClient:
         return {
             "api_calls": self.search_stats["api_calls"],
             "cache_hits": self.search_stats["cache_hits"],
-            "memory_additions": self.search_stats["memory_additions"]
+            "memory_additions": self.search_stats["memory_additions"],
+            "session_cache_size": len(self._session_cache)
         }
