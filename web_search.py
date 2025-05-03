@@ -32,10 +32,10 @@ class WebSearchManager:
         question_classifier=None,
         similarity_enhancement_factor: float = 0.3,
         search_url_template: str =random.choice([
-            "https://duckduckgo.com/html/?q={query}",  # DuckDuckGo (original)
-            "https://search.brave.com/search?q={query}",  # Brave Search
+            #"https://duckduckgo.com/html/?q={query}",  # DuckDuckGo (original)
+            #"https://search.brave.com/search?q={query}",  # Brave Search
             "https://html.duckduckgo.com/html/?q={query}",  # Alternative DuckDuckGo URL
-            "https://www.mojeek.com/search?q={query}"  # Mojeek (privacy-focused search engine)
+            #"https://www.mojeek.com/search?q={query}"  # Mojeek (privacy-focused search engine)
         ]),
         max_search_results: int = 10,
         max_content_chars: int = 8000,
@@ -346,28 +346,82 @@ class WebSearchManager:
             print(f"{self.get_time()} Error fetching content for {url}: {e}")
             return result
 
+    def _search_with_fallback(self, query: str, max_results: int) -> List[Dict[str, Any]]:
+        """
+        Try multiple search engines if the primary one fails.
+
+        Args:
+            query: Search query
+            max_results: Maximum results to return
+
+        Returns:
+            List of search results
+        """
+        # List of search URLs to try
+        search_urls = [
+            "https://duckduckgo.com/html/?q={query}",  # DuckDuckGo (original)
+            "https://search.brave.com/search?q={query}",  # Brave Search
+            "https://html.duckduckgo.com/html/?q={query}",  # Alternative DuckDuckGo URL
+            "https://www.mojeek.com/search?q={query}"  # Mojeek (privacy-focused search engine)
+        ]
+
+        # Try each search URL until we get results
+        results = []
+        for url_template in search_urls:
+            try:
+                # Set the current search URL
+                self.search_url_template = url_template
+
+                # Perform search
+                search_url = self.search_url_template.format(query=quote_plus(query))
+                print(f"{self.get_time()} Trying search URL: {url_template}")
+
+                response = requests.get(search_url, headers=self.headers, timeout=10)
+                response.raise_for_status()
+
+                # Check if response contains captcha challenge
+                if 'captcha' in response.text.lower() or 'robot' in response.text.lower() or 'anomaly' in response.text.lower():
+                    print(f"{self.get_time()} Captcha detected, trying next search engine")
+                    continue
+
+                # Parse results
+                results = self._parse_search_results(response.text, max_results)
+
+                # If we got results, break the loop
+                if results:
+                    print(f"{self.get_time()} Successfully found {len(results)} results with {url_template}")
+                    break
+
+                print(f"{self.get_time()} No results found with {url_template}")
+
+            except Exception as e:
+                print(f"{self.get_time()} Error with {url_template}: {e}")
+
+        # Return whatever results we found (might be empty)
+        return results
+
     def search(
-        self, 
-        query: str, 
+        self,
+        query: str,
         include_content: bool = True,
         max_results: Optional[int] = None,
         max_content_length: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
-        Perform a web search for the given query.
-        
+        Perform a web search for the given query with fallback mechanisms.
+
         Args:
             query: The search query
             include_content: Whether to fetch full page content
             max_results: Maximum number of results to return
             max_content_length: Maximum content length to extract
-            
+
         Returns:
             List of search result dictionaries
         """
         search_terms = self._generate_search_keywords(query)
         print(f"{self.get_time()} Searching for: {search_terms}")
-        
+
         # Check cache first
         cache_key = f"search_{hashlib.md5(search_terms.encode()).hexdigest()}"
         with self._cache_lock:
@@ -377,42 +431,30 @@ class WebSearchManager:
                 if time.time() - cache_time < self._cache_expiry_seconds:
                     print(f"{self.get_time()} Using cached results")
                     return cached_data.get('results', [])
-        
+
         # Set limits
         max_results = max_results or self.max_search_results
         max_content_length = max_content_length or self.max_content_chars
-        
-        # Get search results
-        search_url = self.search_url_template.format(query=quote_plus(search_terms))
-        try:
-            print(f"{self.get_time()} Fetching search results...")
-            response = requests.get(search_url, headers=self.headers, timeout=10)
-            response.raise_for_status()
-            
-            # Parse search results
-            results = self._parse_search_results(response.text, max_results)
-           
-            # Fetch content if requested
-            if include_content and results:
-                print(f"{self.get_time()} Fetching content for {len(results)} results...")
-                self._fetch_content_for_results(results, max_content_length)
-            
-            # Cache results
-            with self._cache_lock:
-                self._search_cache[cache_key] = {
-                    'timestamp': time.time(),
-                    'results': results
-                }
-                
-                # Clean up old cache entries
-                self._clean_cache()
-            
-            return results
-            
-        except Exception as e:
-            print(f"{self.get_time()} Error during search: {e}")
-            traceback.print_exc()
-            return []
+
+        # Get search results with fallback mechanism
+        results = self._search_with_fallback(search_terms, max_results)
+
+        # Fetch content if requested
+        if include_content and results:
+            print(f"{self.get_time()} Fetching content for {len(results)} results...")
+            self._fetch_content_for_results(results, max_content_length)
+
+        # Cache results
+        with self._cache_lock:
+            self._search_cache[cache_key] = {
+                'timestamp': time.time(),
+                'results': results
+            }
+
+            # Clean up old cache entries
+            self._clean_cache()
+
+        return results
     
     def _parse_search_results(self, html: str, max_results: int) -> List[Dict[str, Any]]:
         """
