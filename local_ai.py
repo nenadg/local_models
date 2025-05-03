@@ -408,20 +408,19 @@ class MemoryEnhancedChat:
             self.draft_model = None
 
     def _setup_web_integration(self):
-        """Set up web search integration with OCR support."""
+        """Set up Google Custom Search API integration."""
         try:
+            # Import our simplified web integration module
             from web_integration import WebIntegration
 
-            # Check for OCR dependencies
-            ocr_available = True
-            try:
-                import pyppeteer
-                import pytesseract
-                from PIL import Image
-            except ImportError:
-                ocr_available = False
-                print(f"{self.get_time()} OCR dependencies not found. OCR extraction will be disabled.")
-                print(f"{self.get_time()} To enable OCR, install: pyppeteer pytesseract Pillow")
+            # Check for Google API credentials
+            api_key = os.environ.get("GOOGLE_API_KEY")
+            cx_id = os.environ.get("GOOGLE_CX_ID")
+
+            if not api_key or not cx_id:
+                print(f"{self.get_time()} Google API credentials not found in environment variables.")
+                print(f"{self.get_time()} Set GOOGLE_API_KEY and GOOGLE_CX_ID for full functionality.")
+                print(f"{self.get_time()} Web search will be limited.")
 
             # Initialize web integration
             self.web_integration = WebIntegration(
@@ -429,19 +428,18 @@ class MemoryEnhancedChat:
                 similarity_enhancement_factor=self.similarity_enhancement_factor,
                 max_web_results=5,
                 add_to_memory=self.enable_memory,
-                ocr_enabled=ocr_available  # Enable OCR if dependencies are available
+                api_key=api_key,
+                cx_id=cx_id,
+                cache_dir="./cache"
             )
 
-            if ocr_available:
-                print(f"{self.get_time()} Web search integration enabled with OCR support")
-            else:
-                print(f"{self.get_time()} Web search integration enabled (OCR support disabled)")
-
+            print(f"{self.get_time()} Google Custom Search integration enabled")
             self.web_enabled = True
-        except ImportError as e:
+        except Exception as e:
             print(f"{self.get_time()} Web search integration not available: {e}")
+            import traceback
+            traceback.print_exc()
             self.web_enabled = False
-
 
     def _save_command_output_to_memory(self, command: str, output: str):
         """Save command output to memory for future reference."""

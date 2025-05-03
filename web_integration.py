@@ -1,139 +1,153 @@
 """
-Web integration for local LLM chat system.
-Provides seamless integration of web search with existing memory system.
+Simplified web integration for local LLM chat system.
+Focuses on Google Custom Search API integration with memory enhancement.
 """
 
 import re
-import json
 import time
+import os
 from typing import List, Dict, Any, Optional, Tuple
-from web_search import WebSearchManager
+from datetime import datetime
 
 class WebIntegration:
     """
-    Integrates web search capabilities with local LLM chat.
+    Integrates web search capabilities with local LLM chat using Google Custom Search API.
     Works with existing MemoryEnhancedChat class.
     """
-    
+
     def __init__(
         self,
         memory_enhanced_chat,
         similarity_enhancement_factor: float = 0.3,
         max_web_results: int = 5,
         add_to_memory: bool = True,
-        ocr_enabled: bool = True
+        api_key: Optional[str] = None,
+        cx_id: Optional[str] = None,
+        cache_dir: str = "./cache"
     ):
         """
-        Initialize web integration.
-        
+        Initialize web integration with Google Custom Search.
+
         Args:
             memory_enhanced_chat: Existing MemoryEnhancedChat instance
             similarity_enhancement_factor: Factor for similarity enhancement
             max_web_results: Maximum web results to include
             add_to_memory: Whether to add results to memory
-            ocr_enabled: Whether to enable OCR fallback extraction
+            api_key: Google API key (will use environment variable if None)
+            cx_id: Google Custom Search Engine ID (will use environment variable if None)
+            cache_dir: Directory for caching search results
         """
         self.chat = memory_enhanced_chat
-        
-        # Initialize web search manager
+
+        # Initialize Google Search client
+        from google_search_client import GoogleSearchClient
+        self.search_client = GoogleSearchClient(
+            api_key=api_key,
+            cx_id=cx_id,
+            ocr_extractor=None,  # No OCR extractor needed
+            memory_manager=memory_enhanced_chat.memory_manager if add_to_memory else None,
+            cache_dir=cache_dir,
+            similarity_enhancement_factor=similarity_enhancement_factor
+        )
+
+        # Initialize the WebSearchManager
+        from web_search import WebSearchManager
         self.web_search = WebSearchManager(
             memory_manager=memory_enhanced_chat.memory_manager if add_to_memory else None,
             question_classifier=memory_enhanced_chat.question_classifier,
             similarity_enhancement_factor=similarity_enhancement_factor
         )
 
+        # Connect the WebSearchManager to the GoogleSearchClient
+        self.web_search.set_search_client(self.search_client)
+
         # Settings
         self.max_web_results = max_web_results
         self.add_to_memory = add_to_memory
         self.web_enabled = True
-        self.ocr_enabled = ocr_enabled  # Add this line
+
+        # Stats
         self.web_stats = {
             "searches": 0,
             "items_added": 0,
-            "ocr_extractions": 0  # Add this line
+            "direct_url_accesses": 0
         }
 
-    def toggle_ocr(self) -> bool:
-        """Toggle OCR extraction on/off."""
-        self.ocr_enabled = not self.ocr_enabled
-        return self.ocr_enabled
+        print(f"{self.get_time()} Web integration initialized with Google Custom Search API")
+
+    def get_time(self) -> str:
+        """Get formatted timestamp for logging."""
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]") + ' [WebIntegration]'
 
     def toggle_web_search(self) -> bool:
         """Toggle web search on/off."""
         self.web_enabled = not self.web_enabled
         return self.web_enabled
-    
+
     def enhance_conversation_with_web(
         self,
         messages: List[Dict[str, str]],
         query: str,
-        force_search: bool = False,
-        use_ocr: Optional[bool] = None
+        force_search: bool = False
     ) -> List[Dict[str, str]]:
         """
         Enhance conversation with web search results.
-        
+
         Args:
             messages: Current conversation messages
             query: Current user query
             force_search: Force web search even if not needed
-            use_ocr: Override default OCR setting
-            
+
         Returns:
             Enhanced messages with web context
         """
         # Skip if web search is disabled
         if not self.web_enabled:
             return messages
-        
+
         # Check if web search is needed
         should_search = force_search or self.web_search.should_search_web(query)
-        
+
         if not should_search:
             return messages
-        
+
         # Track statistics
         self.web_stats["searches"] += 1
 
-        # Determine if OCR should be used
-        use_ocr_value = self.ocr_enabled if use_ocr is None else use_ocr
-        
-        # Get search results
-        results = self.web_search.search(
-            query=query,
-            include_content=True,
-            max_results=self.max_web_results
+        # IMPORTANT FIX: Don't use web_search.search() as it calls search_client.search again
+        # Instead, call search_client.search directly with the processed keywords
+
+        # Generate optimized search keywords
+        optimized_query = self.web_search._generate_search_keywords(query)
+        print(f"{self.get_time()} Using optimized query: {optimized_query}")
+
+        # Get search results directly from search client
+        results = self.search_client.search(
+            query=optimized_query,
+            num_results=self.max_web_results,
+            include_content=True
         )
 
-        # Fetch content with OCR support if enabled
-        if results and use_ocr_value:
-            for result in results:
-                if not result.get('content') and result.get('url'):
-                    # No content fetched yet, try with OCR
-                    self.web_search._fetch_content_with_fallback(result)
-                    if result.get('extraction_method') == 'ocr':
-                        self.web_stats["ocr_extractions"] += 1
-        
         # Skip if no results
         if not results:
             return messages
-        
+
         # Add to memory if enabled
         if self.add_to_memory and self.chat.memory_manager:
-            added_items = self.web_search.search_and_add_to_memory(
+            added_items = self.search_client.search_and_add_to_memory(
                 query=query,
                 max_results=self.max_web_results
             )
 
             if added_items:
                 self.web_stats["items_added"] += len(added_items)
-                print(f"Added {len(added_items)} web search results to memory")
-        
+                print(f"{self.get_time()} Added {len(added_items)} web search results to memory")
+
         # Create enhanced messages
         enhanced_messages = messages.copy()
-        
+
         # Format results for context
-        web_context = self.web_search.format_for_context(results, query)
+        web_context = self.search_client.format_for_context(results, query)
         
         # Extract system message
         system_message = enhanced_messages[0]["content"]
@@ -173,166 +187,187 @@ class WebIntegration:
         enhanced_messages[0]["content"] = enhanced_system
         
         return enhanced_messages
-    
+
     def process_web_command(self, query: str) -> Optional[str]:
         """
-        Process web search command from user.
-        
+        Process web search commands from user.
+
         Args:
             query: User query
-            
+
         Returns:
             Response message or None if not a web command
         """
-        # Check for web command
+        # Check for web search command
         if query.startswith("!web"):
             # Extract search query
             search_query = query[4:].strip()
-            
+
             if not search_query:
                 return "Please provide a search query. Example: !web latest climate reports"
-            
-            # Check for OCR flag
-            use_ocr = self.ocr_enabled
 
-            if search_query.startswith("--no-ocr "):
-                use_ocr = False
-                search_query = search_query[9:].strip()
-            elif search_query.startswith("--ocr "):
-                use_ocr = True
-                search_query = search_query[6:].strip()
+            # IMPORTANT FIX: Use a single search operation
+            # Generate optimized keywords
+            optimized_query = self.web_search._generate_search_keywords(search_query)
+            print(f"{self.get_time()} Using optimized query: {optimized_query}")
 
-            # Perform search
-            results = self.web_search.search(
-                query=search_query,
-                include_content=True,
-                max_results=7  # More results for direct search
+            # Perform search using the optimized query directly from search client
+            results = self.search_client.search(
+                query=optimized_query,
+                num_results=7,  # More results for direct search
+                include_content=True
             )
 
-            # Fetch content with OCR support if enabled
-            if results and use_ocr:
-                ocr_count = 0
-                for result in results:
-                    if not result.get('content') and result.get('url'):
-                        # No content fetched yet, try with OCR
-                        self.web_search._fetch_content_with_fallback(result)
-                        if result.get('extraction_method') == 'ocr':
-                            ocr_count += 1
-                            self.web_stats["ocr_extractions"] += 1
-            
             if not results:
                 return f"No results found for: {search_query}"
-            
+
             # Format response
             response = f"Search results for: {search_query}\n\n"
-            
+
             for i, result in enumerate(results):
                 title = result.get('title', 'No title')
                 url = result.get('url', '')
                 domain = result.get('source', '')
                 snippet = result.get('snippet', '')
-                
-                # Indicate OCR enhancement
-                extraction_type = " [OCR]" if result.get('extraction_method') == 'ocr' else ""
 
-                response += f"{i+1}. {title} ({domain}){extraction_type}\n"
+                response += f"{i+1}. {title} ({domain})\n"
                 if snippet:
                     response += f"   {snippet}\n"
                 response += f"   {url}\n\n"
-            
-            # Add to memory if enabled
+
+            # Add to memory if enabled - reuse existing results instead of searching again
             if self.add_to_memory and self.chat.memory_manager:
                 added = 0
                 for result in results:
                     content = result.get('content', '')
                     if not content:
                         continue
-                    
+
                     # Create metadata
                     metadata = {
                         'source': 'web_search',
-                        'extraction_method': result.get('extraction_method', 'html'),
                         'url': result.get('url', ''),
                         'title': result.get('title', ''),
                         'domain': result.get('source', ''),
                         'query': search_query,
                         'timestamp': time.time()
                     }
-                    
+
                     # Add to memory
                     try:
                         item_id = self.chat.memory_manager.add(
                             content=content,
                             metadata=metadata
                         )
-                        
+
                         if item_id:
                             added += 1
                     except Exception:
                         pass
-                
+
                 if added > 0:
                     self.web_stats["items_added"] += added
                     response += f"Added {added} search results to memory.\n"
+
+            return response
+
+        # URL command handling remains the same
+        elif query.startswith("!url:"):
+            # This part is unchanged since it doesn't involve duplicate searches
+            url = query[5:].strip()
+
+            if not url:
+                return "Please provide a URL. Example: !url: https://example.com"
+
+            # Normalize URL
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+
+            # Track statistics
+            self.web_stats["direct_url_accesses"] += 1
+
+            # Get content
+            result = self.search_client.get_url_content(url)
+
+            if not result or not result.get('content'):
+                return f"Could not extract content from: {url}"
+
+            # Format response
+            response = f"Content extracted from: {url}\n\n"
+            response += f"Title: {result.get('title', 'Unknown title')}\n\n"
+
+            # Show content preview
+            content = result.get('content', '')
+            if len(content) > 500:
+                content_preview = content[:500] + "...\n(content truncated, added to memory for retrieval)"
+            else:
+                content_preview = content
+
+            response += f"Content preview:\n{content_preview}\n\n"
+
+            # Add to memory if enabled
+            if self.add_to_memory and self.chat.memory_manager:
+                try:
+                    # Create metadata
+                    metadata = {
+                        'source': 'direct_url',
+                        'url': url,
+                        'title': result.get('title', 'Unknown title'),
+                        'domain': self._extract_domain(url),
+                        'timestamp': time.time()
+                    }
+
+                    # Add to memory
+                    item_id = self.chat.memory_manager.add(
+                        content=content,
+                        metadata=metadata
+                    )
+
+                    if item_id:
+                        self.web_stats["items_added"] += 1
+                        response += f"Content added to memory (ID: {item_id}).\n"
+                except Exception as e:
+                    response += f"Error adding to memory: {str(e)}\n"
             
             return response
             
         # Not a web command
         return None
-    
+
+    def _extract_domain(self, url: str) -> str:
+        """
+        Extract domain name from URL.
+
+        Args:
+            url: URL to extract domain from
+
+        Returns:
+            Domain name
+        """
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            domain = parsed.netloc
+
+            # Remove www. prefix if present
+            if domain.startswith('www.'):
+                domain = domain[4:]
+
+            return domain
+
+        except Exception:
+            return "unknown"
+
     def get_stats(self) -> Dict[str, Any]:
         """Get web search statistics."""
+        # Get stats from search client
+        client_stats = self.search_client.get_stats() if hasattr(self.search_client, 'get_stats') else {}
+
         return {
             "searches_performed": self.web_stats["searches"],
             "items_added_to_memory": self.web_stats["items_added"],
-            "ocr_extractions": self.web_stats["ocr_extractions"],
-            "web_enabled": self.web_enabled,
-            "ocr_enabled": self.ocr_enabled
+            "direct_url_accesses": self.web_stats["direct_url_accesses"],
+            "api_calls": client_stats.get("api_calls", 0),
+            "cache_hits": client_stats.get("cache_hits", 0),
+            "web_enabled": self.web_enabled
         }
-
-    def format_for_context(self, results: List[Dict[str, Any]], query: str) -> str:
-        """
-        Format search results for inclusion in context.
-        Enhanced to show OCR extraction information.
-
-        Args:
-            results: List of search results
-            query: Original query
-
-        Returns:
-            Formatted context string
-        """
-        if not results:
-            return ""
-
-        # Rank results if not already ranked
-        if not any('relevance_score' in r for r in results):
-            results = self.web_search.rank_results_by_relevance(results, query)
-
-        # Build formatted output
-        output = "WEB SEARCH RESULTS:\n\n"
-
-        for i, result in enumerate(results[:5]):  # Limit to top 5
-            title = result.get('title', 'No title')
-            url = result.get('url', '')
-            domain = result.get('source', 'unknown')
-            score = result.get('relevance_score', 0)
-            content = result.get('content', result.get('snippet', ''))
-
-            # Add extraction method indicator
-            extraction_method = "[OCR]" if result.get('extraction_method') == 'ocr' else ""
-
-            # Truncate content to a reasonable length
-            if content:
-                content = content.strip()
-                if len(content) > 300:
-                    content = content[:297] + "..."
-
-            # Format result
-            output += f"[{i+1}] {title} ({domain}) {extraction_method}\n"
-            if content:
-                output += f"{content}\n"
-            output += f"Source: {url}\n\n"
-
-        output += "Use the information above to help answer the query if relevant.\n"
-        return output

@@ -185,3 +185,4 @@ fractal_embeddings_visualization.png
 test_memory/
 test_output/
 stress_test_memory/
+cache/
