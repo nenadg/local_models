@@ -139,23 +139,17 @@ class ResponseFilter:
 
         return sharpened_metrics
 
+    # In response_filter.py, modify the should_filter method
     def should_filter(self, metrics: Dict[str, float], query: Optional[str] = None) -> Tuple[bool, str]:
         """
         Determine if a response should be filtered based on metrics and domain.
-
-        Args:
-            metrics: Dictionary containing confidence, perplexity, and entropy values
-            query: The user's query (for domain detection)
-
-        Returns:
-            Tuple of (should_filter, reason)
         """
         # Ensure metrics contains basic values
         confidence = float(metrics.get("confidence", 0.5))
         entropy = float(metrics.get("entropy", 2.0))
         perplexity = float(metrics.get("perplexity", 10.0))
 
-        # Set default thresholds
+        # Set default thresholds - make these more strict
         domain_confidence_threshold = self.confidence_threshold
         domain_entropy_threshold = self.entropy_threshold
         domain_perplexity_threshold = self.perplexity_threshold
@@ -168,20 +162,43 @@ class ResponseFilter:
                 domain_settings = self.question_classifier.get_domain_settings(query)
                 domain = domain_settings.get('domain', 'unknown')
 
-                # Apply domain-specific thresholds
+                # Make stricter thresholds for all domains
                 if domain == 'arithmetic' or domain == 'factual':
                     # Stricter thresholds for factual/math queries
-                    domain_confidence_threshold = 0.75   # Higher threshold = 0.75
+                    domain_confidence_threshold = 0.75  # Higher threshold = 0.75
                     domain_entropy_threshold = 1.8      # Lower threshold = 1.8
                     domain_perplexity_threshold = 8.0   # Lower threshold = 8.0
                 elif domain == 'translation':
                     # Stricter thresholds for translations
-                    domain_confidence_threshold = 0.4
-                    domain_entropy_threshold = 3.9
+                    domain_confidence_threshold = 0.65  # Increased from 0.4
+                    domain_entropy_threshold = 2.5      # Decreased from 3.9
+                    domain_perplexity_threshold = 10.0  # Decreased from 12.0
+                elif domain == 'conceptual' or domain == 'procedural':
+                    # Add stricter thresholds for conceptual/procedural domains
+                    domain_confidence_threshold = 0.60
+                    domain_entropy_threshold = 2.2
                     domain_perplexity_threshold = 12.0
+                # Unknown domain - use stricter defaults
+                else:
+                    domain_confidence_threshold = 0.70  # Increased from default
+                    domain_entropy_threshold = 2.2      # Decreased from default
+                    domain_perplexity_threshold = 10.0  # Unchanged
             except Exception as e:
                 print(f"Error detecting domain: {e}")
                 # Continue with default thresholds if domain detection fails
+
+        # Add pattern recognition for hallucination risks
+        if query:
+            # Check for specific patterns that indicate factual queries
+            factual_patterns = ['who is', 'who was', 'what is', 'when did', 'where is',
+                               'which', 'list', 'name the', 'top', 'best']
+
+            is_likely_factual = any(pattern in query.lower() for pattern in factual_patterns)
+
+            # For likely factual queries, be even more strict
+            if is_likely_factual:
+                domain_confidence_threshold = max(domain_confidence_threshold, 0.75)
+                domain_entropy_threshold = min(domain_entropy_threshold, 2.0)
 
         # Apply sharpening if available
         if hasattr(self, 'sharpen_metrics'):
@@ -190,19 +207,7 @@ class ResponseFilter:
             # Fallback to original metrics
             sharpened_metrics = metrics.copy()
 
-        # Convert any numpy values to Python primitives to avoid array truth value errors
-        for key in sharpened_metrics:
-            if hasattr(sharpened_metrics[key], 'item'):
-                sharpened_metrics[key] = sharpened_metrics[key].item()
-
-        # Calculate a combined uncertainty score
-        uncertainty_score = (
-            (1 - float(sharpened_metrics.get("confidence", 0.5))) * 0.5 +     # Weight confidence more
-            (float(sharpened_metrics.get("entropy", 2.0)) / float(domain_entropy_threshold)) * 0.3 +
-            (float(sharpened_metrics.get("perplexity", 10.0)) / float(domain_perplexity_threshold)) * 0.2
-        )
-
-        # Check the confidence value explicitly
+        # Apply stricter checks
         sharpened_confidence = float(sharpened_metrics.get("confidence", 0.5))
         if sharpened_confidence < domain_confidence_threshold:
             return True, "low_confidence"
@@ -217,8 +222,15 @@ class ResponseFilter:
         if sharpened_perplexity > domain_perplexity_threshold:
             return True, "high_perplexity"
 
-        # High uncertainty score indicates problem
-        if uncertainty_score > 0.65:
+        # Calculate a combined uncertainty score with greater weight on confidence
+        uncertainty_score = (
+            (1 - float(sharpened_metrics.get("confidence", 0.5))) * 0.6 +     # More weight on confidence
+            (float(sharpened_metrics.get("entropy", 2.0)) / float(domain_entropy_threshold)) * 0.25 +
+            (float(sharpened_metrics.get("perplexity", 10.0)) / float(domain_perplexity_threshold)) * 0.15
+        )
+
+        # Lower the threshold for uncertainty score
+        if uncertainty_score > 0.55:  # Reduced from 0.65
             return True, "high_uncertainty"
 
         # If we get here, the response passes all checks

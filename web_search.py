@@ -98,9 +98,12 @@ class WebSearchManager:
             except Exception as e:
                 print(f"{self.get_time()} Error getting domain: {e}")
 
-        # Clean the query
-        clean_query = re.sub(r'\b(search|look up|google|find online|web search)\b', '', query.lower()) # boilerplate to trigger search
-        clean_query = re.sub(r'\b(what|how|who|when|where|why|is|are|do|does|can|could|would|should)\b', '', query.lower())
+        # Filter out boilerplate search trigger words - FIXED
+        boilerplate_search = r'\b(search|look up|google|find online|web search|find me|look for)\b'
+        clean_query = re.sub(boilerplate_search, '', query.lower())
+
+        # Remove question words and common stop words
+        clean_query = re.sub(r'\b(what|how|who|when|where|why|is|are|do|does|can|could|would|should)\b', '', clean_query)
         clean_query = re.sub(r'\b(the|a|an|in|on|at|by|for|of|with|about)\b', '', clean_query)
         clean_query = re.sub(r'\s+', ' ', clean_query).strip()
 
@@ -137,9 +140,14 @@ class WebSearchManager:
         Returns:
             String of key terms
         """
+        # Define boilerplate patterns to remove
+        boilerplate_search = r'\b(search|look up|google|find online|web search|find me|look for)\b'
+
+        # Remove boilerplate search words - FIXED
+        clean_query = re.sub(boilerplate_search, '', query.lower())
+
         # Remove question words and common stop words
-        clean_query = re.sub(r'\b(search|look up|google|find online|web search)\b', '', query.lower()) # boilerplate to trigger search
-        clean_query = re.sub(r'\b(what|how|who|when|where|why|is|are|do|does|can|could|would|should)\b', '', query.lower())
+        clean_query = re.sub(r'\b(what|how|who|when|where|why|is|are|do|does|can|could|would|should)\b', '', clean_query)
         clean_query = re.sub(r'\b(the|a|an|in|on|at|by|for|of|with|about)\b', '', clean_query)
         clean_query = re.sub(r'[^\w\s]', '', clean_query)  # Remove punctuation
         clean_query = re.sub(r'\s+', ' ', clean_query).strip()  # Normalize whitespace

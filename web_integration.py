@@ -63,11 +63,29 @@ class WebIntegration:
         self.add_to_memory = add_to_memory
         self.web_enabled = True
 
-        # Stats
+        # Initialize OCR capabilities
+        self.ocr_enabled = True  # Enable by default
+        try:
+            # Import OCR extractor
+            from web_ocr import WebOCRExtractor
+
+            self.ocr_extractor = WebOCRExtractor(
+                memory_manager=memory_enhanced_chat.memory_manager,
+                similarity_enhancement_factor=similarity_enhancement_factor,
+                temp_dir="./temp"
+            )
+            print(f"{self.get_time()} OCR extraction capabilities initialized")
+        except Exception as e:
+            print(f"{self.get_time()} Could not initialize OCR: {e}")
+            self.ocr_enabled = False
+            self.ocr_extractor = None
+
+        # Update web_stats to include ocr_extractions
         self.web_stats = {
             "searches": 0,
             "items_added": 0,
-            "direct_url_accesses": 0
+            "direct_url_accesses": 0,
+            "ocr_extractions": 0  # Add this to track OCR extractions
         }
 
         print(f"{self.get_time()} Web integration initialized with Google Custom Search API")
@@ -80,6 +98,12 @@ class WebIntegration:
         """Toggle web search on/off."""
         self.web_enabled = not self.web_enabled
         return self.web_enabled
+
+    def toggle_ocr(self) -> bool:
+        """Toggle OCR extraction on/off."""
+        self.ocr_enabled = not self.ocr_enabled
+        print(f"{self.get_time()} OCR extraction {'enabled' if self.ocr_enabled else 'disabled'}")
+        return self.ocr_enabled
 
     def should_search_web(self, query: str) -> bool:
         """
@@ -116,6 +140,17 @@ class WebIntegration:
         if not self.web_enabled:
             return messages
 
+        # Check for OCR flags in query
+        use_ocr = self.ocr_enabled  # Default to current setting
+        if '--ocr' in query:
+            use_ocr = True
+            # Clean query for better search
+            query = query.replace('--ocr', '').strip()
+        elif '--no-ocr' in query:
+            use_ocr = False
+            # Clean query for better search
+            query = query.replace('--no-ocr', '').strip()
+
         # Check if web search is needed
         should_search = force_search or self.should_search_web(query)
 
@@ -137,6 +172,30 @@ class WebIntegration:
         # Skip if no results
         if not results:
             return messages
+
+        print("--------USE OCR", use_ocr and hasattr(self, 'ocr_extractor') and self.ocr_extractor)
+        # Use OCR to enhance content if enabled
+        if use_ocr and hasattr(self, 'ocr_extractor') and self.ocr_extractor:
+            try:
+                # Import OCR helper
+                from web_ocr import run_async
+
+                # Enhance top results with OCR
+                for i, result in enumerate(results[:2]):  # Limit to top 2 to save time
+                    url = result.get('url')
+                    if not url:
+                        continue
+
+                    print(f"{self.get_time()} Enhancing result with OCR: {url}")
+                    ocr_result = run_async(self.ocr_extractor.extract_page_content(url))
+
+                    if ocr_result and ocr_result.get('full_content'):
+                        # Replace snippet with full content
+                        result['content'] = ocr_result.get('full_content')
+                        result['ocr_enhanced'] = True
+                        self.web_stats["ocr_extractions"] += 1
+            except Exception as e:
+                print(f"{self.get_time()} Error enhancing with OCR: {e}")
 
         # Add to memory if enabled - REUSE results to avoid duplicate API calls
         if self.add_to_memory and self.chat.memory_manager:
@@ -272,50 +331,43 @@ class WebIntegration:
             # Track statistics
             self.web_stats["direct_url_accesses"] += 1
 
-            # Get content
-            result = self.search_client.get_url_content(url)
-
-            if not result or not result.get('content'):
-                return f"Could not extract content from: {url}"
-
-            # Format response
-            response = f"Content extracted from: {url}\n\n"
-            response += f"Title: {result.get('title', 'Unknown title')}\n\n"
-
-            # Show content preview
-            content = result.get('content', '')
-            if len(content) > 500:
-                content_preview = content[:500] + "...\n(content truncated, added to memory for retrieval)"
-            else:
-                content_preview = content
-
-            response += f"Content preview:\n{content_preview}\n\n"
-
-            # Add to memory if enabled
-            if self.add_to_memory and self.chat.memory_manager:
+            # Use OCR extractor if available and enabled
+            if self.ocr_enabled and hasattr(self, 'ocr_extractor') and self.ocr_extractor:
                 try:
-                    # Create metadata
-                    metadata = {
-                        'source': 'direct_url',
-                        'url': url,
-                        'title': result.get('title', 'Unknown title'),
-                        'domain': self._extract_domain(url),
-                        'timestamp': time.time()
-                    }
+                    # Import helper from web_ocr
+                    from web_ocr import run_async
 
-                    # Add to memory
-                    item_id = self.chat.memory_manager.add(
-                        content=content,
-                        metadata=metadata
-                    )
+                    print(f"{self.get_time()} Extracting content with OCR: {url}")
+                    ocr_result = run_async(self.ocr_extractor.extract_page_content(url))
 
-                    if item_id:
-                        self.web_stats["items_added"] += 1
-                        response += f"Content added to memory (ID: {item_id}).\n"
+                    if ocr_result and ocr_result.get('full_content'):
+                        # Track OCR extractions
+                        self.web_stats["ocr_extractions"] += 1
+
+                        # Format response
+                        response = f"Content extracted from: {url}\n\n"
+                        response += f"Title: {ocr_result.get('title', 'Unknown title')}\n\n"
+
+                        # Show content preview
+                        content = ocr_result.get('full_content', '')
+                        if len(content) > 500:
+                            content_preview = content[:500] + "...\n(content truncated, added to memory for retrieval)"
+                        else:
+                            content_preview = content
+
+                        response += f"Content preview:\n{content_preview}\n\n"
+
+                        # Add to memory if enabled
+                        if self.add_to_memory and self.chat.memory_manager:
+                            added_items = run_async(self.ocr_extractor.add_to_memory(url, query))
+
+                            if added_items:
+                                self.web_stats["items_added"] += len(added_items)
+                                response += f"Added {len(added_items)} content sections to memory.\n"
+
+                        return response
                 except Exception as e:
-                    response += f"Error adding to memory: {str(e)}\n"
-
-            return response
+                    print(f"{self.get_time()} Error using OCR extraction: {e}")
 
         # Not a web command
         return None
@@ -353,8 +405,10 @@ class WebIntegration:
             "searches_performed": self.web_stats["searches"],
             "items_added_to_memory": self.web_stats["items_added"],
             "direct_url_accesses": self.web_stats["direct_url_accesses"],
+            "ocr_extractions": self.web_stats.get("ocr_extractions", 0),  # Get with default in case it doesn't exist
             "api_calls": client_stats.get("api_calls", 0),
             "cache_hits": client_stats.get("cache_hits", 0),
             "session_cache_size": client_stats.get("session_cache_size", 0),
-            "web_enabled": self.web_enabled
+            "web_enabled": self.web_enabled,
+            "ocr_enabled": getattr(self, 'ocr_enabled', False)
         }

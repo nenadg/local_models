@@ -132,6 +132,7 @@ class WebOCRExtractor:
                 'height': 1000  # Initial height
             })
             
+            print(f"{self.get_time()} [OCR] Seaching site: {url}")
             # Navigate to URL with timeout
             await page.goto(url, {'timeout': 30000, 'waitUntil': 'networkidle0'})
             
@@ -156,6 +157,8 @@ class WebOCRExtractor:
             
             # Close the page
             await page.close()
+
+            await self.cleanup()
             
             # Process screenshot with OCR
             content_sections = self._process_screenshot_with_ocr(screenshot_path)
@@ -195,30 +198,47 @@ class WebOCRExtractor:
     def _process_screenshot_with_ocr(self, screenshot_path: str) -> List[str]:
         """
         Process a screenshot with OCR to extract text sections.
-        
+
         Args:
             screenshot_path: Path to screenshot image
-            
+
         Returns:
             List of text sections extracted from the image
         """
         try:
             # Open image
             img = Image.open(screenshot_path)
-            
+
             # Run OCR
             text = pytesseract.image_to_string(img, lang=self.ocr_language)
-            
+
             # Split into sections
             sections = self._split_text_into_sections(text)
-            
+
             # Clean sections
             cleaned_sections = [self._clean_section(section) for section in sections if section.strip()]
-            
-            return cleaned_sections
-            
+
+            # Structure sections better by adding semantic markers
+            structured_sections = []
+            for i, section in enumerate(cleaned_sections):
+                # Try to identify section type
+                if i == 0 and len(section) < 100:
+                    # Likely a title or header
+                    structured_sections.append(f"Title: {section}")
+                elif re.match(r'^(\d+\.|\*|\-)\s', section):
+                    # List item
+                    structured_sections.append(f"List item: {section}")
+                elif len(section.split()) < 15 and section.endswith(':'):
+                    # Likely a subtitle or heading
+                    structured_sections.append(f"Heading: {section}")
+                else:
+                    # Regular paragraph
+                    structured_sections.append(f"Paragraph: {section}")
+
+            return structured_sections if structured_sections else cleaned_sections
+
         except Exception as e:
-            print(f"{self.get_time()} OCR processing error: {str(e)}")
+            print(f"{self.get_time()} OCR processing error: {e}")
             return []
     
     def _split_text_into_sections(self, text: str) -> List[str]:
@@ -373,37 +393,37 @@ class WebOCRExtractor:
     async def add_to_memory(self, url: str, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """
         Extract content and add top sections to memory.
-        
+
         Args:
             url: URL to process
             query: Original query for relevance scoring
             top_k: Number of top sections to add
-            
+
         Returns:
             List of added memory items
         """
         if not self.memory_manager:
             print(f"{self.get_time()} No memory manager available")
             return []
-        
+
         # Extract content
         result = await self.extract_page_content(url)
-        
+
         if not result['content_sections']:
             return []
-            
+
         # Score sections
         scored_sections = await self.score_sections_by_similarity(
             result['content_sections'], query
         )
-        
+
         # Add top sections to memory
         added_items = []
         for section, score in scored_sections[:top_k]:
             if score < 0.3:  # Skip very low relevance sections
                 continue
-                
-            # Create metadata
+
+            # Create metadata with better structure for retrieval
             metadata = {
                 'source': 'web_ocr',
                 'url': url,
@@ -411,29 +431,34 @@ class WebOCRExtractor:
                 'domain': self._get_domain(url),
                 'query': query,
                 'relevance_score': score,
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'content_type': 'extracted_text',
+                'extraction_method': 'ocr'
             }
-            
+
+            # Format content to be more structured and usable in responses
+            formatted_content = f"From {result['title']} ({self._get_domain(url)}): {section}"
+
             # Add to memory
             try:
                 item_id = self.memory_manager.add(
-                    content=section,
+                    content=formatted_content,
                     metadata=metadata
                 )
-                
+
                 if item_id:
                     added_items.append({
                         'id': item_id,
-                        'content': section,
+                        'content': formatted_content,
                         'score': score,
                         'metadata': metadata
                     })
                     print(f"{self.get_time()} Added section to memory (score: {score:.2f})")
             except Exception as e:
-                print(f"{self.get_time()} Error adding to memory: {str(e)}")
-        
+                print(f"{self.get_time()} Error adding to memory: {e}")
+
         return added_items
-    
+
     def _get_domain(self, url: str) -> str:
         """
         Extract domain name from URL.
