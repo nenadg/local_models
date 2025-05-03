@@ -41,7 +41,7 @@ source local_models_venv/bin/activate
 ### 3. Install dependencies
 
 ```bash
-pip install torch transformers faiss-cpu numpy scikit-learn accelerate peft datasets spacy textpipeliner matplotlib nltk rake-nltk prompt_toolkit autoawq
+pip install torch transformers faiss-cpu numpy scikit-learn accelerate peft datasets spacy textpipeliner matplotlib nltk rake-nltk prompt_toolkit autoawq pyppeteer pytesseract Pillow numpy asyncio
 ```
 
 If you have CUDA, install the GPU version of FAISS for better performance:
@@ -59,6 +59,10 @@ python -m spacy download en_core_web_sm bs4
 ```
 
 (for keyword exctraction tests `python -m spacy download en_core_sci_lg`)
+
+For OCR:
+
+`sudo apt-get install tesseract-ocr`
 
 ## Usage
 

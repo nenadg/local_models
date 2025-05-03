@@ -11,10 +11,13 @@ import numpy as np
 import hashlib
 import threading
 import traceback
+import tempfile
+import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus, urlparse
+from PIL import Image
 
 class WebSearchManager:
     """
@@ -71,6 +74,268 @@ class WebSearchManager:
         """Get formatted timestamp for logging."""
         return datetime.now().strftime("[%d/%m/%y %H:%M:%S]") + ' [WebSearch]'
     
+    async def init_browser(self):
+        """Initialize browser for OCR functionality."""
+        # Import pyppeteer here to avoid requiring it unless OCR is used
+        try:
+            from pyppeteer import launch
+
+            # Launch args for headless browser
+            launch_args = {
+                'headless': True,
+                'args': [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--disable-gpu',
+                    f'--window-size={1280},{1000}'  # Initial window size
+                ]
+            }
+
+            # Launch browser
+            browser = await launch(**launch_args)
+            return browser
+        except ImportError:
+            print(f"{self.get_time()} Pyppeteer not installed. OCR feature unavailable.")
+            return None
+        except Exception as e:
+            print(f"{self.get_time()} Error initializing browser: {e}")
+            return None
+
+    async def capture_screenshot(self, url, temp_dir=None):
+        """
+        Capture a screenshot of a webpage for OCR processing.
+
+        Args:
+            url: URL to capture
+            temp_dir: Directory for temporary files
+
+        Returns:
+            Path to screenshot or None if failed
+        """
+        try:
+            # Import pyppeteer here to avoid requiring it unless OCR is used
+            from pyppeteer import launch
+
+            # Create temporary directory if not provided
+            if temp_dir is None:
+                temp_dir = tempfile.gettempdir()
+
+            # Create it if it doesn't exist
+            os.makedirs(temp_dir, exist_ok=True)
+
+            # Generate a unique filename for the screenshot
+            screenshot_path = os.path.join(
+                temp_dir,
+                f"screenshot_{hashlib.md5(url.encode()).hexdigest()}.png"
+            )
+
+            # Initialize browser
+            browser = await self.init_browser()
+            if browser is None:
+                return None
+
+            try:
+                # Create a new page
+                page = await browser.newPage()
+
+                # Set viewport size
+                await page.setViewport({
+                    'width': 1280,
+                    'height': 1000  # Initial height
+                })
+
+                # Navigate to URL with timeout
+                await page.goto(url, {'timeout': 30000, 'waitUntil': 'networkidle0'})
+
+                # Wait for content to load
+                await asyncio.sleep(2)
+
+                # Get page scroll height for full screenshot
+                scroll_height = await page.evaluate('document.body.scrollHeight')
+                actual_height = min(scroll_height, 8000)  # Cap at 8000px to avoid huge images
+
+                # Resize viewport to capture more content
+                await page.setViewport({
+                    'width': 1280,
+                    'height': actual_height
+                })
+
+                # Take screenshot of full page
+                await page.screenshot({'path': screenshot_path, 'fullPage': True})
+
+                # Close the page
+                await page.close()
+
+                return screenshot_path
+            finally:
+                # Always close the browser
+                await browser.close()
+
+        except Exception as e:
+            print(f"{self.get_time()} Error capturing screenshot: {e}")
+            return None
+
+    def process_screenshot_with_ocr(self, screenshot_path):
+        """
+        Process a screenshot with OCR to extract text.
+
+        Args:
+            screenshot_path: Path to screenshot image
+
+        Returns:
+            Extracted text
+        """
+        try:
+            # Import pytesseract here to avoid requiring it unless OCR is used
+            import pytesseract
+
+            # Open image
+            img = Image.open(screenshot_path)
+
+            # Run OCR
+            text = pytesseract.image_to_string(img, lang="eng")
+
+            # Clean text
+            text = self._clean_ocr_text(text)
+
+            return text
+
+        except ImportError:
+            print(f"{self.get_time()} Pytesseract not installed. OCR feature unavailable.")
+            return ""
+        except Exception as e:
+            print(f"{self.get_time()} OCR processing error: {e}")
+            return ""
+        finally:
+            # Cleanup screenshot file
+            if os.path.exists(screenshot_path):
+                try:
+                    os.remove(screenshot_path)
+                except Exception:
+                    pass
+
+    def _clean_ocr_text(self, text):
+        """
+        Clean OCR-extracted text.
+
+        Args:
+            text: Raw OCR text
+
+        Returns:
+            Cleaned text
+        """
+        import re
+
+        # Replace multiple spaces with single space
+        text = re.sub(r'\s+', ' ', text)
+
+        # Replace multiple newlines with single newline
+        text = re.sub(r'\n+', '\n', text)
+
+        # Remove common OCR artifacts
+        text = re.sub(r'[^\w\s\.,;:!?\-\'\"()%$#@&*+=/\\<>[\]{}]', '', text)
+
+        return text.strip()
+
+    def extract_content_with_ocr(self, url):
+        """
+        Extract content from a webpage using OCR.
+
+        Args:
+            url: URL to extract from
+
+        Returns:
+            Extracted content or empty string if failed
+        """
+        try:
+            # Run the async function using asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                screenshot_path = loop.run_until_complete(self.capture_screenshot(url))
+            finally:
+                loop.close()
+
+            if screenshot_path:
+                # Process with OCR
+                content = self.process_screenshot_with_ocr(screenshot_path)
+                return content
+
+            return ""
+
+        except Exception as e:
+            print(f"{self.get_time()} Error in OCR extraction: {e}")
+            return ""
+
+    def _fetch_content_with_fallback(self, result):
+        """
+        Fetch content with OCR fallback if HTML parsing fails.
+
+        Args:
+            result: Search result dictionary
+
+        Returns:
+            Updated result dictionary
+        """
+        url = result.get('url')
+        if not url:
+            return result
+
+        try:
+            # Try HTML parsing first
+            try:
+                response = requests.get(url, headers=self.headers, timeout=8)
+                response.raise_for_status()
+
+                # Extract content
+                content = self._extract_main_content(response.text, url, self.max_content_chars)
+
+                # If content extraction failed or returned very little, try OCR
+                if not content or len(content) < 100:
+                    print(f"{self.get_time()} HTML extraction yielded minimal content, trying OCR for: {url}")
+                    ocr_content = self.extract_content_with_ocr(url)
+
+                    if ocr_content and len(ocr_content) > len(content):
+                        # OCR yielded better results
+                        result['content'] = ocr_content
+                        result['fetched_content'] = True
+                        result['fetch_time'] = time.time()
+                        result['extraction_method'] = 'ocr'
+                        print(f"{self.get_time()} Used OCR extraction for {url}")
+                        return result
+
+                # HTML parsing worked well
+                result['content'] = content
+                result['fetched_content'] = True
+                result['fetch_time'] = time.time()
+                result['extraction_method'] = 'html'
+
+                # Add tokens using a simple approach
+                result['tokens'] = content.split()
+
+            except Exception as e:
+                print(f"{self.get_time()} HTML extraction failed, trying OCR for: {url}")
+                # HTML parsing failed, try OCR
+                ocr_content = self.extract_content_with_ocr(url)
+
+                if ocr_content:
+                    result['content'] = ocr_content
+                    result['fetched_content'] = True
+                    result['fetch_time'] = time.time()
+                    result['extraction_method'] = 'ocr'
+                    result['tokens'] = ocr_content.split()
+                    print(f"{self.get_time()} Used OCR extraction for {url}")
+                else:
+                    print(f"{self.get_time()} Both HTML and OCR extraction failed for: {url}")
+
+            return result
+
+        except Exception as e:
+            print(f"{self.get_time()} Error fetching content for {url}: {e}")
+            return result
+
     def search(
         self, 
         query: str, 
@@ -215,39 +480,79 @@ class WebSearchManager:
             
         return results
     
-    def _fetch_content_for_results(self, results: List[Dict[str, Any]], max_length: int):
+    def _fetch_content_for_results(self, results, max_length, use_ocr=True):
         """
-        Fetch and extract content for search results.
-        
+        Fetch and extract content for search results with OCR support.
+
         Args:
             results: List of search result dictionaries
             max_length: Maximum content length to extract
+            use_ocr: Whether to use OCR as fallback when HTML parsing fails
         """
         for result in results:
             url = result.get('url')
             if not url:
                 continue
+
+            if use_ocr:
+                # Use the fallback method that tries HTML first, then OCR if needed
+                self._fetch_content_with_fallback(result)
+            else:
+                # Original behavior - HTML parsing only
+                try:
+                    # Fetch the page
+                    print(f"{self.get_time()} Fetching content from: {url}")
+                    response = requests.get(url, headers=self.headers, timeout=8)
+                    response.raise_for_status()
+
+                    # Extract content
+                    content = self._extract_main_content(response.text, url, max_length)
+
+                    # Store in result
+                    result['content'] = content
+                    result['fetched_content'] = True
+                    result['fetch_time'] = time.time()
+                    result['extraction_method'] = 'html'
+
+                    # Add tokens using a simple approach
+                    result['tokens'] = content.split()
+
+                except Exception as e:
+                    print(f"{self.get_time()} Error fetching content for {url}: {e}")
+
+    # def _fetch_content_for_results(self, results: List[Dict[str, Any]], max_length: int):
+    #     """
+    #     Fetch and extract content for search results.
+
+    #     Args:
+    #         results: List of search result dictionaries
+    #         max_length: Maximum content length to extract
+    #     """
+    #     for result in results:
+    #         url = result.get('url')
+    #         if not url:
+    #             continue
                 
-            try:
-                # Fetch the page
-                print(f"{self.get_time()} Fetching content from: {url}")
-                response = requests.get(url, headers=self.headers, timeout=8)
-                response.raise_for_status()
+    #         try:
+    #             # Fetch the page
+    #             print(f"{self.get_time()} Fetching content from: {url}")
+    #             response = requests.get(url, headers=self.headers, timeout=8)
+    #             response.raise_for_status()
                 
-                # Extract content
-                content = self._extract_main_content(response.text, url, max_length)
+    #             # Extract content
+    #             content = self._extract_main_content(response.text, url, max_length)
                 
-                # Store in result
-                result['content'] = content
-                result['fetched_content'] = True
-                result['fetch_time'] = time.time()
+    #             # Store in result
+    #             result['content'] = content
+    #             result['fetched_content'] = True
+    #             result['fetch_time'] = time.time()
                 
-                # Add tokens using a simple approach
-                # In a real implementation, you'd use the tokenizer from your existing code
-                result['tokens'] = content.split()
+    #             # Add tokens using a simple approach
+    #             # In a real implementation, you'd use the tokenizer from your existing code
+    #             result['tokens'] = content.split()
                 
-            except Exception as e:
-                print(f"{self.get_time()} Error fetching content for {url}: {e}")
+    #         except Exception as e:
+    #             print(f"{self.get_time()} Error fetching content for {url}: {e}")
     
     def _extract_main_content(self, html: str, url: str, max_length: int) -> str:
         """

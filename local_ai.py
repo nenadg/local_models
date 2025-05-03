@@ -408,19 +408,35 @@ class MemoryEnhancedChat:
             self.draft_model = None
 
     def _setup_web_integration(self):
-        """Set up web search integration."""
+        """Set up web search integration with OCR support."""
         try:
             from web_integration import WebIntegration
+
+            # Check for OCR dependencies
+            ocr_available = True
+            try:
+                import pyppeteer
+                import pytesseract
+                from PIL import Image
+            except ImportError:
+                ocr_available = False
+                print(f"{self.get_time()} OCR dependencies not found. OCR extraction will be disabled.")
+                print(f"{self.get_time()} To enable OCR, install: pyppeteer pytesseract Pillow")
 
             # Initialize web integration
             self.web_integration = WebIntegration(
                 memory_enhanced_chat=self,
                 similarity_enhancement_factor=self.similarity_enhancement_factor,
                 max_web_results=5,
-                add_to_memory=self.enable_memory
+                add_to_memory=self.enable_memory,
+                ocr_enabled=ocr_available  # Enable OCR if dependencies are available
             )
 
-            print(f"{self.get_time()} Web search integration enabled")
+            if ocr_available:
+                print(f"{self.get_time()} Web search integration enabled with OCR support")
+            else:
+                print(f"{self.get_time()} Web search integration enabled (OCR support disabled)")
+
             self.web_enabled = True
         except ImportError as e:
             print(f"{self.get_time()} Web search integration not available: {e}")
@@ -1535,11 +1551,14 @@ def main():
     print("  !toggle-draft - Toggle draft model for speculative decoding")
     print("  !toggle-filter - Toggle confidence filtering")
     print("  !toggle-web - Toggle web search integration on/off")
+    print("  !toggle-ocr - Toggle OCR extraction on/off")
     print("  !mcp-help - Show MCP commands for file output")
     print("  !memory-stats - Display info about memories")
     print("  !web-stats - Display info about web searches")
     print("  !enhance-factor: [0.0-1.0] - Set similarity enhancement factor")
     print("  !web: [query] - Perform a direct web search")
+    print("  !web --ocr [query] - Force OCR extraction for search")
+    print("  !web --no-ocr [query] - Disable OCR for search")
     print("="*50 + "\n")
 
     # Initialize chat state
@@ -1590,6 +1609,14 @@ def main():
                 print(f"{chat.get_time()} Draft model {'enabled' if is_enabled else 'disabled'}")
                 continue
 
+            elif user_input.lower() == '!toggle-ocr':
+                if hasattr(chat, 'web_integration'):
+                    is_enabled = chat.web_integration.toggle_ocr()
+                    print(f"{chat.get_time()} OCR extraction {'enabled' if is_enabled else 'disabled'}")
+                else:
+                    print(f"{chat.get_time()} Web search integration not available")
+                continue
+
             elif user_input.lower().startswith('!enhance-factor:'):
                 try:
                     factor = float(user_input.split(':')[1].strip())
@@ -1632,7 +1659,9 @@ def main():
                     print(f"\n{chat.get_time()} Web Search Statistics:")
                     print(f"  Searches performed: {stats['searches_performed']}")
                     print(f"  Items added to memory: {stats['items_added_to_memory']}")
+                    print(f"  OCR extractions: {stats['ocr_extractions']}")
                     print(f"  Web search enabled: {'Yes' if stats['web_enabled'] else 'No'}")
+                    print(f"  OCR extraction enabled: {'Yes' if stats['ocr_enabled'] else 'No'}")
                 else:
                     print(f"{chat.get_time()} Web search integration not available")
                 continue

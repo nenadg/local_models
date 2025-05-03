@@ -53,7 +53,7 @@ except ImportError:
     print("scikit-learn not available. Some visualizations will be disabled.")
 
 
-def create_test_memory(memory_dir="./test_memory", sample_size=50):
+def create_test_memory(memory_dir="./memory", sample_size=50):
     """
     Create a test memory instance with categorized data for visualization.
     
@@ -792,7 +792,7 @@ def main():
     print(f"Starting enhanced embeddings tests at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Create directories
-    memory_dir = "./test_memory"
+    memory_dir = "./memory"
     output_dir = "./visualizations"
     os.makedirs(memory_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)

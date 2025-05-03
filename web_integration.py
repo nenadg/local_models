@@ -20,7 +20,8 @@ class WebIntegration:
         memory_enhanced_chat,
         similarity_enhancement_factor: float = 0.3,
         max_web_results: int = 5,
-        add_to_memory: bool = True
+        add_to_memory: bool = True,
+        ocr_enabled: bool = True
     ):
         """
         Initialize web integration.
@@ -30,6 +31,7 @@ class WebIntegration:
             similarity_enhancement_factor: Factor for similarity enhancement
             max_web_results: Maximum web results to include
             add_to_memory: Whether to add results to memory
+            ocr_enabled: Whether to enable OCR fallback extraction
         """
         self.chat = memory_enhanced_chat
         
@@ -39,13 +41,23 @@ class WebIntegration:
             question_classifier=memory_enhanced_chat.question_classifier,
             similarity_enhancement_factor=similarity_enhancement_factor
         )
-        
+
         # Settings
         self.max_web_results = max_web_results
         self.add_to_memory = add_to_memory
         self.web_enabled = True
-        self.web_stats = {"searches": 0, "items_added": 0}
-        
+        self.ocr_enabled = ocr_enabled  # Add this line
+        self.web_stats = {
+            "searches": 0,
+            "items_added": 0,
+            "ocr_extractions": 0  # Add this line
+        }
+
+    def toggle_ocr(self) -> bool:
+        """Toggle OCR extraction on/off."""
+        self.ocr_enabled = not self.ocr_enabled
+        return self.ocr_enabled
+
     def toggle_web_search(self) -> bool:
         """Toggle web search on/off."""
         self.web_enabled = not self.web_enabled
@@ -55,7 +67,8 @@ class WebIntegration:
         self,
         messages: List[Dict[str, str]],
         query: str,
-        force_search: bool = False
+        force_search: bool = False,
+        use_ocr: Optional[bool] = None
     ) -> List[Dict[str, str]]:
         """
         Enhance conversation with web search results.
@@ -64,6 +77,7 @@ class WebIntegration:
             messages: Current conversation messages
             query: Current user query
             force_search: Force web search even if not needed
+            use_ocr: Override default OCR setting
             
         Returns:
             Enhanced messages with web context
@@ -80,6 +94,9 @@ class WebIntegration:
         
         # Track statistics
         self.web_stats["searches"] += 1
+
+        # Determine if OCR should be used
+        use_ocr_value = self.ocr_enabled if use_ocr is None else use_ocr
         
         # Get search results
         results = self.web_search.search(
@@ -87,6 +104,15 @@ class WebIntegration:
             include_content=True,
             max_results=self.max_web_results
         )
+
+        # Fetch content with OCR support if enabled
+        if results and use_ocr_value:
+            for result in results:
+                if not result.get('content') and result.get('url'):
+                    # No content fetched yet, try with OCR
+                    self.web_search._fetch_content_with_fallback(result)
+                    if result.get('extraction_method') == 'ocr':
+                        self.web_stats["ocr_extractions"] += 1
         
         # Skip if no results
         if not results:
@@ -94,32 +120,14 @@ class WebIntegration:
         
         # Add to memory if enabled
         if self.add_to_memory and self.chat.memory_manager:
-            for result in results:
-                content = result.get('content', '')
-                if not content:
-                    continue
-                
-                # Create metadata for memory
-                metadata = {
-                    'source': 'web_search',
-                    'url': result.get('url', ''),
-                    'title': result.get('title', ''),
-                    'domain': result.get('source', ''),
-                    'query': query,
-                    'timestamp': time.time()
-                }
-                
-                # Add to memory
-                try:
-                    item_id = self.chat.memory_manager.add(
-                        content=content,
-                        metadata=metadata
-                    )
-                    
-                    if item_id:
-                        self.web_stats["items_added"] += 1
-                except Exception as e:
-                    print(f"Error adding to memory: {e}")
+            added_items = self.web_search.search_and_add_to_memory(
+                query=query,
+                max_results=self.max_web_results
+            )
+
+            if added_items:
+                self.web_stats["items_added"] += len(added_items)
+                print(f"Added {len(added_items)} web search results to memory")
         
         # Create enhanced messages
         enhanced_messages = messages.copy()
@@ -184,12 +192,33 @@ class WebIntegration:
             if not search_query:
                 return "Please provide a search query. Example: !web latest climate reports"
             
+            # Check for OCR flag
+            use_ocr = self.ocr_enabled
+
+            if search_query.startswith("--no-ocr "):
+                use_ocr = False
+                search_query = search_query[9:].strip()
+            elif search_query.startswith("--ocr "):
+                use_ocr = True
+                search_query = search_query[6:].strip()
+
             # Perform search
             results = self.web_search.search(
                 query=search_query,
                 include_content=True,
                 max_results=7  # More results for direct search
             )
+
+            # Fetch content with OCR support if enabled
+            if results and use_ocr:
+                ocr_count = 0
+                for result in results:
+                    if not result.get('content') and result.get('url'):
+                        # No content fetched yet, try with OCR
+                        self.web_search._fetch_content_with_fallback(result)
+                        if result.get('extraction_method') == 'ocr':
+                            ocr_count += 1
+                            self.web_stats["ocr_extractions"] += 1
             
             if not results:
                 return f"No results found for: {search_query}"
@@ -203,7 +232,10 @@ class WebIntegration:
                 domain = result.get('source', '')
                 snippet = result.get('snippet', '')
                 
-                response += f"{i+1}. {title} ({domain})\n"
+                # Indicate OCR enhancement
+                extraction_type = " [OCR]" if result.get('extraction_method') == 'ocr' else ""
+
+                response += f"{i+1}. {title} ({domain}){extraction_type}\n"
                 if snippet:
                     response += f"   {snippet}\n"
                 response += f"   {url}\n\n"
@@ -219,6 +251,7 @@ class WebIntegration:
                     # Create metadata
                     metadata = {
                         'source': 'web_search',
+                        'extraction_method': result.get('extraction_method', 'html'),
                         'url': result.get('url', ''),
                         'title': result.get('title', ''),
                         'domain': result.get('source', ''),
@@ -252,5 +285,54 @@ class WebIntegration:
         return {
             "searches_performed": self.web_stats["searches"],
             "items_added_to_memory": self.web_stats["items_added"],
-            "web_enabled": self.web_enabled
+            "ocr_extractions": self.web_stats["ocr_extractions"],
+            "web_enabled": self.web_enabled,
+            "ocr_enabled": self.ocr_enabled
         }
+
+    def format_for_context(self, results: List[Dict[str, Any]], query: str) -> str:
+        """
+        Format search results for inclusion in context.
+        Enhanced to show OCR extraction information.
+
+        Args:
+            results: List of search results
+            query: Original query
+
+        Returns:
+            Formatted context string
+        """
+        if not results:
+            return ""
+
+        # Rank results if not already ranked
+        if not any('relevance_score' in r for r in results):
+            results = self.web_search.rank_results_by_relevance(results, query)
+
+        # Build formatted output
+        output = "WEB SEARCH RESULTS:\n\n"
+
+        for i, result in enumerate(results[:5]):  # Limit to top 5
+            title = result.get('title', 'No title')
+            url = result.get('url', '')
+            domain = result.get('source', 'unknown')
+            score = result.get('relevance_score', 0)
+            content = result.get('content', result.get('snippet', ''))
+
+            # Add extraction method indicator
+            extraction_method = "[OCR]" if result.get('extraction_method') == 'ocr' else ""
+
+            # Truncate content to a reasonable length
+            if content:
+                content = content.strip()
+                if len(content) > 300:
+                    content = content[:297] + "..."
+
+            # Format result
+            output += f"[{i+1}] {title} ({domain}) {extraction_method}\n"
+            if content:
+                output += f"{content}\n"
+            output += f"Source: {url}\n\n"
+
+        output += "Use the information above to help answer the query if relevant.\n"
+        return output
