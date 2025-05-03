@@ -30,7 +30,7 @@ def main():
 
     try:
         # URL to extract
-        url = "https://nezavisne.com"
+        url = "https://example.com/sample-page"
 
         # Sample query
         query = "What is the main topic of this page?"

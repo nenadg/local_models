@@ -1949,6 +1949,7 @@ class MemoryManager:
     def cleanup(self):
         """Clean up resources and consolidate storage."""
         with self._lock:
+            print(f"{self.get_time()} Cleaning up memory manager.")
             # Consolidate storage by removing deleted items
             if self.deleted_ids:
                 new_items = []

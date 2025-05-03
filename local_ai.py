@@ -1400,6 +1400,7 @@ class MemoryEnhancedChat:
         """Release all resources properly."""
         try:
             # First, ensure memory manager creates a cache
+            # Clean up memory
             if hasattr(self, 'memory_manager'):
                 print(f"{self.get_time()} Creating memory quickstart cache for next boot...")
                 self.memory_manager.cleanup()
@@ -1423,10 +1424,6 @@ class MemoryEnhancedChat:
                 self.spec_decoder.draft_model = None
                 self.spec_decoder.main_model = None
 
-            # Clean up memory
-            if hasattr(self, 'memory_manager'):
-                self.memory_manager.cleanup()
-
             # Final cleanup
             if hasattr(self, 'resource_manager'):
                 self.resource_manager.cleanup()
@@ -1439,6 +1436,7 @@ class MemoryEnhancedChat:
 
         except Exception as e:
             print(f"{self.get_time()} Error during cleanup: {e}")
+            traceback.print_exc()
             # Attempt basic cleanup
             try:
                 if hasattr(self, 'resource_manager'):
@@ -1534,7 +1532,7 @@ def main():
         import random
 
         _ = chat.chat(
-            [{"role": "user", "content": f"Calculate {random.randint(1, 100)} + {random.randint(1, 100)}"}],
+            [{"role": "user", "content": f"Calculate the result of {random.randint(1, 100)} + {random.randint(1, 100)}.  Print just result without any explanation or preamble, like in this example: 242+4=246." }],
             max_new_tokens=20,
             temperature=0.7
         )
@@ -1703,17 +1701,20 @@ def main():
     finally:
         # Final cleanup
         """Setup signal handlers to ensure clean shutdown."""
-        def handle_exit(signum, frame):
-            print("\nReceived exit signal, cleaning up...")
-            chat_instance.cleanup()
-            sys.exit(0)
+        # def handle_exit(signum, frame):
+        #     print("\nReceived exit signal, cleaning up...")
+        #     chat.cleanup()
+        #     sys.exit(0)
 
-        # Register signal handlers
-        signal.signal(signal.SIGINT, handle_exit)  # Ctrl+C
-        signal.signal(signal.SIGTERM, handle_exit)  # Termination signal
+        # # Register signal handlers
+        # signal.signal(signal.SIGINT, handle_exit)  # Ctrl+C
+        # signal.signal(signal.SIGTERM, handle_exit)  # Termination signal
 
-        if hasattr(signal, 'SIGBREAK'):  # Windows Ctrl+Break
-            signal.signal(signal.SIGBREAK, handle_exit)
+        # if hasattr(signal, 'SIGBREAK'):  # Windows Ctrl+Break
+        #     signal.signal(signal.SIGBREAK, handle_exit)
+        # else:
+        chat.cleanup()
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()

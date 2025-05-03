@@ -13,6 +13,7 @@ import threading
 import traceback
 import tempfile
 import asyncio
+import random
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -30,10 +31,19 @@ class WebSearchManager:
         memory_manager=None,
         question_classifier=None,
         similarity_enhancement_factor: float = 0.3,
-        search_url_template: str = "https://duckduckgo.com/html/?q={query}",
+        search_url_template: str =random.choice([
+            "https://duckduckgo.com/html/?q={query}",  # DuckDuckGo (original)
+            "https://search.brave.com/search?q={query}",  # Brave Search
+            "https://html.duckduckgo.com/html/?q={query}",  # Alternative DuckDuckGo URL
+            "https://www.mojeek.com/search?q={query}"  # Mojeek (privacy-focused search engine)
+        ]),
         max_search_results: int = 10,
         max_content_chars: int = 8000,
-        user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36"
+        user_agent: str = random.choice([
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        ])
     ):
         """
         Initialize the web search manager.
@@ -381,7 +391,7 @@ class WebSearchManager:
             
             # Parse search results
             results = self._parse_search_results(response.text, max_results)
-            
+           
             # Fetch content if requested
             if include_content and results:
                 print(f"{self.get_time()} Fetching content for {len(results)} results...")
