@@ -145,6 +145,10 @@ class MemoryManager:
         if enable_enhanced_embeddings:
            self._initialize_enhancement_matrices()
 
+    def get_time(self) -> str:
+        """Get formatted timestamp for logging."""
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]") + ' [Memory]'
+
     def set_embedding_function(self,
                               function: Callable[[str], np.ndarray],
                               batch_function: Optional[Callable[[List[str]], List[np.ndarray]]] = None):
@@ -158,9 +162,6 @@ class MemoryManager:
         self.embedding_function = function
         self.batch_embedding_function = batch_function
 
-    def get_time(self) -> str:
-        """Get formatted timestamp for logging."""
-        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]") + ' [Memory]'
 
     def add(self,
             content: str,
@@ -214,223 +215,6 @@ class MemoryManager:
 
             # Add to storage
             return self._add_item_to_store(item)
-
-    def add_bulk(self, items: List[Dict[str, Any]], use_enhanced_embeddings: Optional[bool] = None) -> List[Optional[str]]:
-        """
-        Efficiently add multiple items in a single operation using batch processing.
-
-        Args:
-            items: List of dictionaries with content and metadata
-            use_enhanced_embeddings: Override default enhanced embedding setting
-
-        Returns:
-            List of item IDs or None for failed items
-        """
-        with self._lock:
-            # Temporarily disable auto_save
-            original_auto_save = self.auto_save
-            self.auto_save = False
-
-            # Extract content for batch embedding processing
-            contents = []
-            valid_items = []
-
-            for item_dict in items:
-                content = item_dict.get('content', '')
-                if content and content.strip():
-                    contents.append(content)
-                    valid_items.append(item_dict)
-
-            if not contents:
-                return [None] * len(items)
-
-            # Generate embeddings
-            if not self.batch_embedding_function:
-                # Fall back to individual embedding
-                result_ids = []
-                for item in items:
-                    item_id = self.add(
-                        content=item.get("content", ""),
-                        metadata=item.get("metadata", {}),
-                        use_enhanced_embeddings=use_enhanced_embeddings
-                    )
-                    result_ids.append(item_id)
-
-                # Restore original auto_save setting
-                self.auto_save = original_auto_save
-
-                # Save if needed
-                if original_auto_save:
-                    self.save()
-
-                return result_ids
-
-            try:
-                # Check if we can use tensor batch processing
-                try:
-                    from batch_utils import tensor_batch_processing
-                    batch_utils_available = True
-                except ImportError:
-                    batch_utils_available = False
-
-                # Generate embeddings in batch
-                if batch_utils_available and len(contents) > 50:
-                    print(f"{self.get_time()} Using tensor_batch_processing for {len(contents)} embeddings")
-
-                    # Define a function that processes a batch of texts to embeddings
-                    # This works with a tensor of already-computed embeddings
-                    def process_embedding_batch(emb_batch):
-                        return emb_batch
-
-                    # First, get all embeddings normally
-                    all_embeddings = self.batch_embedding_function(contents)
-
-                    # Convert to tensor
-                    embeddings_tensor = torch.tensor(np.array(all_embeddings), dtype=torch.float32)
-
-                    # Process in optimized batches
-                    processed_embeddings = tensor_batch_processing(
-                        tensor_op=process_embedding_batch,
-                        input_tensor=embeddings_tensor,
-                        batch_dim=0,
-                        batch_size=64,
-                        cleanup=True,
-                        adaptive=True
-                    )
-
-                    # Convert back to list of numpy arrays
-                    if isinstance(processed_embeddings, torch.Tensor):
-                        all_embeddings = list(processed_embeddings.numpy())
-                    else:
-                        # Handle case where it returned a list of batches
-                        merged_embeddings = []
-                        for batch in processed_embeddings:
-                            merged_embeddings.extend(batch.numpy())
-                        all_embeddings = merged_embeddings
-                else:
-                    # Standard approach
-                    all_embeddings = self.batch_embedding_function(contents)
-
-                # Create memory items
-                all_memory_items = []
-                for i, (item_dict, embedding) in enumerate(zip(valid_items, all_embeddings)):
-                    metadata = item_dict.get('metadata', {})
-
-                    # Create memory item
-                    item = MemoryItem(
-                        content=item_dict['content'],
-                        embedding=embedding,
-                        metadata=metadata
-                    )
-                    all_memory_items.append(item)
-
-                # Determine whether to use enhanced embeddings
-                use_enhanced = self.enable_enhanced_embeddings if use_enhanced_embeddings is None else use_enhanced_embeddings
-
-                # Generate enhanced embeddings
-                if use_enhanced:
-                    for item in all_memory_items:
-                        self._add_enhanced_embeddings(item)
-
-                # Add all items to storage
-                item_ids = []
-                for item in all_memory_items:
-                    item_id = self._add_item_to_store(item)
-                    item_ids.append(item_id)
-
-                # Save the updated data
-                if original_auto_save:
-                    self.save()
-                    self.auto_save = original_auto_save
-
-                # Map results back to input
-                result_ids = [None] * len(items)
-                valid_indices = [i for i, item in enumerate(items) if item.get('content', '').strip()]
-                for i, valid_idx in enumerate(valid_indices):
-                    if i < len(item_ids):
-                        result_ids[valid_idx] = item_ids[i]
-
-                return result_ids
-
-            except Exception as e:
-                print(f"{self.get_time()} Error in batch processing: {e}")
-
-                # Fall back to individual processing
-                result_ids = []
-                for item in items:
-                    item_id = self.add(
-                        content=item.get("content", ""),
-                        metadata=item.get("metadata", {}),
-                        use_enhanced_embeddings=use_enhanced_embeddings
-                    )
-                    result_ids.append(item_id)
-
-                # Restore original auto_save setting
-                self.auto_save = original_auto_save
-
-                # Save if needed
-                if original_auto_save:
-                    self.save()
-
-                return result_ids
-
-    def _resize_all_embeddings(self, old_dim, new_dim):
-        """
-        Resize all embeddings to match the new dimension.
-
-        Args:
-            old_dim: Original dimension
-            new_dim: Target dimension
-        """
-        print(f"{self.get_time()} Resizing all embeddings from {old_dim}D to {new_dim}D")
-
-        # Resize base embeddings
-        for i, item in enumerate(self.items):
-            if len(item.embedding) != new_dim:
-                # Resize embedding
-                if len(item.embedding) > new_dim:
-                    # Truncate
-                    new_embedding = item.embedding[:new_dim]
-                else:
-                    # Pad with zeros
-                    new_embedding = np.pad(item.embedding, (0, new_dim - len(item.embedding)))
-
-                # Normalize
-                norm = np.linalg.norm(new_embedding)
-                if norm > 1e-10:
-                    new_embedding = new_embedding / norm
-
-                # Update embedding
-                item.embedding = new_embedding
-                self.embeddings[i] = new_embedding
-
-        # Resize enhanced embeddings
-        for item in self.items:
-            if hasattr(item, 'additional_embeddings') and item.additional_embeddings:
-                resized_embeddings = {}
-                for level, embedding in item.additional_embeddings.items():
-                    if len(embedding) != new_dim:
-                        # Resize embedding
-                        if len(embedding) > new_dim:
-                            # Truncate
-                            new_embedding = embedding[:new_dim]
-                        else:
-                            # Pad with zeros
-                            new_embedding = np.pad(embedding, (0, new_dim - len(embedding)))
-
-                        # Normalize
-                        norm = np.linalg.norm(new_embedding)
-                        if norm > 1e-10:
-                            new_embedding = new_embedding / norm
-
-                        resized_embeddings[level] = new_embedding
-                    else:
-                        resized_embeddings[level] = embedding
-
-                # Update enhanced embeddings
-                item.additional_embeddings = resized_embeddings
-
-        print(f"{self.get_time()} All embeddings resized to {new_dim}D")
 
     def _initialize_enhancement_matrices(self):
         """
@@ -504,62 +288,16 @@ class MemoryManager:
             # Initialize enhancement matrices with current dimension
             self._initialize_enhancement_matrices()
 
-            # Check for dimension mismatch
-            need_migration = False
-            old_dim = None
-
-            # Check the first item to determine dimension
-            if enhanced_data:
-                first_id = next(iter(enhanced_data))
-                first_item = enhanced_data[first_id]
-                if first_item:
-                    first_level = next(iter(first_item))
-                    if first_level in first_item:
-                        level_embedding = first_item[first_level]
-                        old_dim = level_embedding.shape[0]
-                        if old_dim != self.embedding_dim:
-                            print(f"{self.get_time()} Enhanced embedding dimension mismatch: {old_dim} vs {self.embedding_dim}")
-                            need_migration = True
-
             # Process enhanced embeddings
             loaded_count = 0
-            migrated_count = 0
+
             for item_id, item_enhanced in enhanced_data.items():
                 if item_id in self.id_to_index:
                     idx = self.id_to_index[item_id]
-
-                    # Check if item needs migration
-                    if need_migration:
-                        migrated_embeddings = {}
-                        for level, embedding in item_enhanced.items():
-                            # Migrate embedding dimension
-                            if len(embedding) != self.embedding_dim:
-                                if len(embedding) > self.embedding_dim:
-                                    # Truncate
-                                    new_embedding = embedding[:self.embedding_dim]
-                                else:
-                                    # Pad
-                                    new_embedding = np.pad(embedding, (0, self.embedding_dim - len(embedding)))
-
-                                # Normalize
-                                norm = np.linalg.norm(new_embedding)
-                                if norm > 1e-10:
-                                    new_embedding = new_embedding / norm
-
-                                migrated_embeddings[level] = new_embedding
-                                migrated_count += 1
-                            else:
-                                migrated_embeddings[level] = embedding
-
-                        # Save migrated embeddings
-                        self.items[idx].additional_embeddings = migrated_embeddings
-                    else:
-                        # No migration needed
-                        self.items[idx].additional_embeddings = item_enhanced
-
+                    self.items[idx].additional_embeddings = item_enhanced
                     loaded_count += 1
 
-            print(f"{self.get_time()} Loaded {loaded_count} enhanced embeddings, migrated {migrated_count}")
+            print(f"{self.get_time()} Loaded {loaded_count} enhanced embeddings.")
 
             # Rebuild enhanced indices if needed
             if loaded_count > 0:
@@ -1444,104 +1182,12 @@ class MemoryManager:
             start_time = time.time()
             print(f"{self.get_time()} Starting memory load...")
 
-            # First load metadata to determine configuration
-            metadata_path = os.path.join(self.storage_path, "metadata.json")
-            old_embedding_dim = None
-            need_migration = False
+        # Proceed with full load
+        return self._full_load()
 
-            if os.path.exists(metadata_path):
-                try:
-                    with open(metadata_path, 'r') as f:
-                        metadata = json.load(f)
-                    old_embedding_dim = metadata.get('embedding_dim')
-
-                    # Check if dimension migration is needed
-                    if old_embedding_dim and old_embedding_dim != self.embedding_dim:
-                        print(f"{self.get_time()} Embedding dimension changed: {old_embedding_dim} → {self.embedding_dim}")
-                        print(f"{self.get_time()} Will perform dimension migration during load")
-                        need_migration = True
-                except Exception as e:
-                    print(f"{self.get_time()} Error reading metadata: {e}")
-
-        # Proceed with full load with migration support
-        return self._full_load(need_migration=need_migration, old_embedding_dim=old_embedding_dim)
-
-    def update_embedding_dimension(self, new_dim):
+    def _full_load(self) -> bool:
         """
-        Update the embedding dimension and migrate all components.
-
-        Args:
-            new_dim: New embedding dimension
-        """
-        if self.embedding_dim == new_dim:
-            return
-
-        print(f"{self.get_time()} Updating embedding dimension: {self.embedding_dim} → {new_dim}")
-
-        # Store old dimension
-        old_dim = self.embedding_dim
-
-        # Update dimension
-        self.embedding_dim = new_dim
-
-        # Resize embeddings
-        self._resize_all_embeddings(old_dim, new_dim)
-
-        # Reinitialize rotation matrices
-        self._initialize_enhancement_matrices()
-
-        # Rebuild FAISS indices
-        self._rebuild_index()
-        self._rebuild_enhanced_indices()
-
-        print(f"{self.get_time()} Migration to dimension {new_dim} complete")
-
-
-    def _migrate_embeddings(self, embeddings, old_dim, new_dim):
-        """
-        Migrate embeddings from old dimension to new dimension.
-
-        Args:
-            embeddings: Array of embeddings
-            old_dim: Original dimension
-            new_dim: Target dimension
-
-        Returns:
-            Migrated embeddings
-        """
-        print(f"{self.get_time()} Migrating {len(embeddings)} embeddings from {old_dim}D to {new_dim}D")
-
-        migrated_embeddings = []
-
-        for i, emb in enumerate(embeddings):
-            # Create new embedding with adjusted dimension
-            if new_dim > old_dim:
-                # Padding approach
-                new_emb = np.pad(emb, (0, new_dim - old_dim))
-            else:
-                # Truncation approach
-                new_emb = emb[:new_dim]
-
-            # Normalize after resizing
-            norm = np.linalg.norm(new_emb)
-            if norm > 1e-10:
-                new_emb = new_emb / norm
-
-            migrated_embeddings.append(new_emb)
-
-            # Show progress for large migrations
-            if (i+1) % 1000 == 0 or i+1 == len(embeddings):
-                print(f"{self.get_time()} Migrated {i+1}/{len(embeddings)} embeddings")
-
-        return np.array(migrated_embeddings)
-
-    def _full_load(self, need_migration=False, old_embedding_dim=None) -> bool:
-        """
-        Perform a full load of all memory data with migration support.
-
-        Args:
-            need_migration: Whether dimension migration is needed
-            old_embedding_dim: Old embedding dimension if migration needed
+        Perform a full load of all memory data.
 
         Returns:
             Success status
@@ -1563,22 +1209,11 @@ class MemoryManager:
 
             print(f"{self.get_time()} Found {len(items_data)} items in storage")
 
-            # Load embeddings with migration support
+            # Load embeddings
             try:
                 embeddings = np.load(embeddings_path)
                 print(f"{self.get_time()} Loaded {len(embeddings)} embeddings")
 
-                # Check if dimensions match
-                if len(embeddings) > 0:
-                    actual_dim = embeddings[0].shape[0]
-                    if actual_dim != self.embedding_dim:
-                        print(f"{self.get_time()} Embedding dimension mismatch: {actual_dim} vs {self.embedding_dim}")
-                        if need_migration:
-                            print(f"{self.get_time()} Performing dimension migration...")
-                            embeddings = self._migrate_embeddings(embeddings, actual_dim, self.embedding_dim)
-                        else:
-                            print(f"{self.get_time()} WARNING: Dimension mismatch but migration not requested")
-                            # Continue anyway - we'll resize embeddings as we load them
             except Exception as e:
                 print(f"{self.get_time()} Error loading embeddings: {e}")
                 return False
@@ -1633,94 +1268,6 @@ class MemoryManager:
             print(f"{self.get_time()} Error in full memory load: {e}")
             traceback.print_exc()
             return False
-
-    def _load_indices_optimized(self, batch_utils_available: bool = False):
-        """Load FAISS indices with optimization for large collections."""
-        # Load FAISS index
-        index_path = os.path.join(self.storage_path, "index.faiss")
-
-        if os.path.exists(index_path):
-            try:
-                # Try to use memory-mapped IO for larger indices
-                if os.path.getsize(index_path) > 100 * 1024 * 1024:  # > 100MB
-                    self.index = faiss.read_index(index_path, faiss.IO_FLAG_MMAP)
-                else:
-                    self.index = faiss.read_index(index_path)
-            except Exception as e:
-                print(f"{self.get_time()} Error loading main index: {e}")
-                # Recreate index with batch processing
-                self._create_index()
-
-                if self.embeddings and batch_utils_available and len(self.embeddings) > 1000:
-                    # Use batch processing for adding to index
-                    self._add_to_index_with_batching()
-                elif self.embeddings:
-                    # Standard approach for smaller collections
-                    self.index.add(np.array(self.embeddings, dtype=np.float32))
-        else:
-            # Create new index
-            self._create_index()
-            if self.embeddings:
-                if batch_utils_available and len(self.embeddings) > 1000:
-                    self._add_to_index_with_batching()
-                else:
-                    self.index.add(np.array(self.embeddings, dtype=np.float32))
-
-        # Load enhanced indices with optimization
-        if self.enable_enhanced_embeddings:
-            self.enhanced_indices = {}
-            for level in range(1, self.max_enhancement_levels + 1):
-                level_path = os.path.join(self.storage_path, f"index_level_{level}.faiss")
-                if os.path.exists(level_path):
-                    try:
-                        # Use memory mapping for large indices
-                        if os.path.getsize(level_path) > 100 * 1024 * 1024:  # > 100MB
-                            self.enhanced_indices[level] = faiss.read_index(level_path, faiss.IO_FLAG_MMAP)
-                        else:
-                            self.enhanced_indices[level] = faiss.read_index(level_path)
-                    except Exception as e:
-                        print(f"{self.get_time()} Error loading level {level} index: {e}")
-
-    def _add_to_index_with_batching(self):
-        """Add embeddings to FAISS index with batch processing."""
-        try:
-            from batch_utils import tensor_batch_processing
-
-            # Convert embeddings to tensor
-            embeddings_tensor = torch.tensor(np.array(self.embeddings), dtype=torch.float32)
-
-            # Define batch operation
-            def add_batch_to_index(batch):
-                # Normalize batch for cosine similarity
-                norms = torch.norm(batch, dim=1, keepdim=True)
-                normalized_batch = batch / torch.clamp(norms, min=1e-10)
-
-                # Add to index
-                self.index.add(normalized_batch.numpy())
-
-                # Return batch for consistency with tensor_batch_processing
-                return batch
-
-            # Process in batches
-            tensor_batch_processing(
-                tensor_op=add_batch_to_index,
-                input_tensor=embeddings_tensor,
-                batch_dim=0,
-                batch_size=256,  # Process 256 embeddings at a time
-                cleanup=True,
-                adaptive=True
-            )
-
-        except ImportError:
-            # Fall back to standard approach
-            self.index.add(np.array(self.embeddings, dtype=np.float32))
-        except Exception as e:
-            print(f"{self.get_time()} Error in batch adding to index: {e}")
-            # Fall back to standard approach
-            try:
-                self.index.add(np.array(self.embeddings, dtype=np.float32))
-            except Exception as err:
-                print(f"{self.get_time()} Fatal error adding to index: {err}")
 
     def cleanup(self):
         """Clean up resources and consolidate storage."""

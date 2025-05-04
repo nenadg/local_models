@@ -326,6 +326,18 @@ Output files are saved to: {os.path.abspath(self.output_dir)}
                     output = result.stdout
                     error = result.stderr
 
+                    # Save to temp file for large outputs
+                    output_file = None
+                    if len(output) > 1000:  # If output is large
+                        output_file = os.path.join(self.output_dir, f"cmd_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+                        try:
+                            with open(output_file, 'w', encoding='utf-8') as f:
+                                f.write(output)
+                            print(f"[Large output saved to: {output_file}]")
+                        except Exception as e:
+                            print(f"[Error saving output: {str(e)}]")
+                            output_file = None
+
                     # Save to memory if memory_manager is available
                     if hasattr(self, 'memory_manager') and self.memory_manager:
                         # Detect content type
@@ -337,7 +349,8 @@ Output files are saved to: {os.path.abspath(self.output_dir)}
                             "command": match,
                             "timestamp": datetime.now().timestamp(),
                             "content_type": content_type,
-                            "error": error if error else None
+                            "error": error if error else None,
+                            "output_file": output_file
                         }
 
                         # Add to memory
@@ -373,6 +386,7 @@ Output files are saved to: {os.path.abspath(self.output_dir)}
                     else:
                         # Only include a summarized/truncated version of the output
                         if len(output) > 1000:
+
                             if output_file:
                                 truncated_output = f"[Large output (saved to {output_file})]\n" + output[:500] + "\n...[truncated]..."
                             else:
