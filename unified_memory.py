@@ -149,6 +149,27 @@ class MemoryManager:
         """Get formatted timestamp for logging."""
         return datetime.now().strftime("[%d/%m/%y %H:%M:%S]") + ' [Memory]'
 
+    def display_progress_bar(self, iteration, total, prefix='', suffix='', length=50, fill='█', print_end='\r'):
+        """
+        Display a progress bar in the console.
+
+        Args:
+            iteration: Current iteration (Int)
+            total: Total iterations (Int)
+            prefix: Prefix string (Str)
+            suffix: Suffix string (Str)
+            length: Bar length (Int)
+            fill: Bar fill character (Str)
+            print_end: End character (e.g. '\r', '\n') (Str)
+        """
+        percent = ("{0:.1f}").format(100 * (iteration / float(total)))
+        filled_length = int(length * iteration // total)
+        bar = fill * filled_length + '-' * (length - filled_length)
+        print(f'\r{prefix} |{bar}| {percent}% {suffix}', end=print_end)
+        # Print a new line when done
+        if iteration >= total:
+            print()
+
     def set_embedding_function(self,
                               function: Callable[[str], np.ndarray],
                               batch_function: Optional[Callable[[List[str]], List[np.ndarray]]] = None):
@@ -305,7 +326,7 @@ class MemoryManager:
 
     def _initialize_enhancement_matrices(self):
         """
-        Initialize matrices for enhanced embeddings with proper dimension detection.
+        Initialize matrices for enhanced embeddings with proper dimension detection and progress bar.
         """
         # Use the actual embedding dimension from the first item or from config
         if hasattr(self, 'embedding_dim'):
@@ -331,10 +352,18 @@ class MemoryManager:
         self._level_biases = {}
 
         # Support up to 20 potential levels
-        max_potential_levels = 20
+        max_potential_levels = 3
+
+        print(f"{self.get_time()} Creating {max_potential_levels} enhancement matrices...")
 
         # Create matrices with fixed random seed for determinism
         for i in range(1, max_potential_levels + 1):
+            # Display progress bar
+            self.display_progress_bar(i, max_potential_levels,
+                               prefix=f'{self.get_time()} Progress:',
+                               suffix=f'Matrix {i}/{max_potential_levels}',
+                               length=40)
+
             # Set fixed seed per level
             np.random.seed(42 + i)
 
@@ -356,6 +385,8 @@ class MemoryManager:
             np.random.seed(137 + i)
             bias_factor = 0.01 + (i * 0.002)
             self._level_biases[i] = np.random.normal(0, bias_factor, (embedding_dim,))
+
+        print(f"{self.get_time()} Enhancement matrices initialization complete.")
 
     def _load_enhanced_embeddings(self):
         """Load enhanced embeddings if available."""
@@ -798,8 +829,14 @@ class MemoryManager:
 
         print(f"{self.get_time()} Rebuilding enhanced indices for levels: {sorted(levels)}")
 
-        # Create index for each level
-        for level in sorted(levels):
+        # Create index for each level with progress bar
+        for idx, level in enumerate(sorted(levels)):
+            # Display progress
+            self.display_progress_bar(idx+1, len(levels),
+                               prefix=f'{self.get_time()} Building indices:',
+                               suffix=f'Level {level}/{len(levels)}',
+                               length=40)
+
             # Create new index with current dimension
             self.enhanced_indices[level] = faiss.IndexFlatIP(self.embedding_dim)
 
@@ -813,7 +850,6 @@ class MemoryManager:
 
                     # Ensure correct dimension
                     if len(embedding) != self.embedding_dim:
-                        print(f"{self.get_time()} Skipping level {level} embedding with wrong dimension")
                         continue
 
                     # Normalize
@@ -828,9 +864,11 @@ class MemoryManager:
             if level_embeddings:
                 try:
                     self.enhanced_indices[level].add(np.array(level_embeddings, dtype=np.float32))
-                    print(f"{self.get_time()} Level {level} index created with {len(level_embeddings)} vectors")
                 except Exception as e:
                     print(f"{self.get_time()} Error creating level {level} index: {e}")
+
+        # Print newline after progress bar
+        print(f"{self.get_time()} Enhanced indices rebuilt for {len(levels)} levels")
 
     def _enhanced_search(self, query_embedding: np.ndarray, top_k: int, min_similarity: float) -> List[Dict[str, Any]]:
         """
@@ -1185,8 +1223,18 @@ class MemoryManager:
 
         # Add embeddings in batches to avoid memory issues
         batch_size = 1000
-        for i in range(0, len(self.embeddings), batch_size):
+        total_batches = (len(self.embeddings) + batch_size - 1) // batch_size
+
+        for batch_idx, i in enumerate(range(0, len(self.embeddings), batch_size)):
+            # Get batch
             batch = self.embeddings[i:i+batch_size]
+
+            # Display progress
+            self.display_progress_bar(batch_idx+1, total_batches,
+                               prefix=f'{self.get_time()} Indexing:',
+                               suffix=f'Batch {batch_idx+1}/{total_batches}',
+                               length=40)
+
             try:
                 self.index.add(np.array(batch, dtype=np.float32))
             except Exception as e:

@@ -1347,7 +1347,6 @@ class MemoryEnhancedChat:
             # First, ensure memory manager creates a cache
             # Clean up memory
             if hasattr(self, 'memory_manager'):
-                print(f"{self.get_time()} Creating memory quickstart cache for next boot...")
                 self.memory_manager.cleanup()
 
             # Unload models
