@@ -198,10 +198,6 @@ class MemoryEnhancedChat:
         # Ensure model is in evaluation mode
         self.model.eval()
 
-        # Create embedding cache
-        self._embedding_cache = {}
-        self._embedding_cache_capacity = 1000
-
         # Detect model's hidden dimension
         # For TinyLlama, this is 2048
         try:
@@ -263,12 +259,6 @@ class MemoryEnhancedChat:
         # Create single embedding function
         def generate_embedding(text: str) -> np.ndarray:
             """Generate an embedding vector for a text string."""
-            # Create hash for cache key
-            cache_key = hashlib.md5(text.encode()).hexdigest()
-
-            # Check cache
-            if cache_key in self._embedding_cache:
-                return self._embedding_cache[cache_key]
 
             # Generate embedding
             try:
@@ -297,17 +287,6 @@ class MemoryEnhancedChat:
 
                     # Get mean pooled representation
                     embedding = outputs.last_hidden_state.mean(dim=1).cpu().numpy()[0]
-
-                    # Add to cache
-                    self._embedding_cache[cache_key] = embedding
-
-                    # Manage cache size
-                    if len(self._embedding_cache) > self._embedding_cache_capacity:
-                        # Remove oldest 20% of entries
-                        remove_count = int(self._embedding_cache_capacity * 0.2)
-                        keys_to_remove = list(self._embedding_cache.keys())[:remove_count]
-                        for key in keys_to_remove:
-                            del self._embedding_cache[key]
 
                     return embedding
             except Exception as e:
@@ -348,19 +327,6 @@ class MemoryEnhancedChat:
 
                 # Convert to numpy arrays
                 embeddings = pooled_outputs.cpu().numpy()
-
-                # Add to cache for future reference
-                for i, text in enumerate(texts):
-                    cache_key = hashlib.md5(text.encode()).hexdigest()
-                    self._embedding_cache[cache_key] = embeddings[i]
-
-                # Manage cache if it's gotten too large
-                if len(self._embedding_cache) > self._embedding_cache_capacity * 1.2:
-                    # Remove oldest entries
-                    remove_count = int(self._embedding_cache_capacity * 0.3)  # Remove 30%
-                    keys_to_remove = list(self._embedding_cache.keys())[:remove_count]
-                    for key in keys_to_remove:
-                        del self._embedding_cache[key]
 
                 return list(embeddings)
 
@@ -852,7 +818,7 @@ class MemoryEnhancedChat:
             command_memories = self.memory_manager.retrieve(
                 query=query,
                 top_k=2,
-                min_similarity=0.2,
+                min_similarity=0.1,
                 metadata_filter={"source": "command_output"}
             )
 
@@ -865,6 +831,17 @@ class MemoryEnhancedChat:
 
             # Combine the results, prioritizing command outputs
             combined_memories = []
+            command_ids = []
+
+            # Process command outputs first
+            for memory in command_memories:
+                combined_memories.append(memory)
+                command_ids.append(memory["id"])
+
+            # Add other relevant memories that aren't duplicates
+            for memory in memories:
+                if memory["id"] not in command_ids:
+                    combined_memories.append(memory)
 
             # Add command memories first (they're more relevant for commands)
             for memory in command_memories:
@@ -1590,6 +1567,14 @@ def main():
                 print(f"  Items added this session: {chat.memory_stats['items_added']}")
                 print(f"  Retrievals this session: {chat.memory_stats['retrievals']}")
                 print(f"  Enhanced embeddings: {'Enabled' if stats['enhanced_enabled'] else 'Disabled'}")
+                continue
+
+            elif user_input.lower() == '!rebuild-memory':
+                print(f"{chat.get_time()} Rebuilding memory indices...")
+                # Force rebuild of memory indices
+                chat.memory_manager._rebuild_index()
+                chat.memory_manager._rebuild_enhanced_indices()
+                print(f"{chat.get_time()} Memory indices rebuilt")
                 continue
 
             # Add user message to conversation

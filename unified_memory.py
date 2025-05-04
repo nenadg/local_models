@@ -138,20 +138,12 @@ class MemoryManager:
         self.embedding_function = None
         self.batch_embedding_function = None
 
-        # Cache for embeddings
-        self._embedding_cache = {}
-        self._embedding_cache_capacity = 1000
-
-        # Cache for similarity search results
-        self._similarity_cache = {}
-        self._similarity_cache_capacity = 100
-
         # Load existing memory if available
         self.load()
 
         # Initialize rotational matrices for enhanced embeddings
-        # if enable_enhanced_embeddings:
-        #    self._initialize_enhancement_matrices()
+        if enable_enhanced_embeddings:
+           self._initialize_enhancement_matrices()
 
     def set_embedding_function(self,
                               function: Callable[[str], np.ndarray],
@@ -439,6 +431,7 @@ class MemoryManager:
                 item.additional_embeddings = resized_embeddings
 
         print(f"{self.get_time()} All embeddings resized to {new_dim}D")
+
     def _initialize_enhancement_matrices(self):
         """
         Initialize matrices for enhanced embeddings with proper dimension detection.
@@ -846,17 +839,6 @@ class MemoryManager:
                 print(f"{self.get_time()} No embedding function set")
                 return []
 
-            # Check cache first for exactly matching query
-            cache_key = f"query_{hashlib.md5(query.encode()).hexdigest()}"
-            if hasattr(self, '_retrieval_cache') and cache_key in self._retrieval_cache:
-                # Apply metadata filter to cached results
-                if metadata_filter:
-                    filtered_results = []
-                    for result in self._retrieval_cache[cache_key]:
-                        if all(result.get('metadata', {}).get(k) == v for k, v in metadata_filter.items()):
-                            filtered_results.append(result)
-                    return filtered_results[:top_k]
-                return self._retrieval_cache[cache_key][:top_k]
 
             # Generate query embedding with potential batch processing optimization
             try:
@@ -918,21 +900,6 @@ class MemoryManager:
                         item.metadata["retrieval_count"] = item.metadata.get("retrieval_count", 0) + 1
                         # Update last access time
                         item.metadata["last_access"] = datetime.now().timestamp()
-
-            # Cache the results
-            if not hasattr(self, '_retrieval_cache'):
-                self._retrieval_cache = {}
-                self._retrieval_cache_capacity = 100
-
-            self._retrieval_cache[cache_key] = results
-
-            # Manage cache size
-            if len(self._retrieval_cache) > self._retrieval_cache_capacity:
-                # Remove oldest 20%
-                remove_count = int(self._retrieval_cache_capacity * 0.2)
-                oldest_keys = list(self._retrieval_cache.keys())[:remove_count]
-                for k in oldest_keys:
-                    del self._retrieval_cache[k]
 
             return results
 
@@ -1496,92 +1463,6 @@ class MemoryManager:
                 except Exception as e:
                     print(f"{self.get_time()} Error reading metadata: {e}")
 
-            # Check for cache with migration support
-            cache_path = os.path.join(self.storage_path, "quickstart_cache.pkl")
-
-            # Try loading from cache
-            if os.path.exists(cache_path) and not need_migration:  # Skip cache if migration needed
-                try:
-                    print(f"{self.get_time()} Found quickstart cache, loading...")
-                    with open(cache_path, 'rb') as f:
-                        cache_data = pickle.load(f)
-
-                    # Check if cache is using current embedding dimension
-                    cached_dim = cache_data.get('embedding_dim')
-                    if cached_dim != self.embedding_dim:
-                        print(f"{self.get_time()} Cache embedding dimension mismatch: {cached_dim} vs {self.embedding_dim}")
-                        print(f"{self.get_time()} Falling back to full load with migration")
-                        return self._full_load(need_migration=True, old_embedding_dim=cached_dim)
-
-                    # Load items from cache if available
-                    if 'lite_items' in cache_data:
-                        print(f"{self.get_time()} Loading {len(cache_data['lite_items'])} items from cache")
-
-                        # Reset storage
-                        self.items = []
-                        self.embeddings = []
-
-                        # Load ID mapping
-                        self.id_to_index = cache_data.get('id_to_index', {})
-                        self.deleted_ids = set(cache_data.get('deleted_ids', []))
-
-                        # We'll load full embeddings in the background
-                        # For now, create placeholder items with random temp embeddings
-                        for lite_item in cache_data['lite_items']:
-                            # Create temporary embedding
-                            temp_embedding = np.random.randn(self.embedding_dim).astype(np.float32)
-                            temp_embedding = temp_embedding / np.linalg.norm(temp_embedding)
-
-                            # Create memory item
-                            item = MemoryItem(
-                                content=lite_item['content'],
-                                embedding=temp_embedding,
-                                metadata=lite_item['metadata']
-                            )
-                            # Ensure ID matches original
-                            item.id = lite_item['id']
-
-                            # Add to storage
-                            self.items.append(item)
-                            self.embeddings.append(temp_embedding)
-
-                        # Try to load the separate index file
-                        if cache_data.get('has_index', False):
-                            index_path = os.path.join(self.storage_path, "cache_index.faiss")
-                            if os.path.exists(index_path):
-                                try:
-                                    self.index = faiss.read_index(index_path)
-                                    print(f"{self.get_time()} Loaded FAISS index with {self.index.ntotal} vectors")
-                                except Exception as e:
-                                    print(f"{self.get_time()} Error loading cached index: {e}")
-                                    # Create empty index
-                                    self._create_index()
-                            else:
-                                # Create empty index
-                                self._create_index()
-                        else:
-                            # Create empty index
-                            self._create_index()
-
-                        # Cache load complete
-                        cache_load_time = time.time() - start_time
-                        item_count = len(self.items)
-                        print(f"{self.get_time()} Quick cache loaded {item_count} item metadata in {cache_load_time:.2f}s")
-
-                        # Start background loading for complete data
-                        thread = threading.Thread(
-                            target=self._background_full_load,
-                            args=(cache_data.get('timestamp', 0),),
-                            daemon=True
-                        )
-                        thread.start()
-
-                        return True
-
-                except Exception as e:
-                    print(f"{self.get_time()} Error loading from cache: {e}, falling back to full load")
-                    # Fall back to full load
-
         # Proceed with full load with migration support
         return self._full_load(need_migration=need_migration, old_embedding_dim=old_embedding_dim)
 
@@ -1615,111 +1496,6 @@ class MemoryManager:
 
         print(f"{self.get_time()} Migration to dimension {new_dim} complete")
 
-    def _background_full_load(self, cache_timestamp: float):
-        """
-        Perform a full load in the background to update cache.
-
-        Args:
-            cache_timestamp: Timestamp when cache was created
-        """
-        try:
-            print(f"{self.get_time()} Starting background full load...")
-            start_time = time.time()
-
-            # Check if data files are newer than cache
-            items_path = os.path.join(self.storage_path, "items.json")
-            embeddings_path = os.path.join(self.storage_path, "embeddings.npy")
-
-            items_mtime = os.path.getmtime(items_path) if os.path.exists(items_path) else 0
-            embeddings_mtime = os.path.getmtime(embeddings_path) if os.path.exists(embeddings_path) else 0
-
-            if max(items_mtime, embeddings_mtime) <= cache_timestamp:
-                print(f"{self.get_time()} Cache is up to date, skipping background load")
-                return
-
-            # Perform full load in background
-            print(f"{self.get_time()} Cache is outdated, performing full background load")
-            with self._lock:
-                # Do the full load but keep track of current items for safety
-                prev_item_count = len(self.items)
-                success = self._full_load()
-
-                if success:
-                    new_item_count = len(self.items)
-                    diff = new_item_count - prev_item_count
-
-                    # Update the cache for next time
-                    self._create_quickstart_cache()
-
-                    load_time = time.time() - start_time
-                    print(f"{self.get_time()} Background full load complete in {load_time:.2f}s, "
-                          f"added {diff} new items")
-                else:
-                    print(f"{self.get_time()} Background full load failed")
-
-        except Exception as e:
-            print(f"{self.get_time()} Error in background load: {e}")
-
-    def _create_quickstart_cache(self):
-        """Create a quickstart cache for faster loading next time."""
-        try:
-            print(f"{self.get_time()} Trying to create quickstart cache")
-            cache_path = os.path.join(self.storage_path, "quickstart_cache.pkl")
-
-            # Create basic data dict
-            cache_data = {
-                'timestamp': time.time(),
-                'embedding_dim': self.embedding_dim,
-                'item_count': len(self.items),
-                'deleted_count': len(self.deleted_ids)
-            }
-
-            # Don't try to pickle the FAISS index - it's not reliably serializable
-            # Instead, save a separate FAISS index file
-            if self.index and self.index.ntotal > 0:
-                index_path = os.path.join(self.storage_path, "cache_index.faiss")
-                try:
-                    faiss.write_index(self.index, index_path)
-                    cache_data['has_index'] = True
-                    print(f"{self.get_time()} Saved FAISS index to {index_path}")
-                except Exception as e:
-                    print(f"{self.get_time()} Warning: Could not save FAISS index: {e}")
-                    cache_data['has_index'] = False
-            else:
-                print(f"{self.get_time()} WARNING: No index to cache")
-                cache_data['has_index'] = False
-
-            # Add items (but without embeddings to save space)
-            try:
-                lite_items = []
-                for item in self.items:
-                    # Create a lightweight version without embeddings
-                    lite_item = {
-                        'id': item.id,
-                        'content': item.content,
-                        'metadata': item.metadata
-                    }
-                    lite_items.append(lite_item)
-
-                cache_data['lite_items'] = lite_items
-                cache_data['id_to_index'] = self.id_to_index
-                cache_data['deleted_ids'] = list(self.deleted_ids)
-            except Exception as e:
-                print(f"{self.get_time()} Error creating lightweight items: {e}")
-                # Continue anyway - we'll still save basic metadata
-
-            # Save cache
-            with open(cache_path, 'wb') as f:
-                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-            cache_size = os.path.getsize(cache_path) / (1024 * 1024)  # Size in MB
-            print(f"{self.get_time()} Quickstart cache created ({cache_size:.1f} MB)")
-            return True
-
-        except Exception as e:
-            print(f"{self.get_time()} Error creating quickstart cache: {e}")
-            traceback.print_exc()
-            return False
 
     def _migrate_embeddings(self, embeddings, old_dim, new_dim):
         """
@@ -1949,7 +1725,6 @@ class MemoryManager:
     def cleanup(self):
         """Clean up resources and consolidate storage."""
         with self._lock:
-            print(f"{self.get_time()} Cleaning up memory manager.")
             # Consolidate storage by removing deleted items
             if self.deleted_ids:
                 new_items = []
@@ -1976,9 +1751,6 @@ class MemoryManager:
             # Save consolidated data
             if self.auto_save:
                 self.save()
-
-            # Create quickstart cache for next boot
-            self._create_quickstart_cache()
 
             # Run garbage collection
             gc.collect()
