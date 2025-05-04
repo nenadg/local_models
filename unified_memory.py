@@ -162,6 +162,35 @@ class MemoryManager:
         self.embedding_function = function
         self.batch_embedding_function = batch_function
 
+    def update_embedding_dimension(self, new_dim):
+        """
+        Update the embedding dimension and migrate all components.
+
+        Args:
+            new_dim: New embedding dimension
+        """
+        if self.embedding_dim == new_dim:
+            return
+
+        print(f"{self.get_time()} Updating embedding dimension: {self.embedding_dim} → {new_dim}")
+
+        # Store old dimension
+        old_dim = self.embedding_dim
+
+        # Update dimension
+        self.embedding_dim = new_dim
+
+        # Resize embeddings
+        self._resize_all_embeddings(old_dim, new_dim)
+
+        # Reinitialize rotation matrices
+        self._initialize_enhancement_matrices()
+
+        # Rebuild FAISS indices
+        self._rebuild_index()
+        self._rebuild_enhanced_indices()
+
+        print(f"{self.get_time()} Migration to dimension {new_dim} complete")
 
     def add(self,
             content: str,
@@ -215,6 +244,64 @@ class MemoryManager:
 
             # Add to storage
             return self._add_item_to_store(item)
+
+    def _resize_all_embeddings(self, old_dim, new_dim):
+        """
+        Resize all embeddings to match the new dimension.
+
+        Args:
+            old_dim: Original dimension
+            new_dim: Target dimension
+        """
+        print(f"{self.get_time()} Resizing all embeddings from {old_dim}D to {new_dim}D")
+
+        # Resize base embeddings
+        for i, item in enumerate(self.items):
+            if len(item.embedding) != new_dim:
+                # Resize embedding
+                if len(item.embedding) > new_dim:
+                    # Truncate
+                    new_embedding = item.embedding[:new_dim]
+                else:
+                    # Pad with zeros
+                    new_embedding = np.pad(item.embedding, (0, new_dim - len(item.embedding)))
+
+                # Normalize
+                norm = np.linalg.norm(new_embedding)
+                if norm > 1e-10:
+                    new_embedding = new_embedding / norm
+
+                # Update embedding
+                item.embedding = new_embedding
+                self.embeddings[i] = new_embedding
+
+        # Resize enhanced embeddings
+        for item in self.items:
+            if hasattr(item, 'additional_embeddings') and item.additional_embeddings:
+                resized_embeddings = {}
+                for level, embedding in item.additional_embeddings.items():
+                    if len(embedding) != new_dim:
+                        # Resize embedding
+                        if len(embedding) > new_dim:
+                            # Truncate
+                            new_embedding = embedding[:new_dim]
+                        else:
+                            # Pad with zeros
+                            new_embedding = np.pad(embedding, (0, new_dim - len(embedding)))
+
+                        # Normalize
+                        norm = np.linalg.norm(new_embedding)
+                        if norm > 1e-10:
+                            new_embedding = new_embedding / norm
+
+                        resized_embeddings[level] = new_embedding
+                    else:
+                        resized_embeddings[level] = embedding
+
+                # Update enhanced embeddings
+                item.additional_embeddings = resized_embeddings
+
+        print(f"{self.get_time()} All embeddings resized to {new_dim}D")
 
     def _initialize_enhancement_matrices(self):
         """
@@ -1180,94 +1267,81 @@ class MemoryManager:
         """
         with self._lock:
             start_time = time.time()
-            print(f"{self.get_time()} Starting memory load...")
+            print(f"{self.get_time()} Starting full memory load...")
 
-        # Proceed with full load
-        return self._full_load()
+            items_path = os.path.join(self.storage_path, "items.json")
+            embeddings_path = os.path.join(self.storage_path, "embeddings.npy")
 
-    def _full_load(self) -> bool:
-        """
-        Perform a full load of all memory data.
-
-        Returns:
-            Success status
-        """
-        start_time = time.time()
-        print(f"{self.get_time()} Starting full memory load...")
-
-        items_path = os.path.join(self.storage_path, "items.json")
-        embeddings_path = os.path.join(self.storage_path, "embeddings.npy")
-
-        if not (os.path.exists(items_path) and os.path.exists(embeddings_path)):
-            print(f"{self.get_time()} No memory data found.")
-            return False
-
-        try:
-            # Load items data
-            with open(items_path, 'r', encoding='utf-8') as f:
-                items_data = json.load(f)
-
-            print(f"{self.get_time()} Found {len(items_data)} items in storage")
-
-            # Load embeddings
-            try:
-                embeddings = np.load(embeddings_path)
-                print(f"{self.get_time()} Loaded {len(embeddings)} embeddings")
-
-            except Exception as e:
-                print(f"{self.get_time()} Error loading embeddings: {e}")
+            if not (os.path.exists(items_path) and os.path.exists(embeddings_path)):
+                print(f"{self.get_time()} No memory data found.")
                 return False
 
-            # Initialize storage
-            self.items = []
-            self.embeddings = []
-            self.id_to_index = {}
+            try:
+                # Load items data
+                with open(items_path, 'r', encoding='utf-8') as f:
+                    items_data = json.load(f)
 
-            # Process items with dimension handling
-            for i, item_data in enumerate(items_data):
+                print(f"{self.get_time()} Found {len(items_data)} items in storage")
+
+                # Load embeddings
                 try:
-                    # Get embedding with dimension handling
-                    if i < len(embeddings):
-                        embedding = embeddings[i]
-
-                        # Check dimension and resize if needed
-                        if len(embedding) != self.embedding_dim:
-                            if len(embedding) > self.embedding_dim:
-                                # Truncate
-                                embedding = embedding[:self.embedding_dim]
-                            else:
-                                # Pad with zeros
-                                embedding = np.pad(embedding, (0, self.embedding_dim - len(embedding)))
-                    else:
-                        # Create random embedding if no embedding available
-                        print(f"{self.get_time()} No embedding for item {i}, creating random one")
-                        embedding = np.random.randn(self.embedding_dim).astype(np.float32)
-                        embedding = embedding / np.linalg.norm(embedding)
-
-                    # Create memory item
-                    item = MemoryItem.from_dict(item_data, embedding)
-
-                    # Add to storage
-                    self.items.append(item)
-                    self.embeddings.append(embedding)
-                    self.id_to_index[item.id] = len(self.items) - 1
+                    embeddings = np.load(embeddings_path)
+                    print(f"{self.get_time()} Loaded {len(embeddings)} embeddings")
 
                 except Exception as e:
-                    print(f"{self.get_time()} Error processing item {i}: {e}")
+                    print(f"{self.get_time()} Error loading embeddings: {e}")
+                    return False
 
-            # Create or load FAISS index
-            self._rebuild_index()
+                # Initialize storage
+                self.items = []
+                self.embeddings = []
+                self.id_to_index = {}
 
-            # Load enhanced embeddings if available
-            self._load_enhanced_embeddings()
+                # Process items with dimension handling
+                for i, item_data in enumerate(items_data):
+                    try:
+                        # Get embedding with dimension handling
+                        if i < len(embeddings):
+                            embedding = embeddings[i]
 
-            print(f"{self.get_time()} Memory load complete: {len(self.items)} items loaded in {time.time() - start_time:.2f}s")
-            return True
+                            # Check dimension and resize if needed
+                            if len(embedding) != self.embedding_dim:
+                                if len(embedding) > self.embedding_dim:
+                                    # Truncate
+                                    embedding = embedding[:self.embedding_dim]
+                                else:
+                                    # Pad with zeros
+                                    embedding = np.pad(embedding, (0, self.embedding_dim - len(embedding)))
+                        else:
+                            # Create random embedding if no embedding available
+                            print(f"{self.get_time()} No embedding for item {i}, creating random one")
+                            embedding = np.random.randn(self.embedding_dim).astype(np.float32)
+                            embedding = embedding / np.linalg.norm(embedding)
 
-        except Exception as e:
-            print(f"{self.get_time()} Error in full memory load: {e}")
-            traceback.print_exc()
-            return False
+                        # Create memory item
+                        item = MemoryItem.from_dict(item_data, embedding)
+
+                        # Add to storage
+                        self.items.append(item)
+                        self.embeddings.append(embedding)
+                        self.id_to_index[item.id] = len(self.items) - 1
+
+                    except Exception as e:
+                        print(f"{self.get_time()} Error processing item {i}: {e}")
+
+                # Create or load FAISS index
+                self._rebuild_index()
+
+                # Load enhanced embeddings if available
+                self._load_enhanced_embeddings()
+
+                print(f"{self.get_time()} Memory load complete: {len(self.items)} items loaded in {time.time() - start_time:.2f}s")
+                return True
+
+            except Exception as e:
+                print(f"{self.get_time()} Error in full memory load: {e}")
+                traceback.print_exc()
+                return False
 
     def cleanup(self):
         """Clean up resources and consolidate storage."""

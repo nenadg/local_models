@@ -160,7 +160,7 @@ class MemoryEnhancedChat:
 
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=True)
-        self.tokenizer.model_max_length = 2048  # Set appropriate context window
+        self.tokenizer.model_max_length = 2048  # Set appropriate context window, max - 2048 for tinyllama
 
         # Set up model loading options
         loading_options = {
@@ -403,7 +403,7 @@ class MemoryEnhancedChat:
 
     def get_time(self) -> str:
         """Get formatted timestamp for logging."""
-        return datetime.now().strftime("[%d/%m/%y %H:%M:%S]")
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S] Main")
 
     def toggle_memory(self) -> bool:
         """Toggle memory system on/off."""
