@@ -727,6 +727,21 @@ class MemoryEnhancedChat:
             # Post-process the response
             response = self._post_process_response(response)
 
+            # Apply response filtering if provided and not already handled during streaming
+            if response_filter is not None and not low_confidence_detected:
+                current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
+                # Update the user context with information about this exchange
+                if hasattr(response_filter, 'update_user_context'):
+                    response_filter.update_user_context(user_query, response, current_metrics)
+                # Apply filtering
+                response = response_filter.filter_response(
+                    response=response,
+                    metrics=current_metrics,
+                    query=user_query,
+                    preserve_mcp=True,
+                    allow_override=True
+                )
+
             # Save to memory if enabled
             if memory_enabled and user_query and response:
                 print("\n")
