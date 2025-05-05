@@ -335,7 +335,7 @@ class MemoryManager:
             embedding_dim = self.items[0].embedding.shape[0]
         else:
             # Default dimension if we can't determine it yet
-            embedding_dim = 2048  # TinyLlama's embedding dimension
+            embedding_dim = 384  # TinyLlama's embedding dimension is 2048
 
         print(f"{self.get_time()} Initializing enhancement matrices for dimension {embedding_dim}")
 
@@ -352,7 +352,7 @@ class MemoryManager:
         self._level_biases = {}
 
         # Support up to 20 potential levels
-        max_potential_levels = 3
+        max_potential_levels = 20
 
         print(f"{self.get_time()} Creating {max_potential_levels} enhancement matrices...")
 

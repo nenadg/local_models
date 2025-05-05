@@ -183,7 +183,7 @@ class MemoryEnhancedChat:
             storage_path=self.memory_dir,
             embedding_dim=2048,  # Adjust based on model's hidden size (initially 384)
             enable_enhanced_embeddings=self.enable_enhanced_embeddings,
-            max_enhancement_levels=3,
+            max_enhancement_levels=1,
             auto_save=True,
             similarity_enhancement_factor=self.similarity_enhancement_factor
         )
@@ -403,7 +403,7 @@ class MemoryEnhancedChat:
 
     def get_time(self) -> str:
         """Get formatted timestamp for logging."""
-        return datetime.now().strftime("[%d/%m/%y %H:%M:%S] Main")
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S] [Main] ")
 
     def toggle_memory(self) -> bool:
         """Toggle memory system on/off."""
@@ -630,7 +630,7 @@ class MemoryEnhancedChat:
                     current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
 
                     # Should we show fallback instead of continuing?
-                    if response_filter.should_stream_fallback(current_metrics, user_query):
+                    if response_filter.should_stream_fallback(current_metrics, user_query, complete_response, tokens_received):
                         # Set flag to avoid checking again
                         low_confidence_detected = True
 
@@ -642,6 +642,17 @@ class MemoryEnhancedChat:
                         print(fallback, end="", flush=True)
 
                         # Update complete response
+                        complete_response = fallback
+                        break
+
+                if tokens_received % 20 == 0 and tokens_received > 40:  # Check every 20 tokens after an initial buffer
+                    pattern_results = response_filter.detect_repetitive_patterns(complete_response)
+                    if pattern_results['has_repetitive_patterns']:
+                        # Stop generation if we detect garbage patterns
+                        self.stop_event.set()
+                        fallback = response_filter.get_streamable_fallback(
+                            user_query, details=pattern_results)
+                        print(fallback, end="", flush=True)
                         complete_response = fallback
                         break
 
@@ -678,7 +689,7 @@ class MemoryEnhancedChat:
                             # Make sure we have confidence metrics
                             self._ensure_confidence_metrics(10)
 
-                            return self.mcp_handler.finalize_streaming(complete_response)
+                            # complete_response = self.mcp_handler.finalize_streaming(complete_response) ## was return [...]
 
             # Handle any remaining tokens
             if token_buffer:
@@ -1457,7 +1468,8 @@ def main():
         confidence_threshold=args.confidence_threshold,
         user_context=user_context,
         question_classifier=chat.question_classifier,
-        sharpening_factor=args.enhancement_factor
+        sharpening_factor=args.enhancement_factor,
+        window_size=3
     )
 
     # Set up history
