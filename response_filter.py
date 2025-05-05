@@ -14,7 +14,7 @@ class ResponseFilter:
 
     def __init__(
         self,
-        confidence_threshold: float = 0.55,
+        confidence_threshold: float = 0.7,
         entropy_threshold: float = 2.5,
         perplexity_threshold: float = 15.0,
         fallback_messages: Optional[List[str]] = None,

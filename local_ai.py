@@ -32,6 +32,7 @@ from response_filter import ResponseFilter
 from terminal_heatmap import EnhancedHeatmap
 from question_classifier import QuestionClassifier
 from speculative_decoder import SpeculativeDecoder, SpeculativeDecodingStats
+from topic_shift_detector import TopicShiftDetector
 
 # Import our refactored memory manager
 from unified_memory import MemoryManager
@@ -585,6 +586,9 @@ class MemoryEnhancedChat:
             # Print assistant marker
             print(f"{self.get_time()} Assistant: \n", end='', flush=True)
 
+            # ignore fallbacks
+            ingore_fallback_answer = False
+
             # Streaming loop
             while True:
                 # Check for user interrupt
@@ -633,6 +637,7 @@ class MemoryEnhancedChat:
                     if response_filter.should_stream_fallback(current_metrics, user_query, complete_response, tokens_received):
                         # Set flag to avoid checking again
                         low_confidence_detected = True
+                        ingore_fallback_answer = True
 
                         # Stop generation
                         self.stop_event.set()
@@ -642,18 +647,20 @@ class MemoryEnhancedChat:
                         print(fallback, end="", flush=True)
 
                         # Update complete response
-                        complete_response = fallback
+                        # complete_response = fallback
                         break
 
                 if tokens_received % 20 == 0 and tokens_received > 40:  # Check every 20 tokens after an initial buffer
                     pattern_results = response_filter.detect_repetitive_patterns(complete_response)
                     if pattern_results['has_repetitive_patterns']:
+                        ingore_fallback_answer = True
+
                         # Stop generation if we detect garbage patterns
                         self.stop_event.set()
                         fallback = response_filter.get_streamable_fallback(
                             user_query, details=pattern_results)
                         print(fallback, end="", flush=True)
-                        complete_response = fallback
+                        # complete_response = fallback
                         break
 
                 # Only add displayable tokens to the buffer
@@ -720,7 +727,7 @@ class MemoryEnhancedChat:
                 )
 
             # Save to memory if enabled
-            if memory_enabled and user_query and response:
+            if memory_enabled and user_query and response and not ingore_fallback_answer:
                 print("\n")
                 self._save_to_memory(user_query, response)
 
@@ -1482,6 +1489,12 @@ def main():
         window_size=3
     )
 
+    # Initialize topic shift detector
+    topic_detector = TopicShiftDetector(
+        similarity_threshold=0.75,  # Adjust this threshold based on testing
+        memory_manager=chat.memory_manager  # Reuse memory manager for embeddings
+    )
+
     # Set up history
     history_file = setup_readline_history(chat.memory_dir)
     print(f"{chat.get_time()} Command history stored in: {history_file}")
@@ -1527,6 +1540,17 @@ def main():
 
             if not user_input:
                 continue
+
+            # Check for topic shift
+            if len(conversation) > 2:  # Only check after we have at least one exchange
+                is_shift, similarity = topic_detector.is_topic_shift(user_input)
+
+                if is_shift:
+                    # Topic has shifted significantly, reset conversation
+                    # but keep system message
+                    last_message = conversation[-1]
+                    conversation = [last_message]
+                    print(f"{chat.get_time()} Topic shift detected (similarity: {similarity:.3f}), context window reset.")
 
             # Handle special commands
             if user_input.lower() == 'exit':
