@@ -728,7 +728,7 @@ class ResponseFilter:
             (perplexity / thresholds['perplexity']) * 0.1
         )
 
-        if uncertainty_score > 0.55:
+        if uncertainty_score > 0.85:
             return True, "high_uncertainty", {
                 'uncertainty_score': uncertainty_score,
                 'confidence': confidence,

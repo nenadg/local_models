@@ -184,7 +184,7 @@ class MemoryEnhancedChat:
             storage_path=self.memory_dir,
             embedding_dim=2048,  # Adjust based on model's hidden size (initially 384)
             enable_enhanced_embeddings=self.enable_enhanced_embeddings,
-            max_enhancement_levels=1,
+            max_enhancement_levels=4,
             auto_save=True,
             similarity_enhancement_factor=self.similarity_enhancement_factor
         )

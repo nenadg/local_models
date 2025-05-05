@@ -352,7 +352,7 @@ class MemoryManager:
         self._level_biases = {}
 
         # Support up to 20 potential levels
-        max_potential_levels = 20
+        max_potential_levels = 4
 
         print(f"{self.get_time()} Creating {max_potential_levels} enhancement matrices...")
 
@@ -955,6 +955,8 @@ class MemoryManager:
                         }
             except Exception as e:
                 print(f"{self.get_time()} Error in enhanced search for level {level}: {e}")
+
+        results = self._apply_cross_level_verification(result_dict)
 
         # Extract final results
         results = list(result_dict.values())
