@@ -335,7 +335,7 @@ class MemoryManager:
             embedding_dim = self.items[0].embedding.shape[0]
         else:
             # Default dimension if we can't determine it yet
-            embedding_dim = 384  # TinyLlama's embedding dimension is 2048
+            embedding_dim = 2048  # TinyLlama's embedding dimension is 2048
 
         print(f"{self.get_time()} Initializing enhancement matrices for dimension {embedding_dim}")
 

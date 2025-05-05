@@ -741,7 +741,17 @@ class MemoryEnhancedChat:
             # Show heatmap legend if enabled
             if show_confidence and not self.stop_event.is_set() and not low_confidence_detected:
                 print()  # Add a newline
-                heatmap.print_legend()
+
+                # Calculate token usage
+                prompt_tokens = len(tokenized['input_ids'][0])
+                response_tokens = len(complete_response.split())
+                total_tokens = prompt_tokens + response_tokens
+
+                # Get max context window from tokenizer
+                max_tokens = self.tokenizer.model_max_length
+
+                # Display legend with context window usage
+                heatmap.print_legend(current_tokens=total_tokens, max_tokens=max_tokens)
 
             # Clean up resources
             self.resource_manager.clear_cache()

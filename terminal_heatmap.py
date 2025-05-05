@@ -194,8 +194,14 @@ class TerminalHeatmap:
         color = self._get_color_for_confidence(confidence)
         return color + token + self.RESET
 
-    def print_legend(self) -> None:
-        """Print a legend showing what each color represents."""
+    def print_legend(self, current_tokens=0, max_tokens=2048) -> None:
+        """
+        Print a legend showing what each color represents and context window usage.
+
+        Args:
+            current_tokens: Current number of tokens used in the context window
+            max_tokens: Maximum context window size
+        """
         print("\nConfidence Heatmap Legend:")
 
         thresholds = [
@@ -214,6 +220,23 @@ class TerminalHeatmap:
                 color = self.fg_colors[i]
 
             print(f"{color}█████{self.RESET} {label} ({lower:.1f}-{upper:.1f})")
+
+        # Add context window usage indicator
+        usage_percentage = (current_tokens / max_tokens) * 100
+        print("\nContext Window Usage:")
+        bar_width = 30
+        filled_width = int((current_tokens / max_tokens) * bar_width)
+        bar = "█" * filled_width + "░" * (bar_width - filled_width)
+
+        # Choose color based on usage percentage
+        if usage_percentage < 60:
+            color = self.FG_GREEN
+        elif usage_percentage < 85:
+            color = self.FG_YELLOW
+        else:
+            color = self.FG_RED
+
+        print(f"{color}{bar}{self.RESET} {current_tokens}/{max_tokens} tokens ({usage_percentage:.1f}%)")
 
 
 class EnhancedHeatmap(TerminalHeatmap):
@@ -457,8 +480,8 @@ class EnhancedHeatmap(TerminalHeatmap):
 
             return result
 
-    def print_legend(self):
-        """Print a legend showing the expanded color gradient."""
+    def print_legend(self, current_tokens=0, max_tokens=2048) -> None:
+        """Print a legend showing the expanded color gradient and context window usage."""
         print("\nConfidence Heatmap Legend (Normalized using Geometric Mean):")
 
         # Create a gradient legend
@@ -475,3 +498,20 @@ class EnhancedHeatmap(TerminalHeatmap):
 
         print(f"Window size for geometric mean: {self.window_size} tokens")
         print(f"Confidence range: {lowest} → {highest}")
+
+        # Add context window usage indicator
+        usage_percentage = (current_tokens / max_tokens) * 100
+        print("\nContext Window Usage:")
+        bar_width = 30
+        filled_width = int((current_tokens / max_tokens) * bar_width)
+        bar = "█" * filled_width + "░" * (bar_width - filled_width)
+
+        # Choose color based on usage percentage
+        if usage_percentage < 60:
+            color = self.FG_GREEN
+        elif usage_percentage < 85:
+            color = self.FG_YELLOW
+        else:
+            color = self.FG_RED
+
+        print(f"{color}{bar}{self.RESET} {current_tokens}/{max_tokens} tokens ({usage_percentage:.1f}%)")
