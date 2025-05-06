@@ -155,6 +155,12 @@ class MemoryEnhancedChat:
         # Question classifier for domain-specific handling
         self.question_classifier = QuestionClassifier()
 
+        # Initialize topic shift detector
+        self.topic_detector = TopicShiftDetector(
+            similarity_threshold=0.55,          # Adjust this threshold based on testing
+            memory_manager=self.memory_manager  # Reuse memory manager for embeddings
+        )
+
         # Initialize response filter
         self.response_filter = ResponseFilter(
             confidence_threshold=self.confidence_threshold,
@@ -878,15 +884,39 @@ class MemoryEnhancedChat:
                 query=query,
                 top_k=2,
                 min_similarity=0.1,
-                metadata_filter={"source": "command_output"}
+                metadata_filter={"source": "command_output", "source_hint": ["arithmetic", "qa_pair", "code"]}
             )
 
-            # Retrieve relevant memories
-            memories = self.memory_manager.retrieve(
-                query=query,
-                top_k=5,
-                min_similarity=0.25
-            )
+            memories = []
+
+            # Get domain information
+            domain_settings = self.question_classifier.get_domain_settings(query)
+            domain = domain_settings.get('domain', 'unknown')
+
+            # Adjust memory retrieval based on domain
+            if domain == 'arithmetic':
+                # For math, prioritize exact examples
+                memories = self.memory_manager.retrieve(
+                    query=query,
+                    top_k=3,
+                    min_similarity=0.6,
+                    metadata_filter={"source_hint": ["arithmetic", "qa_pair"]}
+                )
+            elif domain == 'translation':
+                # For translation, look for similar language pairs
+                memories = self.memory_manager.retrieve(
+                    query=query,
+                    top_k=8,
+                    min_similarity=0.4,
+                    metadata_filter={"source_hint": ["translation", "language"]}
+                )
+            else:
+                # Standard retrieval for other domains
+                memories = self.memory_manager.retrieve(
+                    query=query,
+                    top_k=5,
+                    min_similarity=0.25
+                )
 
             # Combine the results, prioritizing command outputs
             combined_memories = []
@@ -924,6 +954,7 @@ class MemoryEnhancedChat:
             if combined_memories:
                 # Use custom formatter for combined memories
                 memory_text = self._format_combined_memories(combined_memories, query)
+                memory_text += f"\n\nNote: Query classified as {domain} domain."
 
                 # Create memory-enhanced messages
                 memory_enhanced_messages = messages.copy()
@@ -1155,17 +1186,8 @@ class MemoryEnhancedChat:
                 pass
 
     def _get_domain_config(self, query, max_new_tokens=128, temperature=0.7):
-        """
-        Get domain-specific generation configuration.
+        """Enhanced domain configuration with better error handling."""
 
-        Args:
-            query: User query
-            max_new_tokens: Maximum tokens to generate
-            temperature: Temperature for sampling
-
-        Returns:
-            Generation configuration dictionary
-        """
         # Base configuration
         config = {
             "max_new_tokens": max_new_tokens,
@@ -1176,38 +1198,35 @@ class MemoryEnhancedChat:
             "use_cache": True
         }
 
-        # Set sampling parameters if needed
+        # Add sampling parameters
         if self.do_sample:
-            config['do_sample'] = True
-            config['top_k'] = self.top_k
-            config['top_p'] = self.top_p
-            config['temperature'] = temperature if temperature > 0.1 else 1.0
-        else:
-            config['do_sample'] = False
-            del config['top_k']
-            del config['top_k']
-            del config['temperature']
+            config.update({
+                'do_sample': True,
+                'top_k': self.top_k,
+                'top_p': self.top_p,
+                'temperature': temperature if temperature > 0.1 else 1.0
+            })
 
-        # Get domain settings if classifier is available
-        if self.do_sample and hasattr(self, 'question_classifier') and self.question_classifier:
+        # Get domain settings with error handling
+        try:
             settings = self.question_classifier.get_domain_settings(query)
             domain = settings['domain']
 
             # Apply domain-specific adjustments
-            if domain == 'arithmetic':
-                # More deterministic for math
-                config['temperature'] = min(config.get('temperature', 0.7), 0.3)
-                config['top_p'] = 0.85
-            elif domain == 'translation':
-                # More deterministic for translations
-                config['temperature'] = min(config.get('temperature', 0.7), 0.4)
-                config['top_p'] = 0.9
-            elif domain == 'factual':
-                # Slightly more deterministic for facts
-                config['temperature'] = min(config.get('temperature', 0.7), 0.5)
-            elif domain == 'conceptual' or domain == 'procedural':
-                # More creative for concepts and procedures
-                config['temperature'] = max(config.get('temperature', 0.7), 0.6)
+            domain_configs = {
+                'arithmetic': {'temperature': 0.3, 'top_p': 0.85},
+                'translation': {'temperature': 0.4, 'top_p': 0.9},
+                'factual': {'temperature': 0.5, 'top_p': 0.95},
+                'conceptual': {'temperature': 0.7, 'top_p': 0.9},
+                'procedural': {'temperature': 0.6, 'top_p': 0.9}
+            }
+
+            if domain in domain_configs and self.do_sample:
+                for key, value in domain_configs[domain].items():
+                    config[key] = min(config.get(key, value), value)
+
+        except Exception as e:
+            print(f"{self.get_time()} Error getting domain settings: {e}")
 
         return config
 
@@ -1511,12 +1530,6 @@ def main():
         system_message=args.system_prompt
     )
 
-    # Initialize topic shift detector
-    topic_detector = TopicShiftDetector(
-        similarity_threshold=0.55,          # Adjust this threshold based on testing
-        memory_manager=chat.memory_manager  # Reuse memory manager for embeddings
-    )
-
     # Set up history
     history_file = setup_readline_history(chat.memory_dir)
     print(f"{chat.get_time()} Command history stored in: {history_file}")
@@ -1565,14 +1578,27 @@ def main():
 
             # Check for topic shift
             if len(conversation) > 2:  # Only check after we have at least one exchange
-                is_shift, similarity = topic_detector.is_topic_shift(user_input)
+                is_shift, similarity = chat.topic_detector.is_topic_shift(user_input)
 
                 if is_shift:
-                    # Topic has shifted significantly, reset conversation
-                    # but keep system message
-                    last_message = conversation[-1]
-                    conversation = [last_message]
-                    print(f"{chat.get_time()} Topic shift detected (similarity: {similarity:.3f}), context window reset.")
+                    # Store context before reset
+                    last_context = {
+                        'last_user_query': conversation[-2].get('content') if len(conversation) > 2 else '',
+                        'last_assistant_response': conversation[-1].get('content') if len(conversation) > 1 else ''
+                    }
+
+                    # Reset conversation but keep system message
+                    system_message = conversation[0]
+                    conversation = [system_message]
+
+                    # Add shift notification to user context
+                    if chat.response_filter and hasattr(chat.response_filter, 'user_context'):
+                        chat.response_filter.user_context['topic_shift'] = {
+                            'similarity': similarity,
+                            'previous_context': last_context
+                        }
+
+                    print(f"{chat.get_time()} Topic shift detected (similarity: {similarity:.3f})")
 
             # Handle special commands
             if user_input.lower() == 'exit' or user_input.lower() == 'q':
