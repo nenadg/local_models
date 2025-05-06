@@ -155,6 +155,22 @@ class MemoryEnhancedChat:
         # Question classifier for domain-specific handling
         self.question_classifier = QuestionClassifier()
 
+        # Initialize response filter
+        self.response_filter = ResponseFilter(
+            confidence_threshold=self.confidence_threshold,
+            entropy_threshold=3.5,         # Up from 2.5
+            perplexity_threshold=25.0,     # Up from 15.0
+            user_context={},
+            question_classifier=self.question_classifier,
+            sharpening_factor=self.similarity_enhancement_factor,
+            window_size=3,
+            use_relative_filtering=True,
+            pattern_detection_weight=0.6,
+            token_count_threshold=60       # Up from 30
+        )
+
+        self.response_filter.question_classifier = self.question_classifier
+
     def _setup_model_and_tokenizer(self):
         """Load the model and tokenizer with appropriate settings."""
         print(f"{self.get_time()} Loading model: {self.model_name}")
@@ -463,8 +479,7 @@ class MemoryEnhancedChat:
             max_new_tokens: int = 128,
             temperature: float = 0.7,
             enable_memory: Optional[bool] = None,
-            show_confidence: bool = False,
-            response_filter: Optional[ResponseFilter] = None) -> str:
+            show_confidence: bool = False) -> str:
         """
         Generate a response with memory integration and streaming.
 
@@ -474,7 +489,6 @@ class MemoryEnhancedChat:
             temperature: Temperature for sampling
             enable_memory: Override default memory setting
             show_confidence: Whether to show confidence heatmap
-            response_filter: Optional response filter
 
         Returns:
             Generated response
@@ -517,8 +531,8 @@ class MemoryEnhancedChat:
             messages = memory_enhanced_messages
 
             # Pass memory results to response filter if provided
-            if response_filter and hasattr(response_filter, 'user_context'):
-                response_filter.user_context['memory_results'] = retrieved_memories
+            if self.response_filter and hasattr(self.response_filter, 'user_context'):
+                self.response_filter.user_context['memory_results'] = retrieved_memories
 
         # Setup streaming
         fd = sys.stdin.fileno()
@@ -633,7 +647,7 @@ class MemoryEnhancedChat:
                     token_confidences.append(latest_confidence)
 
                 # Check confidence to possibly stop generation
-                if (response_filter is not None and
+                if (self.response_filter is not None and
                     not low_confidence_detected and
                     tokens_received >= 10):  # Check after reasonable context
 
@@ -641,7 +655,7 @@ class MemoryEnhancedChat:
                     current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
 
                     # Should we show fallback instead of continuing?
-                    if response_filter.should_stream_fallback(current_metrics, user_query, complete_response, tokens_received):
+                    if self.response_filter.should_stream_fallback(current_metrics, user_query, complete_response, tokens_received):
                         # Set flag to avoid checking again
                         low_confidence_detected = True
                         ingore_fallback_answer = True
@@ -650,7 +664,7 @@ class MemoryEnhancedChat:
                         self.stop_event.set()
 
                         # Get fallback message
-                        fallback = response_filter.get_streamable_fallback(user_query)
+                        fallback = self.response_filter.get_streamable_fallback(user_query)
                         print(fallback, end="", flush=True)
 
                         # Update complete response
@@ -658,13 +672,13 @@ class MemoryEnhancedChat:
                         break
 
                 if tokens_received % 20 == 0 and tokens_received > 40:  # Check every 20 tokens after an initial buffer
-                    pattern_results = response_filter.detect_repetitive_patterns(complete_response)
+                    pattern_results = self.response_filter.detect_repetitive_patterns(complete_response)
                     if pattern_results['has_repetitive_patterns']:
                         ingore_fallback_answer = True
 
                         # Stop generation if we detect garbage patterns
                         self.stop_event.set()
-                        fallback = response_filter.get_streamable_fallback(
+                        fallback = self.response_filter.get_streamable_fallback(
                             user_query, details=pattern_results)
                         print(fallback, end="", flush=True)
                         # complete_response = fallback
@@ -719,13 +733,13 @@ class MemoryEnhancedChat:
             response = self._post_process_response(response)
 
             # Apply response filtering if provided and not already handled during streaming
-            if response_filter is not None and not low_confidence_detected:
+            if self.response_filter is not None and not low_confidence_detected:
                 current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
                 # Update the user context with information about this exchange
-                if hasattr(response_filter, 'update_user_context'):
-                    response_filter.update_user_context(user_query, response, current_metrics)
+                if hasattr(self.response_filter, 'update_user_context'):
+                    self.response_filter.update_user_context(user_query, response, current_metrics)
                 # Apply filtering
-                response = response_filter.filter_response(
+                response = self.response_filter.filter_response(
                     response=response,
                     metrics=current_metrics,
                     query=user_query,
@@ -767,14 +781,14 @@ class MemoryEnhancedChat:
 
                 print()  # Add a newline
                 confidence_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
-                normalized_metrics = response_filter.normalize_confidence_metrics(confidence_metrics)
-                should_filter, reason, details = response_filter.should_filter(normalized_metrics, response, user_query)
+                normalized_metrics = self.response_filter.normalize_confidence_metrics(confidence_metrics)
+                should_filter, reason, details = self.response_filter.should_filter(normalized_metrics, response, user_query)
 
                 # Get confidence metrics
                 metrics = details
 
                 # Generate and display confidence indicator
-                indicator = response_filter.get_confidence_indicator(metrics)
+                indicator = self.response_filter.get_confidence_indicator(metrics)
                 print(indicator)
 
             # Clean up resources
@@ -1497,23 +1511,9 @@ def main():
         system_message=args.system_prompt
     )
 
-    # Initialize response filter
-    response_filter = ResponseFilter(
-        confidence_threshold=args.confidence_threshold,
-        entropy_threshold=3.5,      # Up from 2.5
-        perplexity_threshold=25.0,  # Up from 15.0
-        user_context=user_context,
-        question_classifier=chat.question_classifier,
-        sharpening_factor=args.enhancement_factor,
-        window_size=3,
-        use_relative_filtering=True,  # New parameter
-        pattern_detection_weight=0.6,  # New parameter
-        token_count_threshold=60      # Up from 30
-    )
-
     # Initialize topic shift detector
     topic_detector = TopicShiftDetector(
-        similarity_threshold=0.55,  # Adjust this threshold based on testing
+        similarity_threshold=0.55,          # Adjust this threshold based on testing
         memory_manager=chat.memory_manager  # Reuse memory manager for embeddings
     )
 
@@ -1575,7 +1575,7 @@ def main():
                     print(f"{chat.get_time()} Topic shift detected (similarity: {similarity:.3f}), context window reset.")
 
             # Handle special commands
-            if user_input.lower() == 'exit':
+            if user_input.lower() == 'exit' or user_input.lower() == 'q':
                 # Show memory stats
                 stats = chat.memory_manager.get_stats()
                 print(f"{chat.get_time()} Total memories: {stats['active_items']}")
@@ -1614,7 +1614,7 @@ def main():
                     if 0.0 <= factor <= 1.0:
                         chat.set_similarity_enhancement(factor)
                         # Update response filter too
-                        response_filter.sharpening_factor = factor
+                        self.response_filter.sharpening_factor = factor
                     else:
                         print(f"{chat.get_time()} Factor must be between 0.0 and 1.0")
                 except Exception as e:
@@ -1655,8 +1655,7 @@ def main():
                 messages=conversation,
                 max_new_tokens=args.max_tokens,
                 temperature=args.temperature,
-                show_confidence=show_confidence,
-                response_filter=response_filter if filter_enabled else None
+                show_confidence=show_confidence
             )
 
             # Add assistant response to conversation
