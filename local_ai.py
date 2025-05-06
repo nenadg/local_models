@@ -538,7 +538,13 @@ class MemoryEnhancedChat:
 
             # Pass memory results to response filter if provided
             if self.response_filter and hasattr(self.response_filter, 'user_context'):
+                print(f"{self.get_time()} having some retrieved memories.", len(retrieved_memories))
                 self.response_filter.user_context['memory_results'] = retrieved_memories
+
+                # Log memory retrieval for debugging
+                if retrieved_memories:
+                    max_sim = max([m.get('similarity', 0) for m in retrieved_memories], default=0)
+                    print(f"{self.get_time()} Retrieved {len(retrieved_memories)} memories, max similarity: {max_sim:.3f}")
 
         # Setup streaming
         fd = sys.stdin.fileno()
@@ -825,45 +831,57 @@ class MemoryEnhancedChat:
         return formatted
 
     def _format_combined_memories(self, memories: List[Dict[str, Any]], query: str) -> str:
-        """Format combined memories with priority to command outputs."""
-        # Separate command and general memories
+        """Format combined memories with proper context separation."""
+
+        # Separate different types of memories
         command_memories = []
-        general_memories = []
+        conversation_memories = []
+        direct_answers = []
 
         for memory in memories:
-            if memory.get("metadata", {}).get("source") == "command_output":
+            metadata = memory.get("metadata", {})
+            source_hint = metadata.get("source_hint", "")
+
+            if metadata.get("source") == "command_output":
                 command_memories.append(memory)
-            else:
-                general_memories.append(memory)
+            elif source_hint == "direct_answer":
+                direct_answers.append(memory)
+            elif source_hint in ["conversation", "qa_pair"]:
+                conversation_memories.append(memory)
 
         # Build formatted output
         output = "MEMORY CONTEXT:\n"
 
-        # Add command outputs with special formatting
+        # Add command outputs first
         if command_memories:
             output += "\nCOMMAND OUTPUT INFORMATION:\n"
-            for i, memory in enumerate(command_memories):
-                # Get command that produced this output
+            for memory in command_memories:
                 command = memory.get("metadata", {}).get("command", "unknown command")
-                content = memory.get("formatted_content", memory.get("content", ""))
-
+                content = memory.get("content", "").strip()
                 output += f"Output from command '{command}':\n"
-                # Add indentation to command output for clarity
                 indented_content = "\n".join(f"  {line}" for line in content.split("\n"))
                 output += f"{indented_content}\n\n"
 
-        # Add general memories
-        if general_memories:
-            output += "\nRELEVANT KNOWLEDGE:\n"
-            for memory in general_memories:
+        # Add direct answers
+        if direct_answers:
+            output += "\nRELEVANT INFORMATION:\n"
+            for memory in direct_answers:
                 content = memory.get("content", "").strip()
                 similarity = memory.get("similarity", 0)
+                if not content.startswith("Q:") and not content.startswith("- Q:"):
+                    output += f"- [{similarity:.2f}] {content}\n"
 
-                # Add the memory with its similarity score
-                output += f"- [{similarity:.2f}] {content}\n"
+        # Add conversation context only if specifically requested
+        if conversation_memories and len(query.split()) > 10:  # Only for longer queries
+            output += "\nPREVIOUS CONVERSATION CONTEXT:\n"
+            for memory in conversation_memories:
+                content = memory.get("content", "").strip()
+                # Skip if it's in the awkward Q&A format
+                if not content.startswith("Q:") and not content.startswith("- Q:"):
+                    output += f"- {content}\n"
 
-        # Add instruction for using the memory
-        output += "\nUse the information above to respond to the query. For table data, refer to specific columns and rows.\n"
+        # Add guidance
+        output += "\nUse the above information to help answer the query if relevant. Do not repeat the information verbatim.\n"
 
         return output
 
@@ -1051,7 +1069,14 @@ class MemoryEnhancedChat:
 
         # For short exchanges, memorize complete Q&A
         if len(query) <= 100 and len(response) <= 200:
-            memories.append((f"Q: {query}\nA: {response}", "qa_pair"))
+            # Store as natural conversation context
+            conversation_text = f"{query.strip()} {response.strip()}"
+            memories.append((conversation_text, "conversation"))
+
+            # Also store response separately for direct retrieval
+            if len(response.strip()) > 20:
+                memories.append((response.strip(), "direct_answer"))
+
             return memories
 
         # Extract factual statements

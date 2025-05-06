@@ -116,6 +116,10 @@ class ResponseFilter:
 
 
 
+    def get_time(self) -> str:
+        """Get formatted timestamp for logging."""
+        return datetime.now().strftime("[%d/%m/%y %H:%M:%S] [ResponseFilter] ")
+
     def log(self, message: str) -> None:
         """Log messages if debug mode is enabled."""
         if self.debug_mode:
@@ -778,12 +782,29 @@ class ResponseFilter:
 
         # Check if response is supported by memory (if available in context)
         memory_supported = False
+        memory_count = 0
+        memory_details = []
+
         if hasattr(self, 'user_context') and self.user_context:
             memory_results = self.user_context.get('memory_results', [])
+            memory_details = memory_results
+            memory_count = len(memory_results)
+
+            # Check for high-quality memories (threshold: 0.5 instead of 0.7)
             for memory in memory_results:
-                if memory.get('similarity', 0) > 0.7:
+                similarity = memory.get('similarity', 0)
+                if similarity > 0.5:  # More lenient threshold
                     memory_supported = True
                     break
+
+            # If no high-similarity matches, check if we have any reasonable matches
+            if not memory_supported and memory_results:
+                # Consider it "limited" support if we have any memories above 0.3
+                max_similarity = max([m.get('similarity', 0) for m in memory_results], default=0)
+                memory_supported = max_similarity > 0.3
+
+            if memory_supported:
+                print(f"{self.get_time()} memory supported.")
 
         # Calculate a modified uncertainty score with weighted components
         uncertainty_score = (
@@ -832,7 +853,10 @@ class ResponseFilter:
                 'quality_score': quality_results['quality_score'],
                 'entropy_ratio': entropy / thresholds['entropy'],
                 'perplexity_ratio': perplexity / thresholds['perplexity'],
-                'pattern_detected': pattern_results.get('pattern_detected', False)
+                'pattern_detected': pattern_results.get('pattern_detected', False),
+                'memory_supported': memory_supported,
+                'memory_count': memory_count,
+                'memory_details': memory_details
             }
 
         # If we get here, the response passes all checks
@@ -840,7 +864,9 @@ class ResponseFilter:
             'confidence': confidence,
             'quality_score': quality_results['quality_score'],
             'uncertainty_score': uncertainty_score,
-            'memory_supported': memory_supported
+            'memory_supported': memory_supported,
+            'memory_count': memory_count,
+            'memory_details': memory_details
         }
 
     def get_confidence_indicator(self, metrics: Dict[str, Any], width: int = 30) -> str:
@@ -859,6 +885,13 @@ class ResponseFilter:
         quality = metrics.get('quality_score', 0.7)
         uncertainty = metrics.get('uncertainty_score', 0.5)
         memory_supported = metrics.get('memory_supported', False)
+        memory_count = metrics.get('memory_count', 0)
+        memory_details = metrics.get('memory_details', [])
+
+        # Calculate best memory similarity if we have memory details
+        max_similarity = 0
+        if memory_details:
+            max_similarity = max([m.get('similarity', 0) for m in memory_details], default=0)
 
         # Function to generate a bar
         def generate_bar(value, width):
@@ -889,7 +922,21 @@ class ResponseFilter:
 
         # Memory support indicator
         mem_color = "\033[32m" if memory_supported else "\033[33m"
-        mem_status = "Supported" if memory_supported else "Limited"
+        mem_status = "None"
+
+        if memory_count > 0:
+            if max_similarity > 0.8:
+                mem_color = "\033[32m"  # Green
+                mem_status = f"Excellent ({memory_count} items, {max_similarity:.1%})"
+            elif max_similarity > 0.6:
+                mem_color = "\033[32m"  # Green
+                mem_status = f"Good ({memory_count} items, {max_similarity:.1%})"
+            elif max_similarity > 0.4:
+                mem_color = "\033[33m"  # Yellow
+                mem_status = f"Moderate ({memory_count} items, {max_similarity:.1%})"
+            else:
+                mem_color = "\033[33m"  # Yellow
+                mem_status = f"Limited ({memory_count} items, {max_similarity:.1%})"
 
         # Assemble the complete indicator
         indicator = (
