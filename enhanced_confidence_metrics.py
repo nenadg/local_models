@@ -318,3 +318,7 @@ class EnhancedConfidenceMetrics:
                 if self.confidence_metrics.original_token_probabilities:
                     metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
                     print(f"DEBUG - Recalculated metrics: {metrics.keys()}")
+
+    def get_token_probabilities(self) -> List[float]:
+        """Get raw token probabilities for pattern detection."""
+        return self.token_probabilities.copy() if hasattr(self, 'token_probabilities') else []

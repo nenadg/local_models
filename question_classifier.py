@@ -236,7 +236,7 @@ class QuestionClassifier:
         
         # Default settings
         settings = {
-            'memory_weight': 0.5,            # How much to weight memory vs. model knowledge
+            'memory_weight': 0.8,            # How much to weight memory vs. model knowledge
             'sharpening_factor': 0.3,        # Default sharpening factor
             'confidence_threshold': 0.6,     # Minimum confidence to accept answer
             'domain': domain,                # Detected domain
@@ -248,7 +248,7 @@ class QuestionClassifier:
         # Adjust settings based on domain
         if domain == 'arithmetic':
             settings.update({
-                'memory_weight': 0.2,        # Rely more on model than memory
+                'memory_weight': 0.4,        # Rely more on model than memory
                 'sharpening_factor': 0.1,    # Minimal sharpening
                 'confidence_threshold': 0.7,
                 'post_process': True,        # Apply arithmetic verification
@@ -257,7 +257,7 @@ class QuestionClassifier:
             
         elif domain == 'translation':
             settings.update({
-                'memory_weight': 0.7,        # More weight on memory for translations
+                'memory_weight': 0.8,        # More weight on memory for translations
                 'sharpening_factor': 0.4,    # More aggressive sharpening
                 'confidence_threshold': 0.5,
                 'post_process': False,
@@ -266,7 +266,7 @@ class QuestionClassifier:
             
         elif domain == 'factual':
             settings.update({
-                'memory_weight': 0.8,        # High weight on memory for facts
+                'memory_weight': 0.9,        # High weight on memory for facts
                 'sharpening_factor': 0.5,    # Strong sharpening
                 'confidence_threshold': 0.5,
                 'post_process': False,
@@ -275,8 +275,8 @@ class QuestionClassifier:
             
         elif domain == 'conceptual':
             settings.update({
-                'memory_weight': 0.4,        # Balanced approach
-                'sharpening_factor': 0.3,    # Moderate sharpening
+                'memory_weight': 0.6,         # Balanced approach
+                'sharpening_factor': 0.3,     # Moderate sharpening
                 'confidence_threshold': 0.4,  # Lower threshold for concepts
                 'post_process': False,
                 'retrieval_count': 8
@@ -284,7 +284,7 @@ class QuestionClassifier:
             
         elif domain == 'procedural':
             settings.update({
-                'memory_weight': 0.6,
+                'memory_weight': 0.7,
                 'sharpening_factor': 0.3,
                 'confidence_threshold': 0.5,
                 'post_process': False,

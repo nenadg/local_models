@@ -56,7 +56,7 @@ class MemoryEnhancedChat:
                 device: Optional[str] = None,
                 memory_dir: str = "./memory",
                 output_dir: str = "./output",
-                confidence_threshold: float = 0.7,
+                confidence_threshold: float = 0.45,
                 enable_memory: bool = True,
                 similarity_enhancement_factor: float = 0.3,
                 enable_enhanced_embeddings: bool = True,
@@ -513,11 +513,18 @@ class MemoryEnhancedChat:
         # Create memory-enhanced messages if memory is enabled
         memory_enabled = self.enable_memory if enable_memory is None else enable_memory
         if memory_enabled and user_query:
-            messages = self._integrate_memory(messages, user_query)
+            memory_enhanced_messages, retrieved_memories = self._integrate_memory(messages, user_query)
+            messages = memory_enhanced_messages
+
+            # Pass memory results to response filter if provided
+            if response_filter and hasattr(response_filter, 'user_context'):
+                response_filter.user_context['memory_results'] = retrieved_memories
 
         # Setup streaming
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
+        response = "";
+
         try:
             tty.setcbreak(fd)
 
@@ -747,8 +754,6 @@ class MemoryEnhancedChat:
 
             # Show heatmap legend if enabled
             if show_confidence and not self.stop_event.is_set() and not low_confidence_detected:
-                print()  # Add a newline
-
                 # Calculate token usage
                 prompt_tokens = len(tokenized['input_ids'][0])
                 response_tokens = len(complete_response.split())
@@ -759,6 +764,18 @@ class MemoryEnhancedChat:
 
                 # Display legend with context window usage
                 heatmap.print_legend(current_tokens=total_tokens, max_tokens=max_tokens)
+
+                print()  # Add a newline
+                confidence_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
+                normalized_metrics = response_filter.normalize_confidence_metrics(confidence_metrics)
+                should_filter, reason, details = response_filter.should_filter(normalized_metrics, response, user_query)
+
+                # Get confidence metrics
+                metrics = details
+
+                # Generate and display confidence indicator
+                indicator = response_filter.get_confidence_indicator(metrics)
+                print(indicator)
 
             # Clean up resources
             self.resource_manager.clear_cache()
@@ -916,13 +933,13 @@ class MemoryEnhancedChat:
                 # Update stats
                 self.memory_stats["retrievals"] += 1
 
-                return memory_enhanced_messages
+                return memory_enhanced_messages, combined_memories
 
-            return messages
+            return messages, []
         except Exception as e:
             print(f"{self.get_time()} Error integrating memory: {e}")
             traceback.print_exc()
-            return messages
+            return messages, []
 
     def _save_to_memory(self, query: str, response: str) -> bool:
         """
@@ -1448,7 +1465,7 @@ def main():
     # Advanced settings
     parser.add_argument("--output-dir", type=str, default="./output",
                        help="Directory for output files")
-    parser.add_argument("--confidence-threshold", type=float, default=0.7,
+    parser.add_argument("--confidence-threshold", type=float, default=0.45,
                        help="Confidence threshold for filtering")
     parser.add_argument("--enhancement-factor", type=float, default=0.3,
                        help="Similarity enhancement factor (0.0-1.0)")
@@ -1483,15 +1500,20 @@ def main():
     # Initialize response filter
     response_filter = ResponseFilter(
         confidence_threshold=args.confidence_threshold,
+        entropy_threshold=3.5,      # Up from 2.5
+        perplexity_threshold=25.0,  # Up from 15.0
         user_context=user_context,
         question_classifier=chat.question_classifier,
         sharpening_factor=args.enhancement_factor,
-        window_size=3
+        window_size=3,
+        use_relative_filtering=True,  # New parameter
+        pattern_detection_weight=0.6,  # New parameter
+        token_count_threshold=60      # Up from 30
     )
 
     # Initialize topic shift detector
     topic_detector = TopicShiftDetector(
-        similarity_threshold=0.75,  # Adjust this threshold based on testing
+        similarity_threshold=0.55,  # Adjust this threshold based on testing
         memory_manager=chat.memory_manager  # Reuse memory manager for embeddings
     )
 

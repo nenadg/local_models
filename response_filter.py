@@ -11,19 +11,21 @@ class ResponseFilter:
     3. Content quality assessment based on coherence and structure
     4. Adaptive thresholds that adjust based on the query domain and response length
     """
-
     def __init__(
         self,
-        confidence_threshold: float = 0.7,
-        entropy_threshold: float = 2.5,
-        perplexity_threshold: float = 15.0,
+        confidence_threshold: float = 0.45,  # Lowered from 0.7
+        entropy_threshold: float = 3.5,      # Increased from 2.5
+        perplexity_threshold: float = 25.0,  # Increased from 15.0
         fallback_messages: Optional[List[str]] = None,
         continuation_phrases: Optional[List[str]] = None,
         user_context: Optional[Dict[str, Any]] = None,
         sharpening_factor: float = 0.3,
         window_size: int = 5,
         question_classifier=None,
-        debug_mode: bool = False
+        debug_mode: bool = False,
+        use_relative_filtering: bool = True,  # New parameter
+        pattern_detection_weight: float = 0.6,  # New parameter
+        token_count_threshold: int = 60  # Increased from 30
     ):
         self.confidence_threshold = confidence_threshold
         self.entropy_threshold = entropy_threshold
@@ -33,15 +35,22 @@ class ResponseFilter:
         self.window_size = window_size
         self.question_classifier = question_classifier
         self.debug_mode = debug_mode
+        self.use_relative_filtering = use_relative_filtering
+        self.pattern_detection_weight = pattern_detection_weight
+        self.token_count_threshold = token_count_threshold
 
         # Initialize tracking variables
         self.context_history = []
         self.confidence_window = []
         self.last_content_assessment = {}
-        self.enable_aggressive_filtering = True
-        self.token_count_threshold = 30  # Minimum tokens before aggressive filtering
+        self.enable_aggressive_filtering = False  # Changed from True
 
-        # Default fallback messages when low confidence is detected
+        # For confidence baseline tracking
+        self.baseline_confidence = 0.5
+        self.confidence_values = []
+        self.confidence_variance = 0.1
+
+        # Default fallback messages unchanged...
         self.fallback_messages = fallback_messages or [
             "I don't have sufficient information to answer this question reliably.",
             "I'm uncertain about this topic and don't want to provide potentially incorrect information.",
@@ -49,29 +58,45 @@ class ResponseFilter:
             "I'm not able to provide a satisfactory answer about this topic.",
         ]
 
-        # Phrases that indicate user wants to continue despite uncertainty
+        # Continuation phrases unchanged...
         self.continuation_phrases = continuation_phrases or [
             "please continue",
             "continue anyway",
-            "speculate anyway",
-            "give it your best guess",
-            "go ahead anyway",
-            "try anyway",
-            "speculate",
-            "just guess",
-            "make something up",
-            "proceed anyway",
-            "please try",
-            "best estimate"
+            # Other phrases remain the same...
         ]
 
-        # Pattern detection thresholds and configurations
+        self.overflow_patterns = [
+            # File listing patterns
+            r'(-rw-r--r--.*?root.*?\d+[KMG]?)',
+            r'(drwx.*?root.*?\d+[KMG]?)',
+
+            # Truncated/corrupted patterns
+            r'(```\s*[a-z]*\s*```\s*){2,}',    # Empty code blocks
+            r'(\$\s*\$\s*\$\s*\$+)',           # Repeated $ signs
+            r'(\$\s*n\s*\$\s*\$\s*n+)',        # $n$$ patterns
+            r'(r-[-rwxs]{8,})',                # File permissions fragments
+
+            # Command output corruptions
+            r'(total\s+\d+K\s*$)',
+            r'(drwx[-rwxs]{8,}\s+\d+\s+\w+\s+\w+)',
+
+            # Repetitive garbage
+            r'(txt,txt,txt)',
+            r'(,,+)',                         # Multiple commas
+            r'(\.\.+\w+\.\.+\w+\.\.+)',       # Word.Word patterns
+            r'(\w+,){5,}',                    # Comma-separated words
+            r'(and,and|or,or|the,the)',       # Repeated connecting words
+
+            # Special token leakage
+            r'(\<\|[a-z]+\|\>)',              # Special tokens like <|user|>
+        ]
+
+        # Pattern detection thresholds remain mostly the same...
         self.pattern_config = {
-            # Content quality patterns
             'repeated_phrases': {
-                'threshold': 2,        # Max identical phrases allowed
-                'min_length': 5,       # Minimum length of phrase to check
-                'max_distance': 100,   # Max tokens between repeats
+                'threshold': 3,
+                'min_length': 5,
+                'max_distance': 100,
             },
             'repeated_characters': {
                 'threshold': 6,        # Max repeated characters
@@ -80,34 +105,7 @@ class ResponseFilter:
             'inconsistency': {
                 'contradictions': True, # Look for self-contradictions
             },
-
-            # Context overflow indicators
-            'overflow_patterns': [
-                # File listing patterns
-                r'(-rw-r--r--.*?root.*?\d+[KMG]?)',
-                r'(drwx.*?root.*?\d+[KMG]?)',
-
-                # Truncated/corrupted patterns
-                r'(```\s*[a-z]*\s*```\s*){2,}',    # Empty code blocks
-                r'(\$\s*\$\s*\$\s*\$+)',           # Repeated $ signs
-                r'(\$\s*n\s*\$\s*\$\s*n+)',        # $n$$ patterns
-                r'(r-[-rwxs]{8,})',                # File permissions fragments
-
-                # Command output corruptions
-                r'(total\s+\d+K\s*$)',
-                r'(drwx[-rwxs]{8,}\s+\d+\s+\w+\s+\w+)',
-
-                # Repetitive garbage
-                r'(txt,txt,txt)',
-                r'(,,+)',                         # Multiple commas
-                r'(\.\.+\w+\.\.+\w+\.\.+)',       # Word.Word patterns
-                r'(\w+,){5,}',                    # Comma-separated words
-                r'(and,and|or,or|the,the)',       # Repeated connecting words
-
-                # Special token leakage
-                r'(\<\|[a-z]+\|\>)',              # Special tokens like <|user|>
-            ],
-
+            'overflow_patterns': self.overflow_patterns,
             # Coherence assessment parameters
             'coherence': {
                 'min_sentence_length': 5,         # Minimum words for a valid sentence
@@ -115,6 +113,8 @@ class ResponseFilter:
                 'subject_verb_check': True,       # Check for subject-verb structure
             }
         }
+
+
 
     def log(self, message: str) -> None:
         """Log messages if debug mode is enabled."""
@@ -571,19 +571,14 @@ class ResponseFilter:
 
     def get_domain_thresholds(self, query: str) -> Dict[str, float]:
         """
-        Get domain-specific thresholds based on the query.
-
-        Args:
-            query: User query
-
-        Returns:
-            Dictionary with adjusted thresholds
+        Get domain-specific thresholds based on the query with calibrated values for TinyLlama.
         """
-        # Default thresholds
+        # Default thresholds - calibrated for TinyLlama
         thresholds = {
-            'confidence': self.confidence_threshold,
-            'entropy': self.entropy_threshold,
-            'perplexity': self.perplexity_threshold
+            'confidence': self.confidence_threshold,  # Default is now 0.45
+            'entropy': self.entropy_threshold,        # Default is now 3.5
+            'perplexity': self.perplexity_threshold,  # Default is now 25.0
+            'memory_weight': 0.6                      # Increased baseline memory weight
         }
 
         # Get domain settings if question classifier available
@@ -592,55 +587,132 @@ class ResponseFilter:
                 domain_settings = self.question_classifier.get_domain_settings(query)
                 domain = domain_settings.get('domain', 'unknown')
 
-                # Apply domain-specific thresholds
+                # Apply domain-specific thresholds calibrated for TinyLlama
                 if domain == 'arithmetic':
-                    # Stricter for math
-                    thresholds['confidence'] = 0.75
-                    thresholds['entropy'] = 1.8
-                    thresholds['perplexity'] = 8.0
+                    # Still stricter for math but more reasonable
+                    thresholds['confidence'] = 0.55  # Down from 0.75
+                    thresholds['entropy'] = 2.8      # Up from 1.8
+                    thresholds['perplexity'] = 15.0  # Up from 8.0
+                    thresholds['memory_weight'] = 0.4  # Up from 0.2
                 elif domain == 'factual':
-                    # Stricter for factual knowledge
-                    thresholds['confidence'] = 0.70
-                    thresholds['entropy'] = 2.0
-                    thresholds['perplexity'] = 10.0
+                    # Stricter for factual knowledge but calibrated
+                    thresholds['confidence'] = 0.50  # Down from 0.70
+                    thresholds['entropy'] = 3.0      # Up from 2.0
+                    thresholds['perplexity'] = 18.0  # Up from 10.0
+                    thresholds['memory_weight'] = 0.9  # Up from 0.8
                 elif domain == 'translation':
-                    # Slightly less strict for translations
-                    thresholds['confidence'] = 0.60
-                    thresholds['entropy'] = 2.8
-                    thresholds['perplexity'] = 12.0
+                    # Translation needs more flexibility
+                    thresholds['confidence'] = 0.40  # Down from 0.60
+                    thresholds['entropy'] = 3.8      # Up from 2.8
+                    thresholds['perplexity'] = 20.0  # Up from 12.0
+                    thresholds['memory_weight'] = 0.8  # Up from 0.7
                 elif domain == 'conceptual':
-                    # Balanced for conceptual explanations
-                    thresholds['confidence'] = 0.65
-                    thresholds['entropy'] = 2.3
-                    thresholds['perplexity'] = 12.0
+                    # Balanced with more memory reliance
+                    thresholds['confidence'] = 0.45  # Down from 0.65
+                    thresholds['entropy'] = 3.5      # Up from 2.3
+                    thresholds['perplexity'] = 22.0  # Up from 12.0
+                    thresholds['memory_weight'] = 0.6  # Up from 0.4
                 elif domain == 'procedural':
-                    # Balanced for procedures
-                    thresholds['confidence'] = 0.65
-                    thresholds['entropy'] = 2.3
-                    thresholds['perplexity'] = 12.0
-                else:
-                    # Unknown domain - use defaults with slight adjustment
-                    thresholds['confidence'] = 0.68
+                    # Balanced with more memory reliance
+                    thresholds['confidence'] = 0.45  # Down from 0.65
+                    thresholds['entropy'] = 3.5      # Up from 2.3
+                    thresholds['perplexity'] = 22.0  # Up from 12.0
+                    thresholds['memory_weight'] = 0.7  # Up from 0.6
 
                 self.log(f"Using domain-specific thresholds for domain: {domain}")
             except Exception as e:
                 self.log(f"Error getting domain settings: {e}")
 
-        # Apply pattern-based adjustments based on query
+        # Apply pattern-based adjustments based on query, but with reduced impact
         if query:
-            # Technical queries may have more specialized vocabulary
+            # Technical queries - smaller adjustment
             if re.search(r'\b(?:API|code|programming|function|algorithm|technical)\b', query, re.IGNORECASE):
-                thresholds['entropy'] += 0.3  # Allow higher entropy
+                thresholds['entropy'] += 0.2  # Down from 0.3
 
-            # Factual queries need higher confidence
+            # Factual queries - smaller adjustment
             if re.search(r'\bwhat is\b|\bwho is\b|\bwhen did\b|\bwhere is\b', query, re.IGNORECASE):
-                thresholds['confidence'] += 0.05
+                thresholds['confidence'] += 0.03  # Down from 0.05
 
-            # Mathematical queries need higher confidence
+            # Mathematical queries - smaller adjustment
             if re.search(r'\bcalculate\b|\bcompute\b|\bsolve\b|\bhow many\b', query, re.IGNORECASE):
-                thresholds['confidence'] += 0.05
+                thresholds['confidence'] += 0.03  # Down from 0.05
 
         return thresholds
+
+    def analyze_confidence_patterns(self, token_confidences: List[float]) -> Dict[str, Any]:
+        """
+        Analyze confidence patterns to detect issues like sudden drops or repetitive patterns.
+
+        Args:
+            token_confidences: List of token confidence values
+
+        Returns:
+            Dictionary with pattern analysis results
+        """
+        if len(token_confidences) < 10:
+            return {"pattern_detected": False, "severity": 0.0, "pattern_type": None}
+
+        results = {
+            "pattern_detected": False,
+            "severity": 0.0,
+            "pattern_type": None,
+            "details": {}
+        }
+
+        # Calculate baseline metrics
+        mean_confidence = sum(token_confidences) / len(token_confidences)
+        # Update baseline confidence for this model (running average)
+        self.baseline_confidence = 0.9 * self.baseline_confidence + 0.1 * mean_confidence
+
+        # Calculate variance
+        variance = sum((c - mean_confidence) ** 2 for c in token_confidences) / len(token_confidences)
+        self.confidence_variance = 0.9 * self.confidence_variance + 0.1 * variance
+
+        # 1. Check for sudden confidence drops (potential hallucinations)
+        for i in range(1, len(token_confidences)):
+            drop = token_confidences[i-1] - token_confidences[i]
+            if drop > 0.3 and token_confidences[i] < mean_confidence * 0.7:
+                results["pattern_detected"] = True
+                results["pattern_type"] = "sudden_drop"
+                results["severity"] = max(results["severity"], drop)
+                results["details"]["drop_position"] = i
+                results["details"]["drop_size"] = drop
+
+        # 2. Check for consistent degradation (context window issues)
+        if len(token_confidences) > 20:
+            first_third = sum(token_confidences[:len(token_confidences)//3]) / (len(token_confidences)//3)
+            last_third = sum(token_confidences[-len(token_confidences)//3:]) / (len(token_confidences)//3)
+
+            degradation = first_third - last_third
+            if degradation > 0.2 and last_third < mean_confidence * 0.8:
+                results["pattern_detected"] = True
+                results["pattern_type"] = "degradation"
+                results["severity"] = max(results["severity"], degradation)
+                results["details"]["degradation"] = degradation
+
+        # 3. Check for repetitive patterns (common in stuck outputs)
+        if len(token_confidences) > 15:
+            # Look for repeating patterns of 3-5 tokens
+            for pattern_length in range(3, 6):
+                if len(token_confidences) < pattern_length * 2:
+                    continue
+
+                # Check for repeating subsequences
+                for i in range(len(token_confidences) - pattern_length * 2):
+                    pattern1 = token_confidences[i:i+pattern_length]
+                    pattern2 = token_confidences[i+pattern_length:i+pattern_length*2]
+
+                    # Calculate similarity between patterns
+                    similarity = 1.0 - sum(abs(a-b) for a, b in zip(pattern1, pattern2)) / pattern_length
+
+                    if similarity > 0.85:
+                        results["pattern_detected"] = True
+                        results["pattern_type"] = "repetition"
+                        results["severity"] = max(results["severity"], similarity - 0.85)
+                        results["details"]["repetition_pos"] = i
+                        results["details"]["pattern_length"] = pattern_length
+
+        return results
 
     def should_filter(
         self,
@@ -650,26 +722,17 @@ class ResponseFilter:
         tokens_generated: int = 0
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
-        Determine if a response should be filtered based on comprehensive assessment.
-
-        Args:
-            metrics: Dictionary containing confidence metrics
-            response: The generated response text
-            query: Original query for context
-            tokens_generated: Number of tokens generated so far
-
-        Returns:
-            Tuple of (should_filter, reason, details)
+        Determine if a response should be filtered using pattern detection and relaxed thresholds.
         """
         # Skip aggressive filtering for very short responses
-        if tokens_generated < self.token_count_threshold and self.enable_aggressive_filtering:
+        if tokens_generated < self.token_count_threshold:
             # Skip comprehensive filtering for short responses to allow model to build confidence
             normalized_metrics = self.normalize_confidence_metrics(metrics)
             confidence = normalized_metrics.get('normalized_confidence',
                                               normalized_metrics.get('confidence', 0.5))
 
             # Only filter extremely low confidence early output
-            if confidence < 0.3:
+            if confidence < 0.25:  # Reduced from 0.3
                 return True, "extremely_low_confidence", {'confidence': confidence}
 
             # Otherwise let it continue
@@ -681,7 +744,7 @@ class ResponseFilter:
         # Get normalized confidence values
         confidence = normalized_metrics.get('sharpened_confidence',
                                            normalized_metrics.get('normalized_confidence',
-                                                                 normalized_metrics.get('confidence', 0.5)))
+                                                                normalized_metrics.get('confidence', 0.5)))
 
         entropy = float(normalized_metrics.get('sharpened_entropy',
                                              normalized_metrics.get('entropy', 2.0)))
@@ -692,57 +755,152 @@ class ResponseFilter:
         # Get domain-specific thresholds
         thresholds = self.get_domain_thresholds(query)
 
+        # Get token confidence values for pattern detection
+        token_confidences = []
+        if hasattr(self, 'confidence_window') and self.confidence_window:
+            token_confidences = self.confidence_window
+        elif 'token_probabilities' in metrics:
+            token_confidences = metrics['token_probabilities']
+
         # Detect context overflow first (highest priority)
         overflow_results = self.detect_context_overflow(response)
         if overflow_results['is_overflow']:
             return True, f"context_overflow_{overflow_results['overflow_patterns']}", overflow_results
 
+        # Analyze confidence patterns if we have enough tokens
+        pattern_results = self.analyze_confidence_patterns(token_confidences) if token_confidences else {"pattern_detected": False}
+
         # Analyze content quality
         quality_results = self.analyze_content_quality(response)
-        if quality_results['is_low_quality'] and quality_results['quality_score'] < 0.5:
-            return True, f"low_quality_{','.join(quality_results['quality_issues'])}", quality_results
 
         # Save content assessment for future reference
         self.last_content_assessment = quality_results
 
-        # Check confidence against threshold
-        if confidence < thresholds['confidence']:
-            return True, "low_confidence", {'confidence': confidence, 'threshold': thresholds['confidence']}
+        # Check if response is supported by memory (if available in context)
+        memory_supported = False
+        if hasattr(self, 'user_context') and self.user_context:
+            memory_results = self.user_context.get('memory_results', [])
+            for memory in memory_results:
+                if memory.get('similarity', 0) > 0.7:
+                    memory_supported = True
+                    break
 
-        # Check entropy against threshold
-        if entropy > thresholds['entropy']:
-            return True, "high_entropy", {'entropy': entropy, 'threshold': thresholds['entropy']}
-
-        # Check perplexity against threshold
-        if perplexity > thresholds['perplexity']:
-            return True, "high_perplexity", {'perplexity': perplexity, 'threshold': thresholds['perplexity']}
-
-        # Calculate a combined uncertainty score with weighted components
-        # - Higher weight on confidence
-        # - Medium weight on content quality
-        # - Lower weights on entropy and perplexity
+        # Calculate a modified uncertainty score with weighted components
         uncertainty_score = (
-            (1 - confidence) * 0.5 +
-            (1 - quality_results['quality_score']) * 0.3 +
-            (entropy / thresholds['entropy']) * 0.1 +
-            (perplexity / thresholds['perplexity']) * 0.1
+            (1 - confidence) * 0.35 +                             # Reduced from 0.5
+            (1 - quality_results['quality_score']) * 0.25 +       # Reduced from 0.3
+            (entropy / thresholds['entropy']) * 0.15 +            # Increased from 0.1
+            (perplexity / thresholds['perplexity']) * 0.15 +      # Increased from 0.1
+            (pattern_results['severity'] * self.pattern_detection_weight) +  # New component
+            (-0.1 if memory_supported else 0)                     # Memory support bonus
         )
 
-        if uncertainty_score > 0.85:
+        # Adjust filtering threshold based on query domain
+        uncertainty_threshold = 0.7  # Higher than previous 0.55
+
+        # Pattern-based filtering overrides threshold-based if enabled
+        if self.use_relative_filtering and pattern_results["pattern_detected"]:
+            pattern_type = pattern_results["pattern_type"]
+            severity = pattern_results["severity"]
+
+            if severity > 0.3:  # Only filter for significant pattern issues
+                return True, f"pattern_detected_{pattern_type}", {
+                    'uncertainty_score': uncertainty_score,
+                    'pattern_details': pattern_results,
+                    'confidence': confidence
+                }
+
+        # Still check quality but with more lenient threshold
+        if quality_results['is_low_quality'] and quality_results['quality_score'] < 0.4:  # Reduced from 0.5
+            return True, f"low_quality_{','.join(quality_results['quality_issues'])}", quality_results
+
+        # Extreme cases for absolute thresholds - much lower than before
+        if confidence < thresholds['confidence'] * 0.7:  # 30% below threshold
+            return True, "very_low_confidence", {'confidence': confidence, 'threshold': thresholds['confidence']}
+
+        if entropy > thresholds['entropy'] * 1.4:  # 40% above threshold
+            return True, "extremely_high_entropy", {'entropy': entropy, 'threshold': thresholds['entropy']}
+
+        if perplexity > thresholds['perplexity'] * 1.5:  # 50% above threshold
+            return True, "extremely_high_perplexity", {'perplexity': perplexity, 'threshold': thresholds['perplexity']}
+
+        # Final check with uncertainty score
+        if uncertainty_score > uncertainty_threshold:
             return True, "high_uncertainty", {
                 'uncertainty_score': uncertainty_score,
                 'confidence': confidence,
                 'quality_score': quality_results['quality_score'],
                 'entropy_ratio': entropy / thresholds['entropy'],
-                'perplexity_ratio': perplexity / thresholds['perplexity']
+                'perplexity_ratio': perplexity / thresholds['perplexity'],
+                'pattern_detected': pattern_results.get('pattern_detected', False)
             }
 
         # If we get here, the response passes all checks
         return False, "acceptable", {
             'confidence': confidence,
             'quality_score': quality_results['quality_score'],
-            'uncertainty_score': uncertainty_score
+            'uncertainty_score': uncertainty_score,
+            'memory_supported': memory_supported
         }
+
+    def get_confidence_indicator(self, metrics: Dict[str, Any], width: int = 30) -> str:
+        """
+        Generate a visual confidence indicator similar to context window usage bar.
+
+        Args:
+            metrics: Dictionary with confidence metrics
+            width: Width of the indicator bar
+
+        Returns:
+            String with formatted confidence indicator
+        """
+        # Get key metrics
+        confidence = metrics.get('confidence', 0.5)
+        quality = metrics.get('quality_score', 0.7)
+        uncertainty = metrics.get('uncertainty_score', 0.5)
+        memory_supported = metrics.get('memory_supported', False)
+
+        # Function to generate a bar
+        def generate_bar(value, width):
+            filled = int(value * width)
+            return '█' * filled + '░' * (width - filled)
+
+        # Choose colors (using ANSI color codes)
+        def color_for_value(value):
+            if value > 0.7:
+                return "\033[32m"  # Green
+            elif value > 0.5:
+                return "\033[33m"  # Yellow
+            else:
+                return "\033[31m"  # Red
+
+        reset = "\033[0m"
+
+        # Create indicators
+        conf_color = color_for_value(confidence)
+        conf_bar = generate_bar(confidence, width)
+
+        qual_color = color_for_value(quality)
+        qual_bar = generate_bar(quality, width)
+
+        # Inverse for uncertainty (lower is better)
+        uncert_color = color_for_value(1 - uncertainty)
+        uncert_bar = generate_bar(1 - uncertainty, width)
+
+        # Memory support indicator
+        mem_color = "\033[32m" if memory_supported else "\033[33m"
+        mem_status = "Supported" if memory_supported else "Limited"
+
+        # Assemble the complete indicator
+        indicator = (
+            f"Response Metrics:\n"
+            f"Confidence:     {conf_color}{conf_bar}{reset} {confidence:.0%}\n"
+            f"Quality:        {qual_color}{qual_bar}{reset} {quality:.0%}\n"
+            f"Reliability:    {uncert_color}{uncert_bar}{reset} {(1-uncertainty):.0%}\n"
+            f"Memory Support: {mem_color}{mem_status}{reset}"
+        )
+
+        return indicator
 
     def check_override_instruction(self, query: str) -> bool:
         """

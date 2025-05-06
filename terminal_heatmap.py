@@ -223,7 +223,7 @@ class TerminalHeatmap:
 
         # Add context window usage indicator
         usage_percentage = (current_tokens / max_tokens) * 100
-        print("\nContext Window Usage:")
+        # print("\nContext Window Usage:")
         bar_width = 30
         filled_width = int((current_tokens / max_tokens) * bar_width)
         bar = "█" * filled_width + "░" * (bar_width - filled_width)
@@ -236,7 +236,7 @@ class TerminalHeatmap:
         else:
             color = self.FG_RED
 
-        print(f"{color}{bar}{self.RESET} {current_tokens}/{max_tokens} tokens ({usage_percentage:.1f}%)")
+        print(f"Context Window: {color}{bar}{self.RESET} {current_tokens}/{max_tokens} tokens ({usage_percentage:.1f}%)")
 
 
 class EnhancedHeatmap(TerminalHeatmap):
@@ -514,4 +514,4 @@ class EnhancedHeatmap(TerminalHeatmap):
         else:
             color = self.FG_RED
 
-        print(f"{color}{bar}{self.RESET} {current_tokens}/{max_tokens} tokens ({usage_percentage:.1f}%)")
+        print(f"Context Window: {color}{bar}{self.RESET} {current_tokens}/{max_tokens} tokens ({usage_percentage:.1f}%)")
