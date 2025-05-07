@@ -63,6 +63,9 @@ class ResponseFilter:
         self.continuation_phrases = continuation_phrases or [
             "please continue",
             "continue anyway",
+            "speculate anyway",
+            "continue",
+            "go on"
             # Other phrases remain the same...
         ]
 

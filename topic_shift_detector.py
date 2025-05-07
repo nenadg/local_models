@@ -54,6 +54,21 @@ class TopicShiftDetector:
         Returns:
             Tuple of (is_shift, best_similarity)
         """
+        self.continuation_phrases = [
+            "please continue",
+            "continue anyway",
+            "speculate anyway",
+            "continue",
+            "go on"
+        ]
+
+        query_lower = query.lower()
+
+        # Check for continuation phrases
+        for phrase in self.continuation_phrases:
+            if phrase in query_lower:
+                return False, 1.0
+
         # If no previous topics, not a shift
         if not self.recent_topics:
             self._add_topic(query)

@@ -36,6 +36,7 @@ from topic_shift_detector import TopicShiftDetector
 
 # Import our refactored memory manager
 from unified_memory import MemoryManager
+from mcp_prompt_completer import MCPCompleter
 
 # Default system message template
 DEFAULT_SYSTEM_MESSAGE = """You are a helpful and friendly assistant designed to provide accurate information. Follow these guidelines:
@@ -146,6 +147,8 @@ class MemoryEnhancedChat:
             allow_shell_commands=True,
             memory_manager=self.memory_manager  # Pass memory manager here
         )
+
+        self.mcp_completer = MCPCompleter(self.output_dir)
 
         # Confidence metrics tracker
         self.confidence_metrics = EnhancedConfidenceMetrics(
@@ -986,7 +989,6 @@ class MemoryEnhancedChat:
                 # Update stats
                 self.memory_stats["retrievals"] += 1
 
-                print(f"{self.get_time()} memories", memory_enhanced_messages, combined_memories)
                 return memory_enhanced_messages, combined_memories
 
             return messages, []
@@ -1378,7 +1380,6 @@ class MemoryEnhancedChat:
             print("Falling back to simple input method.")
 
             # Simple fallback
-            print(prompt)
             print("(Enter your text. Press Ctrl+D or empty line to finish)")
 
             try:
@@ -1417,7 +1418,8 @@ class MemoryEnhancedChat:
                 history=FileHistory(history_file),
                 complete_while_typing=True,
                 enable_open_in_editor=True,
-                style=style
+                style=style,
+                completer=self.mcp_completer
             )
 
             # Trim trailing whitespace
