@@ -1186,7 +1186,7 @@ if __name__ == "__main__":
                       help="Directory containing memory data")
     parser.add_argument("--output-dir", type=str, default="./visualizations",
                       help="Directory to save visualizations")
-    parser.add_argument("--max-items", type=int, default=100,
+    parser.add_argument("--max-items", type=int, default=10000,
                       help="Maximum number of items to include")
     parser.add_argument("--interactive", action="store_true",
                       help="Create interactive visualizations")
