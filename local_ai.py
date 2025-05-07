@@ -539,7 +539,7 @@ class MemoryEnhancedChat:
             # Pass memory results to response filter if provided
             if self.response_filter and hasattr(self.response_filter, 'user_context'):
                 print(f"{self.get_time()} having some retrieved memories.", len(retrieved_memories))
-                self.response_filter.user_context['memory_results'] = retrieved_memories
+                self.response_filter.user_context['memory_details'] = retrieved_memories
 
                 # Log memory retrieval for debugging
                 if retrieved_memories:
@@ -550,6 +550,7 @@ class MemoryEnhancedChat:
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
         response = "";
+        tokens_received = 0
 
         try:
             tty.setcbreak(fd)
@@ -613,7 +614,7 @@ class MemoryEnhancedChat:
             stop_sequences = ["<|user|>", "<|assistant|>"]
 
             # Variables to track streaming state
-            tokens_received = 0
+            # tokens_received = 0
             low_confidence_detected = False
 
             # Print assistant marker
@@ -794,7 +795,7 @@ class MemoryEnhancedChat:
                 print()  # Add a newline
                 confidence_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
                 normalized_metrics = self.response_filter.normalize_confidence_metrics(confidence_metrics)
-                should_filter, reason, details = self.response_filter.should_filter(normalized_metrics, response, user_query)
+                should_filter, reason, details = self.response_filter.should_filter(normalized_metrics, response, user_query, tokens_received)
 
                 # Get confidence metrics
                 metrics = details
@@ -885,7 +886,7 @@ class MemoryEnhancedChat:
 
         return output
 
-    def _integrate_memory(self, messages: List[Dict[str, str]], query: str) -> List[Dict[str, str]]:
+    def _integrate_memory(self, messages: List[Dict[str, str]], query: str) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]]]:
         """
         Integrate relevant memories into conversation messages.
 
@@ -894,7 +895,7 @@ class MemoryEnhancedChat:
             query: Current user query
 
         Returns:
-            Updated messages with memory context
+            Tuple of (updated messages, retrieved memories)
         """
         try:
             # First check for command outputs related to the query
@@ -902,7 +903,7 @@ class MemoryEnhancedChat:
                 query=query,
                 top_k=2,
                 min_similarity=0.1,
-                metadata_filter={"source": "command_output", "source_hint": ["arithmetic", "qa_pair", "code"]}
+                metadata_filter={"source": "command_output"}
             )
 
             memories = []
@@ -942,16 +943,6 @@ class MemoryEnhancedChat:
 
             # Process command outputs first
             for memory in command_memories:
-                combined_memories.append(memory)
-                command_ids.append(memory["id"])
-
-            # Add other relevant memories that aren't duplicates
-            for memory in memories:
-                if memory["id"] not in command_ids:
-                    combined_memories.append(memory)
-
-            # Add command memories first (they're more relevant for commands)
-            for memory in command_memories:
                 # Format based on content_type if available
                 memory_type = memory.get("metadata", {}).get("content_type", "text")
                 if memory_type == "tabular":
@@ -960,10 +951,9 @@ class MemoryEnhancedChat:
                 else:
                     memory["formatted_content"] = memory["content"]
                 combined_memories.append(memory)
+                command_ids.append(memory["id"])
 
             # Then add general memories that aren't duplicates
-            command_ids = [m["id"] for m in command_memories]
-
             for memory in memories:
                 if memory["id"] not in command_ids:
                     combined_memories.append(memory)
@@ -996,9 +986,11 @@ class MemoryEnhancedChat:
                 # Update stats
                 self.memory_stats["retrievals"] += 1
 
+                print(f"{self.get_time()} memories", memory_enhanced_messages, combined_memories)
                 return memory_enhanced_messages, combined_memories
 
             return messages, []
+
         except Exception as e:
             print(f"{self.get_time()} Error integrating memory: {e}")
             traceback.print_exc()

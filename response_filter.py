@@ -2,6 +2,7 @@ import numpy as np
 import re
 from typing import Dict, Optional, Tuple, List, Union, Any
 import time
+from datetime import datetime
 
 class ResponseFilter:
     """
@@ -728,6 +729,10 @@ class ResponseFilter:
         """
         Determine if a response should be filtered using pattern detection and relaxed thresholds.
         """
+        has_reason = False
+        return_reason = False
+        reason = ""
+
         # Skip aggressive filtering for very short responses
         if tokens_generated < self.token_count_threshold:
             # Skip comprehensive filtering for short responses to allow model to build confidence
@@ -737,10 +742,16 @@ class ResponseFilter:
 
             # Only filter extremely low confidence early output
             if confidence < 0.25:  # Reduced from 0.3
-                return True, "extremely_low_confidence", {'confidence': confidence}
+                has_reason = True
+                reason = "extremely_low_confidence"
+                return_reason = True
+                # return True, "extremely_low_confidence", {'confidence': confidence}
 
             # Otherwise let it continue
-            return False, "acceptable", {'confidence': confidence}
+            # return False, "acceptable", {'confidence': confidence}
+            has_reason = True
+            reason = "acceptable"
+            return_reason = False
 
         # Apply normalization to confidence metrics
         normalized_metrics = self.normalize_confidence_metrics(metrics)
@@ -769,7 +780,10 @@ class ResponseFilter:
         # Detect context overflow first (highest priority)
         overflow_results = self.detect_context_overflow(response)
         if overflow_results['is_overflow']:
-            return True, f"context_overflow_{overflow_results['overflow_patterns']}", overflow_results
+            has_reason = True
+            reason = f"context_overflow_{overflow_results['overflow_patterns']}"
+            return_reason = True
+            #return True, f"context_overflow_{overflow_results['overflow_patterns']}", overflow_results
 
         # Analyze confidence patterns if we have enough tokens
         pattern_results = self.analyze_confidence_patterns(token_confidences) if token_confidences else {"pattern_detected": False}
@@ -786,25 +800,21 @@ class ResponseFilter:
         memory_details = []
 
         if hasattr(self, 'user_context') and self.user_context:
-            memory_results = self.user_context.get('memory_results', [])
-            memory_details = memory_results
-            memory_count = len(memory_results)
+            memory_details = self.user_context.get('memory_details', [])
+            memory_count = len(memory_details)
 
             # Check for high-quality memories (threshold: 0.5 instead of 0.7)
-            for memory in memory_results:
+            for memory in memory_details:
                 similarity = memory.get('similarity', 0)
                 if similarity > 0.5:  # More lenient threshold
                     memory_supported = True
                     break
 
             # If no high-similarity matches, check if we have any reasonable matches
-            if not memory_supported and memory_results:
+            if not memory_supported and memory_details:
                 # Consider it "limited" support if we have any memories above 0.3
-                max_similarity = max([m.get('similarity', 0) for m in memory_results], default=0)
+                max_similarity = max([m.get('similarity', 0) for m in memory_details], default=0)
                 memory_supported = max_similarity > 0.3
-
-            if memory_supported:
-                print(f"{self.get_time()} memory supported.")
 
         # Calculate a modified uncertainty score with weighted components
         uncertainty_score = (
@@ -819,55 +829,53 @@ class ResponseFilter:
         # Adjust filtering threshold based on query domain
         uncertainty_threshold = 0.7  # Higher than previous 0.55
 
+        details = {
+            'uncertainty_score': uncertainty_score,
+            'confidence': confidence,
+            'entropy': entropy,
+            'perplexity': perplexity,
+            'quality_score': quality_results['quality_score'],
+            'entropy_ratio': entropy / thresholds['entropy'],
+            'perplexity_ratio': perplexity / thresholds['perplexity'],
+            'pattern_detected': pattern_results.get('pattern_detected', False),
+            'memory_supported': memory_supported,
+            'memory_count': memory_count,
+            'memory_details': memory_details,  # Explicitly pass all memory details
+            'thresholds': thresholds,
+            'overflow_results': overflow_results
+        }
+
+        if has_reason:
+            return return_reason, reason, details
+
         # Pattern-based filtering overrides threshold-based if enabled
         if self.use_relative_filtering and pattern_results["pattern_detected"]:
             pattern_type = pattern_results["pattern_type"]
             severity = pattern_results["severity"]
 
             if severity > 0.3:  # Only filter for significant pattern issues
-                return True, f"pattern_detected_{pattern_type}", {
-                    'uncertainty_score': uncertainty_score,
-                    'pattern_details': pattern_results,
-                    'confidence': confidence
-                }
+                return True, f"pattern_detected_{pattern_type}", details
 
         # Still check quality but with more lenient threshold
         if quality_results['is_low_quality'] and quality_results['quality_score'] < 0.4:  # Reduced from 0.5
-            return True, f"low_quality_{','.join(quality_results['quality_issues'])}", quality_results
+            return True, f"low_quality_{','.join(quality_results['quality_issues'])}", details
 
         # Extreme cases for absolute thresholds - much lower than before
         if confidence < thresholds['confidence'] * 0.7:  # 30% below threshold
-            return True, "very_low_confidence", {'confidence': confidence, 'threshold': thresholds['confidence']}
+            return True, "very_low_confidence", details
 
         if entropy > thresholds['entropy'] * 1.4:  # 40% above threshold
-            return True, "extremely_high_entropy", {'entropy': entropy, 'threshold': thresholds['entropy']}
+            return True, "extremely_high_entropy", details
 
         if perplexity > thresholds['perplexity'] * 1.5:  # 50% above threshold
-            return True, "extremely_high_perplexity", {'perplexity': perplexity, 'threshold': thresholds['perplexity']}
+            return True, "extremely_high_perplexity", details
 
         # Final check with uncertainty score
         if uncertainty_score > uncertainty_threshold:
-            return True, "high_uncertainty", {
-                'uncertainty_score': uncertainty_score,
-                'confidence': confidence,
-                'quality_score': quality_results['quality_score'],
-                'entropy_ratio': entropy / thresholds['entropy'],
-                'perplexity_ratio': perplexity / thresholds['perplexity'],
-                'pattern_detected': pattern_results.get('pattern_detected', False),
-                'memory_supported': memory_supported,
-                'memory_count': memory_count,
-                'memory_details': memory_details
-            }
+            return True, "high_uncertainty", details
 
         # If we get here, the response passes all checks
-        return False, "acceptable", {
-            'confidence': confidence,
-            'quality_score': quality_results['quality_score'],
-            'uncertainty_score': uncertainty_score,
-            'memory_supported': memory_supported,
-            'memory_count': memory_count,
-            'memory_details': memory_details
-        }
+        return False, "acceptable", details
 
     def get_confidence_indicator(self, metrics: Dict[str, Any], width: int = 30) -> str:
         """
@@ -923,7 +931,7 @@ class ResponseFilter:
         # Memory support indicator
         mem_color = "\033[32m" if memory_supported else "\033[33m"
         mem_status = "None"
-
+        
         if memory_count > 0:
             if max_similarity > 0.8:
                 mem_color = "\033[32m"  # Green
@@ -1097,6 +1105,16 @@ class ResponseFilter:
         should_filter, reason, details = self.should_filter(
             metrics, cleaned_response, query, tokens_generated
         )
+
+        # Preserve memory information from the metrics dictionary
+        if 'memory_results' in self.user_context:
+            details['memory_details'] = self.user_context['memory_results']
+            details['memory_count'] = len(self.user_context['memory_results'])
+
+            # Check for memory support
+            if self.user_context['memory_results']:
+                max_similarity = max([m.get('similarity', 0) for m in self.user_context['memory_results']], default=0)
+                details['memory_supported'] = max_similarity > 0.3
 
         # Skip filtering if checks pass
         if not should_filter:
