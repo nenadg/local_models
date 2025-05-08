@@ -97,6 +97,7 @@ class MemoryEnhancedChat:
         self.top_p = top_p
         self.top_k = top_k
         self.enable_draft_model = enable_draft_model
+        self.memory_debug = False  # Set to True for memory diagnostics
 
         # Set system message
         self.system_message = system_message or DEFAULT_SYSTEM_MESSAGE
@@ -411,55 +412,66 @@ class MemoryEnhancedChat:
         else:
             self.draft_model = None
 
-    def _save_command_output_to_memory(self, command: str, output: str):
-        """Save command output to memory with better metadata for retrieval."""
+    def _save_command_output_to_memory(self, command: str, output: str) -> None:
+        """
+        Save command output to memory with optimized formatting for retrieval.
+
+        Args:
+            command: The command that was executed
+            output: Output text from the command
+        """
         if not self.enable_memory or not output:
             return
 
         try:
-            # Detect content type and source hint
-            content_type = "tabular" if '\t' in output or re.search(r'\S\s{2,}\S', output) else "text"
+            # Create formatted content for better retrievability
+            formatted_content = ""
 
-            # Add special source hint for date/time commands
-            source_hint = "general"
+            # Special handling for date-related commands
             if re.search(r'date|time', command, re.IGNORECASE):
-                source_hint = "datetime_info"
-                # Make date/time output more explicit
-                output = f"Current date/time information: {output.strip()}"
+                output_clean = output.strip()
+
+                # Format as clear statements
+                formatted_content = f"Today's date is {output_clean}."
+
+                # Add additional formats for better retrieval
+                additional_formats = [
+                    f"The current date is {output_clean}.",
+                    f"Today is {output_clean}.",
+                    f"Right now it is {output_clean}."
+                ]
+            else:
+                # For other commands, format clearly
+                formatted_content = f"The output of command '{command}' is: {output.strip()}"
 
             # Create metadata
             metadata = {
-                "source": "command_output",
-                "command": command,
-                "timestamp": datetime.now().timestamp(),
-                "content_type": content_type,
-                "source_hint": source_hint,
-                "priority": 10 if source_hint == "datetime_info" else 5  # Higher priority for date/time
+                'source': 'command_output',
+                'command': command,
+                'type': 'fact',
+                'timestamp': datetime.now().timestamp()
             }
 
-            # Add to memory
+            # Add primary format to memory
             memory_id = self.memory_manager.add(
-                content=output,
+                content=formatted_content,
                 metadata=metadata
             )
 
-            # For date/time commands, create an additional explicit memory
-            if source_hint == "datetime_info":
-                # Extract just the date part for better retrieval
-                date_memory = f"Today's date is {output.strip()}"
-                date_metadata = {
-                    "source": "derived",
-                    "source_hint": "direct_answer",
-                    "derived_from": command,
-                    "timestamp": datetime.now().timestamp(),
-                    "priority": 10
-                }
-                self.memory_manager.add(content=date_memory, metadata=date_metadata)
-
-            if memory_id:
+            # For date commands, add alternative formats as well
+            if 'additional_formats' in locals() and additional_formats:
+                for format in additional_formats:
+                    self.memory_manager.add(
+                        content=format,
+                        metadata=metadata  # Same metadata for all formats
+                    )
+                print(f"{self.get_time()} Command output saved with {len(additional_formats) + 1} format variations")
+            else:
                 print(f"{self.get_time()} Command output saved to memory (ID: {memory_id})")
+
         except Exception as e:
             print(f"{self.get_time()} Error saving command output to memory: {e}")
+
     # def _save_command_output_to_memory(self, command: str, output: str):
     #     """Save command output to memory for future reference."""
     #     if not self.enable_memory or not output:
@@ -1123,6 +1135,29 @@ class MemoryEnhancedChat:
                         "content": memory_text
                     })
 
+                if self.memory_debug:
+                    print(f"\n{self.get_time()} Memory diagnostic: Retrieved {len(memories)} items")
+                    print("-----------------------------------")
+                    for i, memory in enumerate(memories):
+                        content = memory.get("content", "").strip()
+                        # Truncate long content for display
+                        if len(content) > 100:
+                            content = content[:97] + "..."
+
+                        similarity = memory.get("similarity", 0)
+                        source = memory.get("metadata", {}).get("source", "unknown")
+                        timestamp = memory.get("metadata", {}).get("timestamp", 0)
+
+                        # Format timestamp as readable date
+                        if timestamp:
+                            time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+                        else:
+                            time_str = "unknown"
+
+                        print(f"Memory #{i+1} (sim: {similarity:.3f}, source: {source}, time: {time_str})")
+                        print(f"Content: {content}")
+                        print("-----------------------------------")
+
                 return memory_enhanced_messages, combined_memories
             # if combined_memories:
             #     # Use custom formatter for combined memories
@@ -1162,7 +1197,7 @@ class MemoryEnhancedChat:
 
     def _save_to_memory(self, query: str, response: str) -> bool:
         """
-        Save conversation exchange to memory.
+        Save conversation exchange to memory, separating query and response.
 
         Args:
             query: User query
@@ -1172,43 +1207,81 @@ class MemoryEnhancedChat:
             Success status
         """
         try:
-            # Extract key information
-            memories = self._extract_memory_worthy_content(query, response)
+            # 1. Store the query separately
+            query_metadata = {
+                'source': 'user_query',
+                'type': 'question',
+                'timestamp': datetime.now().timestamp()
+            }
+            query_id = self.memory_manager.add(
+                content=query.strip(),
+                metadata=query_metadata
+            )
 
-            if not memories:
-                return False
+            # 2. Store the response separately
+            response_metadata = {
+                'source': 'assistant_response',
+                'type': 'answer',
+                'related_query': query.strip(),
+                'timestamp': datetime.now().timestamp()
+            }
+            response_id = self.memory_manager.add(
+                content=response.strip(),
+                metadata=response_metadata
+            )
 
-            # Add each memory item
-            memories_added = 0
-
-            for memory_text, source_hint in memories:
-                # Create metadata
-                metadata = {
-                    'source': 'conversation',
-                    'source_hint': source_hint,
-                    'query': query,
+            # 3. Extract and store key statements from the response
+            key_statements = self._extract_key_statements(response)
+            for statement in key_statements:
+                statement_metadata = {
+                    'source': 'extracted_fact',
+                    'type': 'fact',
+                    'derived_from': 'response',
                     'timestamp': datetime.now().timestamp()
                 }
-
-                # Add to memory
-                item_id = self.memory_manager.add(
-                    content=memory_text,
-                    metadata=metadata
+                self.memory_manager.add(
+                    content=statement,
+                    metadata=statement_metadata
                 )
 
-                if item_id:
-                    memories_added += 1
-
             # Update stats
-            if memories_added > 0:
-                self.memory_stats["items_added"] += memories_added
-                print(f"{self.get_time()} Added {memories_added} new memories")
-                return True
-
-            return False
+            memories_added = 2 + len(key_statements)
+            self.memory_stats["items_added"] += memories_added
+            print(f"{self.get_time()} Added {memories_added} new memories")
+            return True
         except Exception as e:
             print(f"{self.get_time()} Error saving to memory: {e}")
             return False
+
+    def _extract_key_statements(self, text: str) -> List[str]:
+        """
+        Extract key factual statements from text.
+        Focus on simple declarative sentences and clear facts.
+        """
+        statements = []
+
+        # Simple sentence splitting
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+
+        for sentence in sentences:
+            sentence = sentence.strip()
+            # Skip short sentences
+            if len(sentence) < 10:
+                continue
+
+            # Look for factual declarative sentences
+            if re.match(r'^[A-Z].*?(?:is|are|was|were|has|have)\b', sentence):
+                # Check if it contains an actual assertion
+                if " is " in sentence or " are " in sentence or " was " in sentence:
+                    statements.append(sentence)
+
+            # Special handling for date/time information
+            if re.search(r'\b(?:today|current date|the date)\b', sentence.lower()):
+                if re.search(r'\b(?:is|was)\b', sentence.lower()):
+                    statements.append(sentence)
+
+        # Limit to 3 most important statements
+        return statements[:3]
 
     def _extract_memory_worthy_content(self, query: str, response: str) -> List[Tuple[str, str]]:
         """
@@ -1781,6 +1854,7 @@ def main():
     print("Special commands:")
     print("  !system: [message] - Change the system message")
     print("  !toggle-memory - Toggle memory system on/off")
+    print("  !toggle-memory-debug - Toggle memory debugging")
     print("  !toggle-heatmap - Toggle confidence heatmap visualization")
     print("  !toggle-draft - Toggle draft model for speculative decoding")
     print("  !toggle-filter - Toggle confidence filtering")
@@ -1850,6 +1924,11 @@ def main():
             elif user_input.lower() == '!toggle-memory':
                 is_enabled = chat.toggle_memory()
                 print(f"{chat.get_time()} Memory system {'enabled' if is_enabled else 'disabled'}")
+                continue
+
+            if user_input.lower() == '!toggle-memory-debug':
+                chat.memory_debug = not chat.memory_debug
+                print(f"{chat.get_time()} Memory debugging {'enabled' if chat.memory_debug else 'disabled'}")
                 continue
 
             elif user_input.lower() == '!toggle-heatmap':
