@@ -183,19 +183,19 @@ class SpeculativeDecoder:
             return None
 
     def speculative_decode(
-        self, 
-        input_ids: torch.Tensor, 
+        self,
+        input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         num_draft_tokens: Optional[int] = None
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
-        Perform speculative decoding with enhanced pattern detection and error handling.
-        
+        Perform speculative decoding with enhanced performance and memory management.
+
         Args:
             input_ids: Input token IDs
             attention_mask: Attention mask for the input
             num_draft_tokens: Number of tokens to draft (uses self.max_draft_tokens if None)
-            
+
         Returns:
             Tuple of (accepted_tokens, acceptance_mask, token_logits) or (None, None, None) on failure
         """
@@ -203,23 +203,27 @@ class SpeculativeDecoder:
             # No draft model available
             self.stats.fallbacks += 1
             return None, None, None
-            
+
         # Only implement for GPU for speed benefits
         if self.device == "cpu":
             self.stats.fallbacks += 1
             return None, None, None
-            
+
         # Track speculative attempts
         self.stats.speculative_attempts += 1
-        
+
         # Default num_draft_tokens to class setting if not specified
         if num_draft_tokens is None:
             num_draft_tokens = self.max_draft_tokens
-            
+
         try:
+            # OPTIMIZATION: Clean up CUDA memory before generating
+            torch.cuda.empty_cache()
+
             # Step 1: Generate draft tokens with the smaller model
             draft_start_time = time.time()
             with torch.no_grad():
+                # OPTIMIZATION: Use more restrictive draft generation settings
                 draft_outputs = self.draft_model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -229,113 +233,140 @@ class SpeculativeDecoder:
                     return_dict_in_generate=True,
                     output_scores=True,
                     repetition_penalty=self.repetition_penalty,
+                    early_stopping=True,  # OPTIMIZATION: Stop early when possible
                 )
-                
+
             # Extract draft tokens (excluding input prompt)
             draft_ids = draft_outputs.sequences[0, input_ids.shape[1]:]
-            
+
             # Check if we got any draft tokens
             if len(draft_ids) == 0:
                 self.stats.fallbacks += 1
                 return None, None, None
-                
+
             # Track total draft tokens
             self.stats.total_draft_tokens += len(draft_ids)
-                
+
             # Check for repetitive patterns
             draft_tokens = draft_ids.tolist()
-            self._check_repetitive_patterns(draft_tokens)
-                
+            if self._check_repetitive_patterns(draft_tokens):
+                # OPTIMIZATION: Early exit if repetition is detected
+                self.stats.fallbacks += 1
+                return None, None, None
+
             # Step 2: Verify with target model - compute logits for each position
             full_sequence = torch.cat([input_ids[0], draft_ids]).unsqueeze(0)
             full_attention = torch.ones_like(full_sequence)
-                
-            # Use batch processing if available
+
+            # OPTIMIZATION: Use batch processing only for long sequences
             if self.batch_processor is not None and full_sequence.size(1) > 1024:
+                # Define a more memory-efficient batch processor function
                 def get_logits(batch):
                     with torch.no_grad():
+                        # OPTIMIZATION: Use more specific model call parameters
                         outputs = self.main_model(
                             input_ids=batch,
                             attention_mask=torch.ones_like(batch),
-                            return_dict=True
+                            return_dict=True,
+                            output_hidden_states=False,  # OPTIMIZATION: Don't need hidden states
+                            output_attentions=False,     # OPTIMIZATION: Don't need attention weights
                         )
                     return outputs.logits
-                    
+
                 # Use batch processing with adaptive sizing
                 target_logits = self.batch_processor(
                     get_logits,
                     full_sequence,
-                    # batch_size=None,  # Use dynamic sizing
                     adaptive=True,
-                    handle_oom=True
+                    handle_oom=True,
+                    # OPTIMIZATION: Force smaller initial batch size for long sequences
+                    batch_size=max(1, 512 // full_sequence.size(1))
                 )
             else:
                 # Get logits from target model for the full sequence
                 with torch.no_grad():
+                    # OPTIMIZATION: Use more specific model call parameters
                     target_outputs = self.main_model(
                         input_ids=full_sequence,
                         attention_mask=full_attention,
-                        return_dict=True
+                        return_dict=True,
+                        output_hidden_states=False,  # OPTIMIZATION: Don't need hidden states
+                        output_attentions=False,     # OPTIMIZATION: Don't need attention weights
                     )
                     target_logits = target_outputs.logits
-                    
+
             # Only examine logits for draft tokens (exclude input)
             target_logits = target_logits[0, input_ids.shape[1]-1:-1, :]
-                
+
             # Get predicted tokens from target logits
             target_predictions = torch.argmax(target_logits, dim=-1)
-                
+
             # Step 3: Find the first mismatch
             matches = (target_predictions == draft_ids)
-                
+
             # If all match, accept all draft tokens!
             if matches.all():
                 self.stats.successful_attempts += 1
                 self.stats.tokens_from_draft += len(draft_ids)
-                
+
                 # Add logits to confidence metrics if available
                 if self.confidence_metrics:
                     for i, token_id in enumerate(draft_ids):
                         self.confidence_metrics.add_token_score(target_logits[i], token_id.item())
-                        
+
                 # Calculate time saved (approximate)
                 draft_time = time.time() - draft_start_time
                 # Assume verification time is insignificant compared to generation
                 self.stats.time_saved += draft_time * 0.7  # Conservative estimate
-                
+
+                # OPTIMIZATION: Force release of draft outputs
+                del draft_outputs
+
                 return draft_ids, torch.ones_like(draft_ids), target_logits
-                
+
             # Find first mismatch position
             first_mismatch = len(matches) if matches.all() else matches.tolist().index(False)
-                
+
             # Return accepted tokens
             if first_mismatch > 0:
                 accepted_tokens = draft_ids[:first_mismatch]
                 acceptance_mask = torch.ones_like(accepted_tokens)
-                
+
                 # Add logits to confidence metrics for the accepted tokens
                 if self.confidence_metrics:
                     for i, token_id in enumerate(accepted_tokens):
                         self.confidence_metrics.add_token_score(target_logits[i], token_id.item())
-                        
+
                 # Update statistics
                 self.stats.successful_attempts += 1
                 self.stats.tokens_from_draft += first_mismatch
-                
+
                 # Calculate time saved (approximate)
                 draft_time = time.time() - draft_start_time
                 self.stats.time_saved += draft_time * 0.4  # Conservative estimate
-                
-                # Return the accepted tokens
+
+                # OPTIMIZATION: Force release of draft outputs
+                del draft_outputs
+
+                # OPTIMIZATION: Return only relevant portion of target_logits
                 return accepted_tokens, acceptance_mask, target_logits[:first_mismatch]
-                
+
             # No accepted tokens
             self.stats.fallbacks += 1
+
+            # OPTIMIZATION: Force release of draft outputs
+            del draft_outputs
+
             return None, None, None
-            
+
         except Exception as e:
-            logger.error(f"Error in speculative decoding: {e}")
+            print(f"Error in speculative decoding: {e}")
             self.stats.fallbacks += 1
+
+            # OPTIMIZATION: Clear CUDA cache on error
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             return None, None, None
             
     def _check_repetitive_patterns(self, tokens: List[int]) -> bool:

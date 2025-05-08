@@ -69,6 +69,18 @@ class TopicShiftDetector:
             if phrase in query_lower:
                 return False, 1.0
 
+        self.exit_phrases = [
+            "exit",
+            "q"
+        ]
+
+        query_lower = query.lower()
+
+        # Check for continuation phrases
+        for phrase in self.exit_phrases:
+            if phrase in query_lower:
+                return False, 1.0
+
         # If no previous topics, not a shift
         if not self.recent_topics:
             self._add_topic(query)

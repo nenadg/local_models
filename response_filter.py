@@ -1,7 +1,8 @@
-import numpy as np
 import re
-from typing import Dict, Optional, Tuple, List, Union, Any
 import time
+import hashlib
+import numpy as np
+from typing import Dict, Optional, Tuple, List, Union, Any
 from datetime import datetime
 
 class ResponseFilter:
@@ -50,6 +51,28 @@ class ResponseFilter:
         self.baseline_confidence = 0.5
         self.confidence_values = []
         self.confidence_variance = 0.1
+
+        # OPTIMIZATION: Precompile regex patterns
+        self.duplicate_line_pattern = re.compile(r'(.+)\n\1(\n\1)+')
+        self.char_repeat_pattern = re.compile(r'(.)\1{8,}')
+        self.empty_code_blocks = re.compile(r'(```\s*[a-z]*\s*```\s*){2,}')
+        self.repeated_dollar_signs = re.compile(r'(\$\s*\$\s*\$\s*\$+)')
+        self.dollar_n_pattern = re.compile(r'(\$\s*n\s*\$\s*\$\s*n+)')
+        self.file_permission_fragments = re.compile(r'(r-[-rwxs]{8,})')
+        self.txt_fragments = re.compile(r'(txt,txt,txt)')
+        self.comma_separated_words = re.compile(r'(\w+,){5,}')
+        self.repeated_connectors = re.compile(r'(and,and|or,or|the,the)')
+
+        # OPTIMIZATION: Store the last analysis results
+        self._last_analysis = {
+            'text_length': 0,
+            'has_repetitive_patterns': False,
+            'detected_patterns': [],
+            'timestamp': 0
+        }
+
+        # OPTIMIZATION: Cache for analyzed text segments
+        self._analyzed_segments = {}
 
         # Default fallback messages unchanged...
         self.fallback_messages = fallback_messages or [
@@ -129,66 +152,114 @@ class ResponseFilter:
         if self.debug_mode:
             print(f"[ResponseFilter] {message}")
 
-    def detect_repetitive_patterns(self, response: str) -> dict:
+    def detect_repetitive_patterns(self, response: str, incremental_only: bool = False) -> dict:
         """
-        Detect problematic repetitive patterns in the response.
+        Optimized detection of problematic repetitive patterns in the response.
 
         Args:
             response: Generated text response
+            incremental_only: Whether to only check the new portion since last check
 
         Returns:
             Dictionary with pattern detection results
         """
+        # Initialize results
         results = {
             'has_repetitive_patterns': False,
             'detected_patterns': []
         }
 
-        # Check for duplicate lines
-        lines = response.split('\n')
-        line_counts = {}
-        for line in lines:
-            clean_line = line.strip()
-            if clean_line and len(clean_line) > 5:  # Skip short or empty lines
-                if clean_line in line_counts:
-                    line_counts[clean_line] += 1
-                else:
-                    line_counts[clean_line] = 1
+        # OPTIMIZATION: Skip if too short to have meaningful patterns
+        if len(response) < 20:
+            return results
 
-        # Find lines that repeat too much
-        duplicate_lines = [line for line, count in line_counts.items()
-                          if count >= 3]  # Lines repeated 3+ times
+        # OPTIMIZATION: Process only new content when possible
+        current_length = len(response)
+        if incremental_only and self._last_analysis['text_length'] > 0:
+            # Only analyze new content if we've analyzed this text before
+            if current_length <= self._last_analysis['text_length']:
+                # No new content or text got shorter somehow
+                return self._last_analysis
 
-        if duplicate_lines:
-            results['has_repetitive_patterns'] = True
-            results['detected_patterns'].append('duplicate_lines')
-            results['duplicate_lines'] = duplicate_lines
+            # Get only the new portion of the text
+            new_portion = response[self._last_analysis['text_length']:]
 
-        # Check for repetitive characters
-        char_repeat_patterns = re.findall(r'(.)\1{8,}', response)  # 8+ repeated chars
-        if char_repeat_patterns:
-            results['has_repetitive_patterns'] = True
-            results['detected_patterns'].append('repeated_characters')
-            results['repeated_characters'] = char_repeat_patterns
+            # If new portion is small, do a quick check first
+            if len(new_portion) < 50:
+                # Quick check for obvious repetitive characters
+                if self.char_repeat_pattern.search(new_portion):
+                    results['has_repetitive_patterns'] = True
+                    results['detected_patterns'].append('repeated_characters')
+                    self._last_analysis = results
+                    self._last_analysis['text_length'] = current_length
+                    self._last_analysis['timestamp'] = time.time()
+                    return results
 
-        # Check for garbage patterns that frequently appear in broken responses
-        garbage_patterns = [
-            r'(```\s*[a-z]*\s*```\s*){2,}',    # Multiple empty code blocks
-            r'(\$\s*\$\s*\$\s*\$+)',           # Repeated $ signs
-            r'(\$\s*n\s*\$\s*\$\s*n+)',        # $n$$ patterns
-            r'(r-[-rwxs]{8,})',                # File permissions fragments
-            r'(txt,txt,txt)',                  # Repeated "txt" fragments
-            r'(\w+,){5,}',                     # Comma-separated words
-            r'(and,and|or,or|the,the)',        # Repeated connecting words
+        # OPTIMIZATION: Check the most problematic patterns first
+        # This allows for early exit if problems are found
+
+        # 1. Check for garbage patterns that frequently appear in broken responses
+        # Using pre-compiled regexes (much faster)
+        patterns_to_check = [
+            (self.empty_code_blocks, 'empty_code_blocks'),
+            (self.repeated_dollar_signs, 'repeated_dollar_signs'),
+            (self.dollar_n_pattern, 'dollar_n_pattern'),
+            (self.file_permission_fragments, 'file_permission_fragments'),
+            (self.txt_fragments, 'txt_fragments'),
+            (self.comma_separated_words, 'comma_separated_words'),
+            (self.repeated_connectors, 'repeated_connectors')
         ]
 
-        for i, pattern in enumerate(garbage_patterns):
-            matches = re.findall(pattern, response)
-            if matches:
+        for pattern, pattern_name in patterns_to_check:
+            # OPTIMIZATION: Use search instead of findall when we only need to know if matches exist
+            if pattern.search(response):
                 results['has_repetitive_patterns'] = True
-                results['detected_patterns'].append(f'garbage_pattern_{i}')
-                results['garbage_matches'] = matches
-                break
+                results['detected_patterns'].append(pattern_name)
+
+                # OPTIMIZATION: Early exit once a pattern is found
+                if self.debug_mode:
+                    self.log(f"Detected pattern: {pattern_name}")
+
+                # Update last analysis
+                self._last_analysis = results
+                self._last_analysis['text_length'] = current_length
+                self._last_analysis['timestamp'] = time.time()
+                return results
+
+        # 2. Check for repetitive characters (very common in stuck outputs)
+        char_repeat_matches = self.char_repeat_pattern.findall(response)
+        if char_repeat_matches:
+            results['has_repetitive_patterns'] = True
+            results['detected_patterns'].append('repeated_characters')
+            results['repeated_characters'] = char_repeat_matches
+
+            # Update last analysis
+            self._last_analysis = results
+            self._last_analysis['text_length'] = current_length
+            self._last_analysis['timestamp'] = time.time()
+            return results
+
+        # 3. Check for duplicate lines (compute-intensive, so do it last)
+        # OPTIMIZATION: Use regex to find repeated lines more efficiently
+        duplicate_matches = self.duplicate_line_pattern.findall(response)
+        if duplicate_matches:
+            results['has_repetitive_patterns'] = True
+            results['detected_patterns'].append('duplicate_lines')
+            results['duplicate_lines'] = duplicate_matches
+
+        # OPTIMIZATION: Only run expensive n-gram analysis if nothing found yet
+        # and the text is long enough to possibly have such patterns
+        if not results['has_repetitive_patterns'] and len(response) > 200:
+            phrases = self._extract_repeated_phrases(response)
+            if phrases and len(phrases) >= self.pattern_config['repeated_phrases']['threshold']:
+                results['has_repetitive_patterns'] = True
+                results['detected_patterns'].append('repetitive_phrases')
+                results['repetitive_phrases'] = phrases[:3]  # OPTIMIZATION: Only store a few examples
+
+        # Update last analysis
+        self._last_analysis = results
+        self._last_analysis['text_length'] = current_length
+        self._last_analysis['timestamp'] = time.time()
 
         return results
 
@@ -357,7 +428,7 @@ class ResponseFilter:
 
     def _extract_repeated_phrases(self, text: str) -> List[str]:
         """
-        Extract repeated meaningful phrases in the text.
+        Optimized extraction of repeated meaningful phrases in the text.
 
         Args:
             text: Text to analyze
@@ -365,48 +436,103 @@ class ResponseFilter:
         Returns:
             List of repeated phrases
         """
+        # OPTIMIZATION: Use a hash of the text as cache key
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+
+        # Check cache for this text
+        if text_hash in self._analyzed_segments:
+            return self._analyzed_segments[text_hash]
+
+        # OPTIMIZATION: Skip if text is too short
+        if len(text) < 100:
+            return []
+
         repeated = []
 
         # Get minimum length for phrases to check
         min_len = self.pattern_config['repeated_phrases']['min_length']
 
-        # Split into words
+        # OPTIMIZATION: Extract words once
         words = re.findall(r'\b\w+\b', text.lower())
 
-        # Check for repeated phrases (n-grams)
-        for n in range(min_len, min(15, len(words) // 2)):
-            ngrams = {}
+        # OPTIMIZATION: Only check n-grams of reasonable sizes
+        # For longer text, checking every n-gram size is too expensive
+        if len(words) > 1000:
+            n_values = [3, 5, 7]  # Check only a few representative sizes
+        else:
+            # For shorter text, we can check more n-gram sizes
+            n_values = range(min_len, min(10, len(words) // 3))
 
-            # Build all n-grams
+        # Check for repeated phrases (n-grams)
+        for n in n_values:
+            # OPTIMIZATION: Use dictionary for faster lookups
+            ngrams = {}
+            ngram_positions = {}
+
+            # OPTIMIZATION: Use sliding window to build n-grams
             for i in range(len(words) - n + 1):
                 ngram = ' '.join(words[i:i+n])
                 if len(ngram.strip()) < min_len * 2:  # Skip very short phrases
                     continue
 
                 if ngram in ngrams:
-                    if i - ngrams[ngram][-1] > self.pattern_config['repeated_phrases']['max_distance']:
-                        ngrams[ngram].append(i)
-                else:
-                    ngrams[ngram] = [i]
+                    ngrams[ngram] += 1
 
-            # Find repeated n-grams
-            for ngram, positions in ngrams.items():
-                if len(positions) >= self.pattern_config['repeated_phrases']['threshold']:
-                    # Valid repeated phrase
-                    repeated.append(ngram)
+                    # Only track positions if this might be a repeated n-gram
+                    if ngrams[ngram] == 2:
+                        ngram_positions[ngram] = [i - n, i]  # First and current position
+                    elif ngrams[ngram] > 2:
+                        ngram_positions[ngram].append(i)
+                else:
+                    ngrams[ngram] = 1
+
+            # OPTIMIZATION: Only process n-grams that occurred multiple times
+            for ngram, count in ngrams.items():
+                if count >= self.pattern_config['repeated_phrases']['threshold']:
+                    if ngram not in repeated:
+                        repeated.append(ngram)
+
+                    # OPTIMIZATION: Limit the total phrases we collect
+                    if len(repeated) >= 5:
+                        # Save results to cache and return
+                        self._analyzed_segments[text_hash] = repeated
+                        return repeated
+
+        # Save results to cache
+        self._analyzed_segments[text_hash] = repeated
+
+        # Limit cache size
+        if len(self._analyzed_segments) > 50:
+            # Remove oldest entries
+            old_keys = list(self._analyzed_segments.keys())[:-20]
+            for key in old_keys:
+                del self._analyzed_segments[key]
 
         return repeated
 
-    def analyze_content_quality(self, response: str) -> Dict[str, Any]:
+    def analyze_content_quality(self, response: str, incremental: bool = True) -> Dict[str, Any]:
         """
-        Analyze the quality of the generated content.
+        Analyze the quality of the generated content with optimized performance.
 
         Args:
             response: Generated text response
+            incremental: Whether to use incremental analysis for performance
 
         Returns:
             Dictionary with content quality assessment
         """
+        # OPTIMIZATION: Check if we can reuse cached analysis
+        if hasattr(self, '_last_quality_analysis') and incremental:
+            last_analysis = getattr(self, '_last_quality_analysis', {})
+            last_length = last_analysis.get('text_length', 0)
+
+            if len(response) <= last_length:
+                # Text got shorter or hasn't changed, return cached result
+                return last_analysis.get('results', {'is_low_quality': False, 'quality_score': 1.0})
+        else:
+            last_length = 0
+
+        # Initialize quality assessment
         results = {
             'is_low_quality': False,
             'quality_issues': [],
@@ -415,33 +541,91 @@ class ResponseFilter:
 
         # Skip if response is too short
         if len(response.strip()) < 50:
+            # OPTIMIZATION: Cache this result
+            self._last_quality_analysis = {
+                'text_length': len(response),
+                'results': results,
+                'timestamp': time.time()
+            }
             return results
 
-        # Split text into sentences
-        sentences = re.split(r'[.!?]\s+', response)
+        # OPTIMIZATION: Only analyze new content if possible
+        if incremental and last_length > 0:
+            # Get the new portion of text
+            new_text = response[last_length:]
 
-        # Check sentence quality
+            # If the new text is very short, do a quick basic check
+            if len(new_text) < 100:
+                # Quick check for obvious quality issues
+                if '...' in new_text * 3 or '   ' in new_text:
+                    results['is_low_quality'] = True
+                    results['quality_issues'].append('basic_formatting_issues')
+                    results['quality_score'] -= 0.2
+
+                    # OPTIMIZATION: Cache this result
+                    self._last_quality_analysis = {
+                        'text_length': len(response),
+                        'results': results,
+                        'timestamp': time.time()
+                    }
+                    return results
+
+        # OPTIMIZATION: Use cached sentence splitting
+        # Split text into sentences if we haven't already
+        if hasattr(self, '_cached_sentences') and len(response) == self._cached_sentences_length:
+            sentences = self._cached_sentences
+        else:
+            # OPTIMIZATION: More efficient sentence splitting
+            sentences = [s.strip() for s in re.split(r'[.!?]\s+', response) if s.strip()]
+            self._cached_sentences = sentences
+            self._cached_sentences_length = len(response)
+
+        # Check sentence quality - but only process if we have enough sentences
+        if len(sentences) < 3:
+            # Not enough sentences to meaningfully analyze
+            return results
+
+        # OPTIMIZATION: Only check a sample of sentences for larger text
+        if len(sentences) > 20:
+            # Check first 5, last 5, and 10 random sentences from the middle
+            sample_indices = list(range(5))  # First 5
+            sample_indices.extend(range(len(sentences)-5, len(sentences)))  # Last 5
+
+            # Add 10 random sentences from the middle
+            middle_indices = list(range(5, len(sentences)-5))
+            if middle_indices:
+                import random
+                random_count = min(10, len(middle_indices))
+                sample_indices.extend(random.sample(middle_indices, random_count))
+
+            # Create a sample of sentences
+            sentence_sample = [sentences[i] for i in sorted(sample_indices)]
+        else:
+            # For shorter text, check all sentences
+            sentence_sample = sentences
+
+        # OPTIMIZATION: Precompile regex pattern for subject-verb structure
+        if not hasattr(self, '_subject_verb_pattern'):
+            self._subject_verb_pattern = re.compile(r'\b[A-Z][a-z]+\b.*?\b[a-z]+s\b|\b[A-Z][a-z]+\b.*?\b[a-z]+ed\b')
+
+        # Check for malformed sentences
         malformed_count = 0
-
-        for sentence in sentences:
-            sentence = sentence.strip()
-
+        for sentence in sentence_sample:
             # Skip very short sentences
-            if len(sentence.split()) < self.pattern_config['coherence']['min_sentence_length']:
+            min_sentence_length = self.pattern_config['coherence']['min_sentence_length']
+            if len(sentence.split()) < min_sentence_length:
                 continue
 
             # Check for subject-verb structure if enabled
             if self.pattern_config['coherence']['subject_verb_check']:
-                # Very simple check - look for a noun followed by a verb
-                # This is a heuristic and not a proper parse
-                has_subject_verb = re.search(r'\b[A-Z][a-z]+\b.*?\b[a-z]+s\b|\b[A-Z][a-z]+\b.*?\b[a-z]+ed\b', sentence)
-
+                # Use precompiled pattern
+                has_subject_verb = self._subject_verb_pattern.search(sentence)
                 if not has_subject_verb:
                     malformed_count += 1
 
-        # Calculate malformed ratio
-        if sentences:
-            malformed_ratio = malformed_count / len(sentences)
+        # Calculate malformed ratio based on sample, extrapolate to full text
+        if sentence_sample:
+            malformed_ratio = malformed_count / len(sentence_sample)
 
             if malformed_ratio > self.pattern_config['coherence']['max_malformed_ratio']:
                 results['is_low_quality'] = True
@@ -451,41 +635,126 @@ class ResponseFilter:
                 # Reduce quality score
                 results['quality_score'] -= malformed_ratio
 
-        # Check for abrupt topic shifts
-        topics = self._extract_topics(response)
+        # OPTIMIZATION: Analyze text structure more efficiently
+        # Only run this analysis on longer text
+        if len(sentences) >= 10:
+            structure_result = self._analyze_text_structure_optimized(response, sentences)
+            if structure_result['structure_deterioration']:
+                results['is_low_quality'] = True
+                results['quality_issues'].append('structure_deterioration')
 
-        if len(topics) > 3 and len(sentences) < 10:
-            # Too many topics for a short response
-            results['is_low_quality'] = True
-            results['quality_issues'].append('topic_incoherence')
-            results['topics'] = topics
-
-            # Reduce quality score
-            results['quality_score'] -= 0.2
-
-        # Check for sentence fragments
-        fragments = re.findall(r'\b[A-Z][^.!?]*(?<![.!?])(?:\n|\s{2,})', response)
-        if fragments and len(fragments) > len(sentences) * 0.3:
-            results['is_low_quality'] = True
-            results['quality_issues'].append('sentence_fragments')
-
-            # Reduce quality score
-            results['quality_score'] -= 0.2
-
-        # Analyze text structure for deterioration
-        structure_result = self._analyze_text_structure(response)
-        if structure_result['structure_deterioration']:
-            results['is_low_quality'] = True
-            results['quality_issues'].append('structure_deterioration')
-            results['structure_analysis'] = structure_result
-
-            # Reduce quality score
-            results['quality_score'] -= 0.3
+                # Reduce quality score
+                results['quality_score'] -= 0.3
 
         # Ensure quality score stays in range [0, 1]
         results['quality_score'] = max(0.0, min(1.0, results['quality_score']))
 
+        # OPTIMIZATION: Cache this result
+        self._last_quality_analysis = {
+            'text_length': len(response),
+            'results': results,
+            'timestamp': time.time()
+        }
+
         return results
+
+    def _analyze_text_structure_optimized(self, text: str, sentences: List[str]) -> Dict[str, Any]:
+        """
+        Optimized analysis of text structure for signs of deterioration.
+
+        Args:
+            text: Full text to analyze
+            sentences: Pre-split sentences (for efficiency)
+
+        Returns:
+            Dictionary with structure analysis
+        """
+        result = {
+            'structure_deterioration': False,
+            'section_quality': []
+        }
+
+        # OPTIMIZATION: If we have very few sentences, skip detailed analysis
+        if len(sentences) < 5:
+            return result
+
+        # OPTIMIZATION: For very long texts, analyze sections rather than sentences
+        if len(sentences) > 20:
+            # Divide into beginning, middle, and end sections
+            section_size = max(5, len(sentences) // 5)
+            beginning = sentences[:section_size]
+            middle = sentences[len(sentences)//2 - section_size//2:len(sentences)//2 + section_size//2]
+            end = sentences[-section_size:]
+
+            # Analyze each section
+            sections_to_analyze = [beginning, middle, end]
+            section_names = ["beginning", "middle", "end"]
+        else:
+            # For shorter texts, look at individual sentences
+            # Group sentences into small coherent sections
+            sections_to_analyze = []
+            current_section = []
+
+            for sentence in sentences:
+                current_section.append(sentence)
+                if len(current_section) >= 3:
+                    sections_to_analyze.append(current_section)
+                    current_section = []
+
+            # Add any remaining sentences
+            if current_section:
+                sections_to_analyze.append(current_section)
+
+            section_names = [f"section_{i+1}" for i in range(len(sections_to_analyze))]
+
+        # Track quality metrics for each section
+        section_metrics = []
+
+        # OPTIMIZATION: Precompile regex patterns
+        word_pattern = re.compile(r'\b\w+\b')
+        capitalization_pattern = re.compile(r'\b[A-Z][a-z]+\b')
+
+        # Analyze each section
+        for i, section in enumerate(sections_to_analyze):
+            # Join section sentences
+            section_text = ' '.join(section)
+
+            # Skip very short sections
+            if len(section_text) < 20:
+                continue
+
+            # Calculate simple quality metrics
+            words = word_pattern.findall(section_text)
+            unique_ratio = len(set(words)) / max(1, len(words))
+
+            # Check structural indicators
+            has_punctuation = '.' in section_text or ',' in section_text
+            has_capitalization = bool(capitalization_pattern.search(section_text))
+
+            # Calculate quality score
+            quality = (unique_ratio * 0.7) + (0.15 if has_punctuation else 0) + (0.15 if has_capitalization else 0)
+
+            # Store metrics
+            section_metrics.append({
+                'name': section_names[i],
+                'quality': quality,
+                'unique_ratio': unique_ratio,
+            })
+
+        # Store quality scores
+        result['section_quality'] = [section['quality'] for section in section_metrics]
+
+        # Check for degradation pattern
+        if len(result['section_quality']) >= 3:
+            # Check if quality consistently declines
+            first_third = result['section_quality'][0]
+            last_third = result['section_quality'][-1]
+
+            if last_third < first_third * 0.6:  # More than 40% drop
+                result['structure_deterioration'] = True
+                result['quality_decline'] = first_third - last_third
+
+        return result
 
     def _extract_topics(self, text: str) -> List[str]:
         """
@@ -748,10 +1017,8 @@ class ResponseFilter:
                 has_reason = True
                 reason = "extremely_low_confidence"
                 return_reason = True
-                # return True, "extremely_low_confidence", {'confidence': confidence}
 
             # Otherwise let it continue
-            # return False, "acceptable", {'confidence': confidence}
             has_reason = True
             reason = "acceptable"
             return_reason = False
@@ -786,7 +1053,6 @@ class ResponseFilter:
             has_reason = True
             reason = f"context_overflow_{overflow_results['overflow_patterns']}"
             return_reason = True
-            #return True, f"context_overflow_{overflow_results['overflow_patterns']}", overflow_results
 
         # Analyze confidence patterns if we have enough tokens
         pattern_results = self.analyze_confidence_patterns(token_confidences) if token_confidences else {"pattern_detected": False}
@@ -819,15 +1085,23 @@ class ResponseFilter:
                 max_similarity = max([m.get('similarity', 0) for m in memory_details], default=0)
                 memory_supported = max_similarity > 0.3
 
-        # Calculate a modified uncertainty score with weighted components
-        uncertainty_score = (
-            (1 - confidence) * 0.35 +                             # Reduced from 0.5
-            (1 - quality_results['quality_score']) * 0.25 +       # Reduced from 0.3
-            (entropy / thresholds['entropy']) * 0.15 +            # Increased from 0.1
-            (perplexity / thresholds['perplexity']) * 0.15 +      # Increased from 0.1
-            (pattern_results['severity'] * self.pattern_detection_weight) +  # New component
-            (-0.1 if memory_supported else 0)                     # Memory support bonus
-        )
+        # FIXED: Calculate a better bounded uncertainty score with weighted components
+        confidence_component = max(0.0, min(1.0, (1 - confidence) * 0.35))
+        quality_component = max(0.0, min(1.0, (1 - quality_results['quality_score']) * 0.25))
+        entropy_component = max(0.0, min(1.0, (entropy / thresholds['entropy']) * 0.15))
+        perplexity_component = max(0.0, min(1.0, (perplexity / thresholds['perplexity']) * 0.15))
+        pattern_component = max(0.0, min(1.0, pattern_results['severity'] * self.pattern_detection_weight))
+        memory_bonus = -0.1 if memory_supported else 0
+
+        # Sum the components and clamp to [0.0, 1.0]
+        uncertainty_score = max(0.0, min(1.0,
+            confidence_component +
+            quality_component +
+            entropy_component +
+            perplexity_component +
+            pattern_component +
+            memory_bonus
+        ))
 
         # Adjust filtering threshold based on query domain
         uncertainty_threshold = 0.7  # Higher than previous 0.55
@@ -892,9 +1166,15 @@ class ResponseFilter:
             String with formatted confidence indicator
         """
         # Get key metrics
-        confidence = metrics.get('confidence', 0.5)
-        quality = metrics.get('quality_score', 0.7)
+        confidence = min(1.0, metrics.get('confidence', 0.5))
+        quality = min(1.0, metrics.get('quality_score', 0.7))
+
+        # FIXED: Ensure uncertainty is properly bounded to prevent reliability > 100%
         uncertainty = metrics.get('uncertainty_score', 0.5)
+        # Clamp uncertainty to the range [0.0, 1.0]
+        uncertainty = max(0.0, min(1.0, uncertainty))
+        reliability = 1.0 - uncertainty
+
         memory_supported = metrics.get('memory_supported', False)
         memory_count = metrics.get('memory_count', 0)
         memory_details = metrics.get('memory_details', [])
@@ -906,7 +1186,9 @@ class ResponseFilter:
 
         # Function to generate a bar
         def generate_bar(value, width):
-            filled = int(value * width)
+            # Ensure value is properly bounded between 0.0 and 1.0
+            bounded_value = max(0.0, min(1.0, value))
+            filled = int(bounded_value * width)
             return '█' * filled + '░' * (width - filled)
 
         # Choose colors (using ANSI color codes)
@@ -928,13 +1210,13 @@ class ResponseFilter:
         qual_bar = generate_bar(quality, width)
 
         # Inverse for uncertainty (lower is better)
-        uncert_color = color_for_value(1 - uncertainty)
-        uncert_bar = generate_bar(1 - uncertainty, width)
+        uncert_color = color_for_value(reliability)
+        uncert_bar = generate_bar(reliability, width)
 
         # Memory support indicator
         mem_color = "\033[32m" if memory_supported else "\033[33m"
         mem_status = "None"
-        
+
         if memory_count > 0:
             if max_similarity > 0.8:
                 mem_color = "\033[32m"  # Green
@@ -949,12 +1231,17 @@ class ResponseFilter:
                 mem_color = "\033[33m"  # Yellow
                 mem_status = f"Limited ({memory_count} items, {max_similarity:.1%})"
 
+        # Format percentages as integers between 0-100%
+        confidence_pct = int(confidence * 100)
+        quality_pct = int(quality * 100)
+        reliability_pct = int(reliability * 100)
+
         # Assemble the complete indicator
         indicator = (
             f"Response Metrics:\n"
-            f"Confidence:     {conf_color}{conf_bar}{reset} {confidence:.0%}\n"
-            f"Quality:        {qual_color}{qual_bar}{reset} {quality:.0%}\n"
-            f"Reliability:    {uncert_color}{uncert_bar}{reset} {(1-uncertainty):.0%}\n"
+            f"Confidence:     {conf_color}{conf_bar}{reset} {confidence_pct}%\n"
+            f"Quality:        {qual_color}{qual_bar}{reset} {quality_pct}%\n"
+            f"Reliability:    {uncert_color}{uncert_bar}{reset} {reliability_pct}%\n"
             f"Memory Support: {mem_color}{mem_status}{reset}"
         )
 

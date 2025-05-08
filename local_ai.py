@@ -17,6 +17,7 @@ import signal
 import select
 import hashlib
 import traceback
+import gc
 
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
@@ -37,6 +38,7 @@ from topic_shift_detector import TopicShiftDetector
 # Import our refactored memory manager
 from unified_memory import MemoryManager
 from mcp_prompt_completer import MCPCompleter
+from token_buffer import TokenBuffer
 
 # Default system message template
 DEFAULT_SYSTEM_MESSAGE = """You are a helpful and friendly assistant designed to provide accurate information. Follow these guidelines:
@@ -198,6 +200,16 @@ class MemoryEnhancedChat:
         # Load main model
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **loading_options)
         self.model = self.resource_manager.register_model(self.model)
+
+        custom_template = self.tokenizer.chat_template
+        if custom_template:
+            # Add handling for memory role
+            custom_template = custom_template.replace(
+                "{% for message in messages %}",
+                "{% for message in messages %}{% if message['role'] == 'memory' %}{{ message['content'] }}{% endif %}"
+            )
+            # custom_template += "{% endif %}"
+            self.tokenizer.chat_template = custom_template
 
         # Optimize for inference
         self.resource_manager.optimize_for_inference()
@@ -400,20 +412,29 @@ class MemoryEnhancedChat:
             self.draft_model = None
 
     def _save_command_output_to_memory(self, command: str, output: str):
-        """Save command output to memory for future reference."""
+        """Save command output to memory with better metadata for retrieval."""
         if not self.enable_memory or not output:
             return
 
         try:
-            # Detect content type
+            # Detect content type and source hint
             content_type = "tabular" if '\t' in output or re.search(r'\S\s{2,}\S', output) else "text"
+
+            # Add special source hint for date/time commands
+            source_hint = "general"
+            if re.search(r'date|time', command, re.IGNORECASE):
+                source_hint = "datetime_info"
+                # Make date/time output more explicit
+                output = f"Current date/time information: {output.strip()}"
 
             # Create metadata
             metadata = {
                 "source": "command_output",
                 "command": command,
                 "timestamp": datetime.now().timestamp(),
-                "content_type": content_type
+                "content_type": content_type,
+                "source_hint": source_hint,
+                "priority": 10 if source_hint == "datetime_info" else 5  # Higher priority for date/time
             }
 
             # Add to memory
@@ -422,10 +443,50 @@ class MemoryEnhancedChat:
                 metadata=metadata
             )
 
+            # For date/time commands, create an additional explicit memory
+            if source_hint == "datetime_info":
+                # Extract just the date part for better retrieval
+                date_memory = f"Today's date is {output.strip()}"
+                date_metadata = {
+                    "source": "derived",
+                    "source_hint": "direct_answer",
+                    "derived_from": command,
+                    "timestamp": datetime.now().timestamp(),
+                    "priority": 10
+                }
+                self.memory_manager.add(content=date_memory, metadata=date_metadata)
+
             if memory_id:
                 print(f"{self.get_time()} Command output saved to memory (ID: {memory_id})")
         except Exception as e:
             print(f"{self.get_time()} Error saving command output to memory: {e}")
+    # def _save_command_output_to_memory(self, command: str, output: str):
+    #     """Save command output to memory for future reference."""
+    #     if not self.enable_memory or not output:
+    #         return
+
+    #     try:
+    #         # Detect content type
+    #         content_type = "tabular" if '\t' in output or re.search(r'\S\s{2,}\S', output) else "text"
+
+    #         # Create metadata
+    #         metadata = {
+    #             "source": "command_output",
+    #             "command": command,
+    #             "timestamp": datetime.now().timestamp(),
+    #             "content_type": content_type
+    #         }
+
+    #         # Add to memory
+    #         memory_id = self.memory_manager.add(
+    #             content=output,
+    #             metadata=metadata
+    #         )
+
+    #         if memory_id:
+    #             print(f"{self.get_time()} Command output saved to memory (ID: {memory_id})")
+    #     except Exception as e:
+    #         print(f"{self.get_time()} Error saving command output to memory: {e}")
 
     def get_time(self) -> str:
         """Get formatted timestamp for logging."""
@@ -541,7 +602,6 @@ class MemoryEnhancedChat:
 
             # Pass memory results to response filter if provided
             if self.response_filter and hasattr(self.response_filter, 'user_context'):
-                print(f"{self.get_time()} having some retrieved memories.", len(retrieved_memories))
                 self.response_filter.user_context['memory_details'] = retrieved_memories
 
                 # Log memory retrieval for debugging
@@ -552,8 +612,30 @@ class MemoryEnhancedChat:
         # Setup streaming
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
-        response = "";
         tokens_received = 0
+        response = ""
+
+        fallback_shown = False
+
+        # Apply chat template
+        prompt = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+
+        # Tokenize prompt
+        try:
+            tokenized = self._safe_tokenize(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                padding=True
+            )
+            input_ids = tokenized['input_ids'].to(self.device)
+        except Exception as e:
+            print(f"{self.get_time()} Error encoding prompt: {e}")
+            return "Error preparing response."
 
         try:
             tty.setcbreak(fd)
@@ -562,25 +644,14 @@ class MemoryEnhancedChat:
             heatmap = EnhancedHeatmap(self.tokenizer, use_background=False, window_size=3)
             token_confidences = []
 
-            # Apply chat template
-            prompt = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
+            # INTEGRATION: Initialize TokenBuffer with tokenizer - SIMPLIFIED VERSION
+            token_buffer = TokenBuffer(self.tokenizer)
 
-            # Tokenize prompt
-            try:
-                tokenized = self._safe_tokenize(
-                    prompt,
-                    return_tensors="pt",
-                    truncation=True,
-                    padding=True
-                )
-                input_ids = tokenized['input_ids'].to(self.device)
-            except Exception as e:
-                print(f"{self.get_time()} Error encoding prompt: {e}")
-                return "Error preparing response."
+            # Separate display buffer for ANSI-colored output
+            display_buffer = ""
+
+            # Initialize MCP buffer
+            mcp_buffer = ""
 
             # Set up streamer
             streamer = TextIteratorStreamer(
@@ -605,26 +676,27 @@ class MemoryEnhancedChat:
             thread.daemon = True
             thread.start()
 
-            # Initialize response tracking
-            complete_response = ""
-            token_buffer = ""
-            mcp_buffer = ""
-
             # Settings for token display
             last_print_time = time.time()
             force_display_time = 0.05  # 50ms max wait
             max_buffer_size = 16
+
+            # OPTIMIZATION: Precompile stop sequence detection regexes
             stop_sequences = ["<|user|>", "<|assistant|>"]
+            stop_regexes = [re.compile(re.escape(seq)) for seq in stop_sequences]
 
             # Variables to track streaming state
-            # tokens_received = 0
             low_confidence_detected = False
+            ignore_fallback_answer = False
+
+            # OPTIMIZATION: Adaptive pattern detection intervals
+            pattern_check_interval = 20
+            next_pattern_check = 40
+
+
 
             # Print assistant marker
             print(f"{self.get_time()} Assistant: \n", end='', flush=True)
-
-            # ignore fallbacks
-            ingore_fallback_answer = False
 
             # Streaming loop
             while True:
@@ -647,11 +719,11 @@ class MemoryEnhancedChat:
 
                 tokens_received += 1
 
+                # INTEGRATION: Add token to TokenBuffer
+                token_buffer.add_token(token)
+
                 # Process token for MCP
                 display_token, mcp_buffer = self.mcp_handler.process_streaming_token(token, mcp_buffer)
-
-                # Add token to response
-                complete_response += token
 
                 # Get confidence for latest token
                 if self.confidence_metrics.token_probabilities:
@@ -662,85 +734,132 @@ class MemoryEnhancedChat:
                     latest_confidence = 0.8
                     token_confidences.append(latest_confidence)
 
-                # Check confidence to possibly stop generation
+                # Check confidence to possibly stop generation - ONLY IF NO FALLBACK YET
                 if (self.response_filter is not None and
                     not low_confidence_detected and
+                    not fallback_shown and
                     tokens_received >= 10):  # Check after reasonable context
 
                     # Get current metrics
                     current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
 
                     # Should we show fallback instead of continuing?
-                    if self.response_filter.should_stream_fallback(current_metrics, user_query, complete_response, tokens_received):
-                        # Set flag to avoid checking again
+                    if self.response_filter.should_stream_fallback(
+                        current_metrics,
+                        user_query,
+                        token_buffer.get_text(),
+                        tokens_received
+                    ):
+                        # Set flags to avoid checking again
                         low_confidence_detected = True
-                        ingore_fallback_answer = True
+                        ignore_fallback_answer = True
+                        fallback_shown = True
 
                         # Stop generation
                         self.stop_event.set()
 
-                        # Get fallback message
+                        # FIXED: Clear the display buffer before showing fallback
+                        display_buffer = ""
+
+                        # FIXED: Get fallback message and show it
                         fallback = self.response_filter.get_streamable_fallback(user_query)
                         print(fallback, end="", flush=True)
 
-                        # Update complete response
-                        # complete_response = fallback
+                        # FIXED: Clear token_buffer and replace with fallback for final response
+                        token_buffer.clear()
+                        for c in fallback:
+                            token_buffer.add_token(c)
+
                         break
 
-                if tokens_received % 20 == 0 and tokens_received > 40:  # Check every 20 tokens after an initial buffer
-                    pattern_results = self.response_filter.detect_repetitive_patterns(complete_response)
+                # Check for pattern detection at adaptive intervals - ONLY IF NO FALLBACK YET
+                if tokens_received >= next_pattern_check and not fallback_shown:
+                    pattern_results = self.response_filter.detect_repetitive_patterns(token_buffer.get_text())
                     if pattern_results['has_repetitive_patterns']:
-                        ingore_fallback_answer = True
+                        # Set flags
+                        ignore_fallback_answer = True
+                        fallback_shown = True
 
-                        # Stop generation if we detect garbage patterns
+                        # Stop generation
                         self.stop_event.set()
+
+                        # FIXED: Clear the display buffer before showing fallback
+                        display_buffer = ""
+
+                        # Get fallback message
                         fallback = self.response_filter.get_streamable_fallback(
-                            user_query, details=pattern_results)
+                            user_query, reason="repetitive_pattern", details=pattern_results)
                         print(fallback, end="", flush=True)
-                        # complete_response = fallback
+
+                        # FIXED: Clear token_buffer and replace with fallback for final response
+                        token_buffer.clear()
+                        for c in fallback:
+                            token_buffer.add_token(c)
+
                         break
 
-                # Only add displayable tokens to the buffer
-                if display_token and not low_confidence_detected:
+                    # OPTIMIZATION: Adaptive backoff for pattern checking
+                    pattern_check_interval = min(pattern_check_interval * 2, 100)
+                    next_pattern_check = tokens_received + pattern_check_interval
+
+                    # OPTIMIZATION: Explicit garbage collection after pattern checking
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                # Only add displayable tokens to the display buffer if no fallback shown
+                if display_token and not fallback_shown:
                     if show_confidence:
                         colored_token = heatmap.colorize_streaming_token(
                             display_token, latest_confidence)
-                        token_buffer += colored_token
+                        display_buffer += colored_token
                     else:
                         # Normal display without colorization
-                        token_buffer += display_token
+                        display_buffer += display_token
 
                 # Check timing
                 current_time = time.time()
                 time_since_print = current_time - last_print_time
 
                 # Print buffer when it's full or enough time has passed
-                if (len(token_buffer) >= max_buffer_size or
-                    time_since_print >= force_display_time) and token_buffer:
-                    print(token_buffer, end="", flush=True)
-                    token_buffer = ""
+                if (len(display_buffer) >= max_buffer_size or
+                    time_since_print >= force_display_time) and display_buffer:
+                    print(display_buffer, end="", flush=True)
+                    display_buffer = ""
                     last_print_time = current_time
 
-                # Check for stop sequences
-                if len(token_buffer) > 5:
-                    for stop_seq in stop_sequences:
-                        if stop_seq in token_buffer:
-                            token_buffer = token_buffer.split(stop_seq)[0]
-                            if token_buffer:
-                                print(token_buffer, end="", flush=True)
-                            complete_response = complete_response.split(stop_seq)[0]
+                # Check for stop sequences in the buffer
+                for regex in stop_regexes:
+                    if regex.search(display_buffer):
+                        display_buffer = regex.split(display_buffer)[0]
+                        if display_buffer:
+                            print(display_buffer, end="", flush=True)
+                            display_buffer = ""
 
-                            # Make sure we have confidence metrics
-                            self._ensure_confidence_metrics(10)
+                        # Also need to truncate the token buffer
+                        full_text = token_buffer.get_text()
+                        for seq in stop_sequences:
+                            if seq in full_text:
+                                # Need to rebuild token_buffer with truncated content
+                                truncated_text = full_text.split(seq)[0]
+                                token_buffer = TokenBuffer(self.tokenizer)
+                                for char in truncated_text:
+                                    token_buffer.add_token(char)
+                                break
 
-                            # complete_response = self.mcp_handler.finalize_streaming(complete_response) ## was return [...]
+                # OPTIMIZATION: Periodic memory cleanup during generation
+                if tokens_received % 100 == 0:
+                    self.resource_manager.clear_cache()
 
-            # Handle any remaining tokens
-            if token_buffer:
-                print(token_buffer, end="", flush=True)
+            # Handle any remaining display buffer
+            if display_buffer and not fallback_shown:
+                print(display_buffer, end="", flush=True)
 
             # Ensure confidence metrics exist
-            self._ensure_confidence_metrics(len(complete_response.split()))
+            self._ensure_confidence_metrics(len(token_buffer))
+
+            # INTEGRATION: Get full text from TokenBuffer
+            complete_response = token_buffer.get_text()
 
             # Finalize the response
             response = self.mcp_handler.finalize_streaming(complete_response)
@@ -748,8 +867,8 @@ class MemoryEnhancedChat:
             # Post-process the response
             response = self._post_process_response(response)
 
-            # Apply response filtering if provided and not already handled during streaming
-            if self.response_filter is not None and not low_confidence_detected:
+            # Apply response filtering if not already handled during streaming
+            if self.response_filter is not None and not fallback_shown:
                 current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
                 # Update the user context with information about this exchange
                 if hasattr(self.response_filter, 'update_user_context'):
@@ -764,7 +883,7 @@ class MemoryEnhancedChat:
                 )
 
             # Save to memory if enabled
-            if memory_enabled and user_query and response and not ingore_fallback_answer:
+            if memory_enabled and user_query and response and not ignore_fallback_answer:
                 print("\n")
                 self._save_to_memory(user_query, response)
 
@@ -783,11 +902,11 @@ class MemoryEnhancedChat:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
             # Show heatmap legend if enabled
-            if show_confidence and not self.stop_event.is_set() and not low_confidence_detected:
+            if show_confidence and not self.stop_event.is_set() and not fallback_shown:
                 # Calculate token usage
                 prompt_tokens = len(tokenized['input_ids'][0])
-                response_tokens = len(complete_response.split())
-                total_tokens = prompt_tokens + response_tokens
+                response_tokens_count = len(token_buffer) if 'token_buffer' in locals() else 0
+                total_tokens = prompt_tokens + response_tokens_count
 
                 # Get max context window from tokenizer
                 max_tokens = self.tokenizer.model_max_length
@@ -807,8 +926,11 @@ class MemoryEnhancedChat:
                 indicator = self.response_filter.get_confidence_indicator(metrics)
                 print(indicator)
 
-            # Clean up resources
+            # OPTIMIZATION: More aggressive cleanup
             self.resource_manager.clear_cache()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def _format_tabular_memory(self, content: str) -> str:
         """Format tabular data for better readability and comprehension."""
@@ -835,59 +957,81 @@ class MemoryEnhancedChat:
         return formatted
 
     def _format_combined_memories(self, memories: List[Dict[str, Any]], query: str) -> str:
-        """Format combined memories with proper context separation."""
+        """Format combined memories with better visibility and explicit instructions."""
 
-        # Separate different types of memories
-        command_memories = []
-        conversation_memories = []
-        direct_answers = []
+        output = "MEMORY CONTEXT (USE THIS INFORMATION TO ANSWER THE QUERY):\n"
 
-        for memory in memories:
-            metadata = memory.get("metadata", {})
-            source_hint = metadata.get("source_hint", "")
-
-            if metadata.get("source") == "command_output":
-                command_memories.append(memory)
-            elif source_hint == "direct_answer":
-                direct_answers.append(memory)
-            elif source_hint in ["conversation", "qa_pair"]:
-                conversation_memories.append(memory)
-
-        # Build formatted output
-        output = "MEMORY CONTEXT:\n"
-
-        # Add command outputs first
-        if command_memories:
-            output += "\nCOMMAND OUTPUT INFORMATION:\n"
-            for memory in command_memories:
+        # Make command outputs more visible
+        if any(memory.get("metadata", {}).get("source") == "command_output" for memory in memories):
+            output += "\nCOMMAND OUTPUT (THIS IS CURRENT REAL-TIME DATA - USE THIS DIRECTLY):\n"
+            for memory in [m for m in memories if m.get("metadata", {}).get("source") == "command_output"]:
                 command = memory.get("metadata", {}).get("command", "unknown command")
                 content = memory.get("content", "").strip()
-                output += f"Output from command '{command}':\n"
-                indented_content = "\n".join(f"  {line}" for line in content.split("\n"))
-                output += f"{indented_content}\n\n"
+                output += f"Output from command '{command}':\n{content}\n\n"
 
-        # Add direct answers
-        if direct_answers:
-            output += "\nRELEVANT INFORMATION:\n"
-            for memory in direct_answers:
-                content = memory.get("content", "").strip()
-                similarity = memory.get("similarity", 0)
-                if not content.startswith("Q:") and not content.startswith("- Q:"):
-                    output += f"- [{similarity:.2f}] {content}\n"
-
-        # Add conversation context only if specifically requested
-        if conversation_memories and len(query.split()) > 10:  # Only for longer queries
-            output += "\nPREVIOUS CONVERSATION CONTEXT:\n"
-            for memory in conversation_memories:
-                content = memory.get("content", "").strip()
-                # Skip if it's in the awkward Q&A format
-                if not content.startswith("Q:") and not content.startswith("- Q:"):
-                    output += f"- {content}\n"
-
-        # Add guidance
-        output += "\nUse the above information to help answer the query if relevant. Do not repeat the information verbatim.\n"
+        # More explicit instructions for the model
+        output += "\nINSTRUCTIONS FOR USING MEMORY:\n"
+        output += "1. The information above is FACTUAL and CURRENT.\n"
+        output += "2. You MUST use this information to answer the query directly.\n"
+        output += "3. If date or time information is present, use it explicitly rather than saying you don't know.\n"
+        output += "4. Command outputs represent real-time data - treat them as current and accurate.\n\n"
 
         return output
+
+    # def _format_combined_memories(self, memories: List[Dict[str, Any]], query: str) -> str:
+    #     """Format combined memories with proper context separation."""
+
+    #     # Separate different types of memories
+    #     command_memories = []
+    #     conversation_memories = []
+    #     direct_answers = []
+
+    #     for memory in memories:
+    #         metadata = memory.get("metadata", {})
+    #         source_hint = metadata.get("source_hint", "")
+
+    #         if metadata.get("source") == "command_output":
+    #             command_memories.append(memory)
+    #         elif source_hint == "direct_answer":
+    #             direct_answers.append(memory)
+    #         elif source_hint in ["conversation", "qa_pair"]:
+    #             conversation_memories.append(memory)
+
+    #     # Build formatted output
+    #     output = "MEMORY CONTEXT:\n"
+
+    #     # Add command outputs first
+    #     if command_memories:
+    #         output += "\nCOMMAND OUTPUT INFORMATION:\n"
+    #         for memory in command_memories:
+    #             command = memory.get("metadata", {}).get("command", "unknown command")
+    #             content = memory.get("content", "").strip()
+    #             output += f"Output from command '{command}':\n"
+    #             indented_content = "\n".join(f"  {line}" for line in content.split("\n"))
+    #             output += f"{indented_content}\n\n"
+
+    #     # Add direct answers
+    #     if direct_answers:
+    #         output += "\nRELEVANT INFORMATION:\n"
+    #         for memory in direct_answers:
+    #             content = memory.get("content", "").strip()
+    #             similarity = memory.get("similarity", 0)
+    #             if not content.startswith("Q:") and not content.startswith("- Q:"):
+    #                 output += f"- [{similarity:.2f}] {content}\n"
+
+    #     # Add conversation context only if specifically requested
+    #     if conversation_memories and len(query.split()) > 10:  # Only for longer queries
+    #         output += "\nPREVIOUS CONVERSATION CONTEXT:\n"
+    #         for memory in conversation_memories:
+    #             content = memory.get("content", "").strip()
+    #             # Skip if it's in the awkward Q&A format
+    #             if not content.startswith("Q:") and not content.startswith("- Q:"):
+    #                 output += f"- {content}\n"
+
+    #     # Add guidance
+    #     output += "\nUse the above information to help answer the query if relevant. Do not repeat the information verbatim.\n"
+
+    #     return output
 
     def _integrate_memory(self, messages: List[Dict[str, str]], query: str) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]]]:
         """
@@ -963,33 +1107,51 @@ class MemoryEnhancedChat:
 
             # Format memories for context if we have any
             if combined_memories:
-                # Use custom formatter for combined memories
                 memory_text = self._format_combined_memories(combined_memories, query)
-                memory_text += f"\n\nNote: Query classified as {domain} domain."
 
-                # Create memory-enhanced messages
+                # Create memory-enhanced messages - but with a crucial change
                 memory_enhanced_messages = messages.copy()
 
-                # Extract system message
-                original_system = messages[0]["content"]
+                # Instead of modifying system message, add memory as a "memory" role message
+                # right before the user query
+                last_user_idx = next((i for i in reversed(range(len(messages)))
+                                     if messages[i]["role"] == "user"), None)
 
-                # Remove existing memory context if present
-                if "MEMORY CONTEXT:" in original_system:
-                    system_parts = original_system.split("MEMORY CONTEXT:")
-                    system_content = system_parts[0].strip()
-                else:
-                    system_content = original_system
-
-                # Add memory context
-                system_with_memory = f"{system_content}\n\n{memory_text}"
-
-                # Update system message
-                memory_enhanced_messages[0]["content"] = system_with_memory
-
-                # Update stats
-                self.memory_stats["retrievals"] += 1
+                if last_user_idx is not None:
+                    memory_enhanced_messages.insert(last_user_idx, {
+                        "role": "memory",  # Use a custom role
+                        "content": memory_text
+                    })
 
                 return memory_enhanced_messages, combined_memories
+            # if combined_memories:
+            #     # Use custom formatter for combined memories
+            #     memory_text = self._format_combined_memories(combined_memories, query)
+            #     memory_text += f"\n\nNote: Query classified as {domain} domain."
+
+            #     # Create memory-enhanced messages
+            #     memory_enhanced_messages = messages.copy()
+
+            #     # Extract system message
+            #     original_system = messages[0]["content"]
+
+            #     # Remove existing memory context if present
+            #     if "MEMORY CONTEXT:" in original_system:
+            #         system_parts = original_system.split("MEMORY CONTEXT:")
+            #         system_content = system_parts[0].strip()
+            #     else:
+            #         system_content = original_system
+
+            #     # Add memory context
+            #     system_with_memory = f"{system_content}\n\n{memory_text}"
+
+            #     # Update system message
+            #     memory_enhanced_messages[0]["content"] = system_with_memory
+
+            #     # Update stats
+            #     self.memory_stats["retrievals"] += 1
+
+            #     return memory_enhanced_messages, combined_memories
 
             return messages, []
 
@@ -1149,7 +1311,7 @@ class MemoryEnhancedChat:
 
     def _generate_with_streaming(self, input_ids, streamer, generation_config, use_draft_model):
         """
-        Generate a response with streaming output.
+        Generate a response with streaming output - optimized version.
 
         Args:
             input_ids: Input token IDs
@@ -1158,6 +1320,10 @@ class MemoryEnhancedChat:
             use_draft_model: Whether to use draft model
         """
         try:
+            # OPTIMIZATION: Clear CUDA cache before generation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             # Reset confidence metrics
             if hasattr(self.confidence_metrics, 'reset'):
                 self.confidence_metrics.reset()
@@ -1165,6 +1331,8 @@ class MemoryEnhancedChat:
             # Setup logits processor for confidence tracking
             from transformers import LogitsProcessorList
 
+            # OPTIMIZATION: Create a copy of generation_config
+            # to avoid modifying the original
             streaming_config = {k: v for k, v in generation_config.items()
                                if k not in ['max_new_tokens', 'output_scores', 'return_dict_in_generate']}
 
@@ -1176,25 +1344,62 @@ class MemoryEnhancedChat:
             metrics_processor = TokenProbabilityCaptureProcessor(self.confidence_metrics)
             streaming_config['logits_processor'].append(metrics_processor)
 
-            # Use speculative decoding if enabled
-            if use_draft_model and self.draft_model is not None:
-                # Generate with speculative decoding
-                self.spec_decoder.generate_with_speculative_decoding(
-                    input_ids=input_ids,
-                    streamer=streamer,
-                    max_new_tokens=generation_config.get('max_new_tokens', 128),
-                    generation_config=streaming_config,
-                    stop_event=self.stop_event
-                )
+            # OPTIMIZATION: Check if input sequence is very long
+            input_length = input_ids.shape[1]
+            if input_length > 1024:
+                # For very long inputs, reduce max_new_tokens to avoid OOM
+                max_tokens = generation_config.get('max_new_tokens', 128)
+                adjusted_max_tokens = min(max_tokens, max(30, 2048 - input_length))
+
+                if adjusted_max_tokens < max_tokens:
+                    print(f"{self.get_time()} Reducing max tokens from {max_tokens} to {adjusted_max_tokens} due to long input")
+
+                # Create a modified config with adjusted max_tokens
+                if use_draft_model and self.draft_model is not None:
+                    self.spec_decoder.generate_with_speculative_decoding(
+                        input_ids=input_ids,
+                        streamer=streamer,
+                        max_new_tokens=adjusted_max_tokens,
+                        generation_config=streaming_config,
+                        stop_event=self.stop_event
+                    )
+                else:
+                    self.model.generate(
+                        input_ids=input_ids,
+                        attention_mask=torch.ones_like(input_ids),
+                        streamer=streamer,
+                        max_new_tokens=adjusted_max_tokens,
+                        **streaming_config
+                    )
             else:
-                # Use standard generation
-                self.model.generate(
-                    input_ids=input_ids,
-                    attention_mask=torch.ones_like(input_ids),
-                    streamer=streamer,
-                    max_new_tokens=generation_config.get('max_new_tokens', 128),
-                    **streaming_config
-                )
+                # Use standard generation with original max_tokens
+                # Use speculative decoding if enabled
+                if use_draft_model and self.draft_model is not None:
+                    # Generate with speculative decoding
+                    self.spec_decoder.generate_with_speculative_decoding(
+                        input_ids=input_ids,
+                        streamer=streamer,
+                        max_new_tokens=generation_config.get('max_new_tokens', 128),
+                        generation_config=streaming_config,
+                        stop_event=self.stop_event
+                    )
+                else:
+                    # OPTIMIZATION: Set use_cache=True for better performance
+                    if 'use_cache' not in streaming_config:
+                        streaming_config['use_cache'] = True
+
+                    # Use standard generation
+                    self.model.generate(
+                        input_ids=input_ids,
+                        attention_mask=torch.ones_like(input_ids),
+                        streamer=streamer,
+                        max_new_tokens=generation_config.get('max_new_tokens', 128),
+                        **streaming_config
+                    )
+
+            # OPTIMIZATION: Clear cache after generation is complete
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         except Exception as e:
             print(f"{self.get_time()} Error in generation thread: {str(e)}")
@@ -1203,6 +1408,10 @@ class MemoryEnhancedChat:
                 streamer.end()
             except Exception:
                 pass
+
+            # OPTIMIZATION: Ensure memory is cleaned up on error
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def _get_domain_config(self, query, max_new_tokens=128, temperature=0.7):
         """Enhanced domain configuration with better error handling."""
@@ -1568,7 +1777,7 @@ def main():
     print("\n" + "="*50)
     print("Memory-Enhanced Chat")
     print("="*50)
-    print("Type 'exit' to end the conversation")
+    print("Type 'exit' or 'q' to end the conversation")
     print("Special commands:")
     print("  !system: [message] - Change the system message")
     print("  !toggle-memory - Toggle memory system on/off")
