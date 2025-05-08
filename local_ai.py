@@ -608,6 +608,7 @@ class MemoryEnhancedChat:
 
         # Create memory-enhanced messages if memory is enabled
         memory_enabled = self.enable_memory if enable_memory is None else enable_memory
+        print (f"{self.get_time()} IS MEMORY ENABLED?", memory_enabled)
         if memory_enabled and user_query:
             memory_enhanced_messages, retrieved_memories = self._integrate_memory(messages, user_query)
             messages = memory_enhanced_messages
@@ -635,6 +636,8 @@ class MemoryEnhancedChat:
             tokenize=False,
             add_generation_prompt=True
         )
+
+        print(f"\n============ DEBUG PROMPT ============\n{prompt}\n====================================\n")
 
         # Tokenize prompt
         try:
@@ -971,18 +974,25 @@ class MemoryEnhancedChat:
     def _format_combined_memories(self, memories: List[Dict[str, Any]], query: str) -> str:
         """Format combined memories with better visibility and explicit instructions."""
 
-        output = "MEMORY CONTEXT (USE THIS INFORMATION TO ANSWER THE QUERY):\n"
+        output = "MEMORY CONTEXT:\n\n"
 
-        # Make command outputs more visible
-        if any(memory.get("metadata", {}).get("source") == "command_output" for memory in memories):
-            output += "\nCOMMAND OUTPUT (THIS IS CURRENT REAL-TIME DATA - USE THIS DIRECTLY):\n"
-            for memory in [m for m in memories if m.get("metadata", {}).get("source") == "command_output"]:
-                command = memory.get("metadata", {}).get("command", "unknown command")
-                content = memory.get("content", "").strip()
-                output += f"Output from command '{command}':\n{content}\n\n"
+        # First, include direct answers from qa_pair sources (highest priority)
+        qa_memories = [m for m in memories if m.get("metadata", {}).get("source") == "qa_pair"]
+        if qa_memories:
+            output += "DIRECT ANSWERS TO YOUR QUESTION:\n"
+            for memory in qa_memories:
+                output += f"- {memory.get('content')}\n\n"
+
+        # Then add factual statements
+        fact_memories = [m for m in memories if m.get("metadata", {}).get("source") == "fact"]
+        if fact_memories:
+            output += "RELEVANT FACTS:\n"
+            for memory in fact_memories:
+                output += f"- {memory.get('content')}\n\n"
 
         # More explicit instructions for the model
         output += "\nINSTRUCTIONS FOR USING MEMORY:\n"
+        output += "0. Use the information above to answer the user's question.\n"
         output += "1. The information above is FACTUAL and CURRENT.\n"
         output += "2. You MUST use this information to answer the query directly.\n"
         output += "3. If date or time information is present, use it explicitly rather than saying you don't know.\n"
@@ -1159,34 +1169,6 @@ class MemoryEnhancedChat:
                         print("-----------------------------------")
 
                 return memory_enhanced_messages, combined_memories
-            # if combined_memories:
-            #     # Use custom formatter for combined memories
-            #     memory_text = self._format_combined_memories(combined_memories, query)
-            #     memory_text += f"\n\nNote: Query classified as {domain} domain."
-
-            #     # Create memory-enhanced messages
-            #     memory_enhanced_messages = messages.copy()
-
-            #     # Extract system message
-            #     original_system = messages[0]["content"]
-
-            #     # Remove existing memory context if present
-            #     if "MEMORY CONTEXT:" in original_system:
-            #         system_parts = original_system.split("MEMORY CONTEXT:")
-            #         system_content = system_parts[0].strip()
-            #     else:
-            #         system_content = original_system
-
-            #     # Add memory context
-            #     system_with_memory = f"{system_content}\n\n{memory_text}"
-
-            #     # Update system message
-            #     memory_enhanced_messages[0]["content"] = system_with_memory
-
-            #     # Update stats
-            #     self.memory_stats["retrievals"] += 1
-
-            #     return memory_enhanced_messages, combined_memories
 
             return messages, []
 
