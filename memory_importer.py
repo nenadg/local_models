@@ -18,7 +18,7 @@ import numpy as np
 import time
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-
+from question_classifier import QuestionClassifier
 # Import necessary modules from the TinyLlama Chat project
 try:
     from unified_memory import MemoryManager
@@ -28,6 +28,15 @@ except ImportError as e:
     print("Please ensure you're running this script from the TinyLlama Chat project directory")
     print("or that the project modules are in your Python path.")
     sys.exit(1)
+
+from memory_utils import (
+    classify_content,
+    generate_memory_metadata,
+    format_content_for_storage,
+    save_to_memory,
+    format_memories_by_category,
+    extract_key_statements
+)
 
 class MemoryImporter:
     """
@@ -54,7 +63,8 @@ class MemoryImporter:
         self.memory_dir = memory_dir
         self.batch_size = batch_size
         self.enable_enhanced_embeddings = enable_enhanced_embeddings
-        
+        self.question_classifier = QuestionClassifier()
+
         # Set up device
         if device:
             self.device = device
@@ -215,63 +225,10 @@ class MemoryImporter:
             batch_function=generate_embeddings_batch
         )
     
-    def _classify_content(self, text: str) -> Dict[str, str]:
-        """
-        Classify the content type to add appropriate metadata.
-
-        Args:
-            text: Text content to classify
-
-        Returns:
-            Metadata dictionary with classification
-        """
-        # Base metadata with improved classification
-        metadata = {
-            "source": "fact",              # Changed from "imported_content" to "fact"
-            "source_hint": "factual",      # Clear indication this is factual information
-            "type": "fact",                # Type classification for filtering
-            "timestamp": datetime.now().timestamp()
-        }
-
-        # Extract topic categories to improve retrieval
-        topics = self._extract_topics(text)
-        if topics:
-            metadata["topics"] = topics
-        
-        return metadata
-    
-    def _extract_topics(self, text: str) -> List[str]:
-        """
-        Extract topic categories from the text to improve retrieval.
-        """
-        topics = []
-
-        # Animal facts
-        if any(animal in text.lower() for animal in ["animal", "octopus", "flamingo", "shrimp", "snail", "cat", "sheep", "bee", "unicorn", "cow", "bison", "whale", "sloth"]):
-            topics.append("animals")
-
-        # Food facts
-        if any(food in text.lower() for food in ["food", "banana", "honey", "orange", "berry", "chocolate"]):
-            topics.append("food")
-
-        # Invention/inventor facts
-        if "inventor" in text.lower() or "invention" in text.lower():
-            topics.append("inventions")
-
-            # Extract the specific invention mentioned
-            invention_match = re.search(r'the ([a-zA-Z\s-]+),', text)
-            if invention_match:
-                topics.append(f"invention:{invention_match.group(1).strip().lower()}")
-
-        # Country/geography facts
-        if any(place in text.lower() for place in ["country", "national", "scotland", "antarctica", "venus"]):
-            topics.append("geography")
-
-        return topics
-
     def import_file(self, file_path: str) -> Dict[str, Any]:
         """
-        Import a file into memory with enhanced processing for facts.
+        Enhanced method to import a file into memory with better classification.
+        For use in MemoryImporter.
 
         Args:
             file_path: Path to the file to import
@@ -311,36 +268,42 @@ class MemoryImporter:
 
             print(f"{self.get_time()} Processing batch {batch_idx//self.batch_size + 1}/{(len(lines) + self.batch_size - 1)//self.batch_size}")
 
-            # Add each fact to memory
+            # Add each item to memory
             for item in batch:
                 try:
-                    # Format fact for better retrieval
-                    formatted_fact = self._format_for_retrieval(item)
+                    # Classify content
+                    classification = classify_content(item, self.question_classifier)
 
-                    # Classify content and create metadata
-                    metadata = self._classify_content(formatted_fact)
+                    # Format fact for better retrieval
+                    formatted_fact = format_content_for_storage(item, classification)
+
+                    # Generate metadata
+                    metadata = generate_memory_metadata(formatted_fact, classification, source="imported_content")
 
                     # Add to memory
-                    item_id = self.memory_manager.add(
+                    memory_id = self.memory_manager.add(
                         content=formatted_fact,
                         metadata=metadata
                     )
 
-                    # Also add "The answer to [question] is [fact]" format for common question patterns
-                    question_formats = self._generate_question_formats(formatted_fact)
-                    for question_format in question_formats:
-                        qa_metadata = metadata.copy()
-                        qa_metadata["source"] = "qa_pair"
-                        qa_metadata["source_hint"] = "answer"
-                        qa_metadata["derived_from"] = item_id
+                    # For declarative content, also create question-answer format
+                    if classification.get('main_category') in ['declarative', 'factual']:
+                        qa_formats = self.generate_qa_formats(formatted_fact)
+                        for qa_format in qa_formats:
+                            qa_metadata = metadata.copy()
+                            qa_metadata["source"] = "qa_pair"
+                            qa_metadata["source_hint"] = "answer"
+                            qa_metadata["derived_from"] = memory_id
 
-                        self.memory_manager.add(
-                            content=question_format,
-                            metadata=qa_metadata
-                        )
+                            self.memory_manager.add(
+                                content=qa_format,
+                                metadata=qa_metadata
+                            )
 
-                    if item_id:
-                        self.stats["items_added"] += 1 + len(question_formats)
+                            self.stats["items_added"] += 1
+
+                    if memory_id:
+                        self.stats["items_added"] += 1
                     else:
                         self.stats["items_skipped"] += 1
                 
@@ -374,44 +337,63 @@ class MemoryImporter:
         
         return self.stats
 
-    def _format_for_retrieval(self, fact: str) -> str:
-        """Format a fact to improve retrieval chances."""
-        # Ensure it's properly formatted as a standalone statement
-        formatted = fact.strip()
-        if not formatted.endswith('.') and not formatted.endswith('?') and not formatted.endswith('!'):
-            formatted += '.'
+    def generate_qa_formats(self, fact: str) -> List[str]:
+        """
+        Generate question-answer formats for a factual statement.
 
-        return formatted
+        Args:
+            fact: Factual statement
 
-    def _generate_question_formats(self, fact: str) -> List[str]:
-        """Generate possible question-answer formats for a fact."""
-        # Lower case for pattern matching
-        lower_fact = fact.lower()
-        formats = []
+        Returns:
+            List of QA format strings
+        """
+        qa_formats = []
 
-        # Extract animal information
-        if "octopus" in lower_fact and "hearts" in lower_fact:
-            formats.append(f"An octopus has three hearts. The answer to 'How many hearts does an octopus have?' is three.")
-            formats.append(f"The answer to 'What animal has three hearts?' is the octopus.")
+        # Clean the fact for processing
+        clean_fact = fact.strip()
+        if clean_fact.endswith('.'):
+            clean_fact = clean_fact[:-1]
 
-        # Extract national animal information
-        if "unicorn" in lower_fact and "scotland" in lower_fact:
-            formats.append(f"The national animal of Scotland is the unicorn. If someone asks 'What is the national animal of Scotland?', the answer is unicorn.")
+        # For "X is Y" patterns
+        match = re.match(r'(.+?)\s+(?:is|are|was|were)\s+(.+)', clean_fact)
+        if match:
+            subject = match.group(1).strip()
+            predicate = match.group(2).strip()
 
-        # Extract food preservation information
-        if "honey" in lower_fact and "spoil" in lower_fact:
-            formats.append(f"Honey never spoils. The answer to 'Can honey spoil?' is no.")
+            # Create QA format
+            qa_formats.append(f"Q: What is {subject}?\nA: {subject} is {predicate}.")
 
-        # For inventor facts, generate specific formats
-        if "inventor" in lower_fact:
-            # Try to extract the invention and inventor
-            match = re.search(r'inventor of the ([^,]+), ([^,]+)', lower_fact)
-            if match:
-                invention = match.group(1).strip()
-                inventor = match.group(2).strip()
-                formats.append(f"The inventor of the {invention} was {inventor}. If asked 'Who invented the {invention}?', the answer is {inventor}.")
+            # For location questions
+            if "located in" in predicate or "found in" in predicate:
+                qa_formats.append(f"Q: Where is {subject}?\nA: {subject} is {predicate}.")
 
-        return formats
+            # For definition questions
+            if "defined as" in predicate or "means" in predicate:
+                qa_formats.append(f"Q: Define {subject}?\nA: {subject} is {predicate}.")
+
+        # For statements about quantities
+        match = re.search(r'(.+?)\s+has\s+(\d+)\s+(.+)', clean_fact)
+        if match:
+            subject = match.group(1).strip()
+            number = match.group(2)
+            item = match.group(3).strip()
+
+            qa_formats.append(f"Q: How many {item} does {subject} have?\nA: {subject} has {number} {item}.")
+
+        # For statements about inventors/creators
+        match = re.search(r'(.+?)\s+(?:invented|created|discovered)\s+(.+)', clean_fact)
+        if match:
+            person = match.group(1).strip()
+            invention = match.group(2).strip()
+
+            qa_formats.append(f"Q: Who invented {invention}?\nA: {person} invented {invention}.")
+            qa_formats.append(f"Q: What did {person} invent?\nA: {person} invented {invention}.")
+
+        # If we couldn't generate specific formats, create a generic one
+        if not qa_formats:
+            qa_formats.append(f"Q: Tell me about {clean_fact.split()[0]}?\nA: {clean_fact}.")
+
+        return qa_formats
     
     def cleanup(self):
         """Release resources."""
