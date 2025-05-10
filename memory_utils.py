@@ -32,16 +32,18 @@ def classify_content(content: str, question_classifier=None) -> Dict[str, Any]:
     # Use question classifier if available
     if question_classifier:
         try:
-            category, confidence = question_classifier.classify(content)
+            category, confidence, subcategory, subcategory_confidence = question_classifier.classify(content)
             result['main_category'] = category
             result['confidence'] = confidence
-            
-            # Determine subcategory
-            if category in question_classifier.subcategories:
-                subcategory, subcategory_confidence = question_classifier.identify_subcategory(content, category)
-                if subcategory:
-                    result['subcategory'] = subcategory
-                    result['subcategory_confidence'] = subcategory_confidence
+            result['subcategory'] = subcategory
+            result['subcategory_confidence'] = subcategory_confidence
+            print("CLASSIFICATION", category, confidence, subcategory, subcategory_confidence)
+            # # Determine subcategory
+            # if category in question_classifier.subcategories:
+            #     subcategory, subcategory_confidence = question_classifier.identify_subcategory(content, category)
+            #     if subcategory:
+            #         result['subcategory'] = subcategory
+            #         result['subcategory_confidence'] = subcategory_confidence
         except Exception as e:
             print(f"Error classifying content: {e}")
     
@@ -65,23 +67,19 @@ def classify_content(content: str, question_classifier=None) -> Dict[str, Any]:
     
     return result
 
-def generate_memory_metadata(content: str, classification: Optional[Dict[str, Any]] = None, 
-                            source: str = "unknown") -> Dict[str, Any]:
+def generate_memory_metadata(content: str, classification: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Generate metadata for memory storage based on content classification.
     
     Args:
         content: Text content
         classification: Classification results or None
-        source: Source of the memory (e.g., "user_query", "command_output")
         
     Returns:
         Dictionary with metadata
     """
     # Default metadata
     metadata = {
-        "source": source,
-        "source_hint": source,  # Duplicate for backward compatibility
         "timestamp": datetime.now().timestamp(),
         "type": "unknown"
     }
@@ -89,7 +87,9 @@ def generate_memory_metadata(content: str, classification: Optional[Dict[str, An
     # Apply classification if available
     if classification:
         main_category = classification.get("main_category", "unknown")
+        subcategory = classification.get("subcategory", "unknown")
         metadata["main_category"] = main_category
+        metadata["subcategory"] = subcategory
         
         # Set type based on main category
         if main_category in ['declarative', 'factual', 'explicit']:
@@ -103,14 +103,8 @@ def generate_memory_metadata(content: str, classification: Optional[Dict[str, An
         elif main_category == 'contextual':
             metadata["type"] = "context"
         
-        # Add subcategory if available
-        if classification.get("subcategory"):
-            metadata["subcategory"] = classification["subcategory"]
-            metadata["source_hint"] = classification["subcategory"]  # For compatibility
-        else:
-            metadata["source_hint"] = main_category  # For compatibility
-        
         metadata["classification_confidence"] = classification.get("confidence", 0.5)
+        metadata["subcategory_confidence"] = classification.get("subcategory_confidence", 0.5)
     
     # Add content-based metadata
     # Length categorization
@@ -125,7 +119,8 @@ def generate_memory_metadata(content: str, classification: Optional[Dict[str, An
     # Content hash for identification
     content_hash = hashlib.md5(content.encode()).hexdigest()[:10]
     metadata["content_hash"] = content_hash
-    
+    metadata["timestamp"] = datetime.now().timestamp()
+
     # Extract topics based on keywords
     topics = extract_topics(content)
     if topics:
@@ -214,8 +209,7 @@ def format_content_for_storage(content: str, classification: Optional[Dict[str, 
     
     return formatted
 
-def save_to_memory(memory_manager, content: str, classification: Optional[Dict[str, Any]] = None, 
-                 source: str = "unknown", related_content: Optional[str] = None) -> Dict[str, Any]:
+def save_to_memory(memory_manager, content: str, classification: Optional[Dict[str, Any]] = None, related_content: Optional[str] = None) -> Dict[str, Any]:
     """
     Save content to memory with appropriate metadata.
     
@@ -223,7 +217,6 @@ def save_to_memory(memory_manager, content: str, classification: Optional[Dict[s
         memory_manager: MemoryManager instance
         content: Content to save
         classification: Classification results or None
-        source: Source of the memory
         related_content: Additional related content to save
         
     Returns:
@@ -244,53 +237,53 @@ def save_to_memory(memory_manager, content: str, classification: Optional[Dict[s
         formatted_content = format_content_for_storage(content, classification)
         
         # Generate metadata
-        metadata = generate_memory_metadata(formatted_content, classification, source)
+        metadata = generate_memory_metadata(formatted_content, classification)
         
+        print("CLASSIFICATION", formatted_content, metadata)
         # Add to memory
         memory_id = memory_manager.add(
             content=formatted_content,
             metadata=metadata
         )
         
-        if memory_id:
-            results["saved"] = True
-            results["memory_id"] = memory_id
-            results["metadata"] = metadata
+        # if memory_id:
+        #     results["saved"] = True
+        #     results["memory_id"] = memory_id
+        #     results["metadata"] = metadata
             
-            # Save related content if provided
-            if related_content and related_content.strip():
-                # Generate classification for related content
-                if classification and "question_classifier" in classification:
-                    related_classification = classify_content(
-                        related_content, 
-                        classification["question_classifier"]
-                    )
-                else:
-                    related_classification = None
+        #     # Save related content if provided
+        #     if related_content and related_content.strip():
+        #         # Generate classification for related content
+        #         if classification and "question_classifier" in classification:
+        #             related_classification = classify_content(
+        #                 related_content,
+        #                 classification["question_classifier"]
+        #             )
+        #         else:
+        #             related_classification = None
                 
-                # Create related metadata
-                related_metadata = generate_memory_metadata(
-                    related_content, 
-                    related_classification, 
-                    source
-                )
-                related_metadata["related_to"] = memory_id
+        #         # Create related metadata
+        #         related_metadata = generate_memory_metadata(
+        #             related_content,
+        #             related_classification
+        #         )
+        #         related_metadata["related_to"] = memory_id
                 
-                # Add to memory
-                related_id = memory_manager.add(
-                    content=related_content,
-                    metadata=related_metadata
-                )
+        #         # Add to memory
+        #         related_id = memory_manager.add(
+        #             content=related_content,
+        #             metadata=related_metadata
+        #         )
                 
-                if related_id:
-                    results["additional_ids"].append(related_id)
+        #         if related_id:
+        #             results["additional_ids"].append(related_id)
     
     except Exception as e:
         results["error"] = str(e)
     
     return results
 
-def format_memories_by_category(memories: List[Dict[str, Any]], main_category: str) -> str:
+def format_memories_by_category(memories: List[Dict[str, Any]], main_category: str, subcategory) -> str:
     """
     Format memories based on the main knowledge category.
     
@@ -303,7 +296,7 @@ def format_memories_by_category(memories: List[Dict[str, Any]], main_category: s
     """
     if not memories:
         return ""
-        
+
     output = "MEMORY CONTEXT:\n\n"
     
     # Group memories by category and subcategory
@@ -311,8 +304,8 @@ def format_memories_by_category(memories: List[Dict[str, Any]], main_category: s
     
     for memory in memories:
         metadata = memory.get("metadata", {})
-        mem_category = metadata.get("main_category", metadata.get("source_hint", "unknown"))
-        mem_subcategory = metadata.get("subcategory", "general")
+        mem_category = metadata.get("main_category", metadata.get("main_category", "unknown"))
+        mem_subcategory = metadata.get("subcategory", subcategory if subcategory else "general")
         
         if mem_category not in categorized:
             categorized[mem_category] = {}

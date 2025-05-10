@@ -450,8 +450,7 @@ class MemoryEnhancedChat:
                 save_to_memory(
                     memory_manager=self.memory_manager,
                     content=formatted_content,
-                    classification=classification,
-                    source="command_output"
+                    classification=classification
                 )
 
                 # Additional formats
@@ -465,8 +464,7 @@ class MemoryEnhancedChat:
                     save_to_memory(
                         memory_manager=self.memory_manager,
                         content=variation,
-                        classification=classification,
-                        source="command_output"
+                        classification=classification
                     )
 
                 # Log success
@@ -485,8 +483,7 @@ class MemoryEnhancedChat:
                 save_to_memory(
                     memory_manager=self.memory_manager,
                     content=formatted_content,
-                    classification=classification,
-                    source="command_output"
+                    classification=classification
                 )
 
                 print(f"{self.get_time()} Directory listing saved to memory")
@@ -500,42 +497,13 @@ class MemoryEnhancedChat:
                 save_to_memory(
                     memory_manager=self.memory_manager,
                     content=formatted_content,
-                    classification=classification,
-                    source="command_output"
+                    classification=classification
                 )
 
                 print(f"{self.get_time()} Command output saved to memory")
 
         except Exception as e:
             print(f"{self.get_time()} Error saving command output to memory: {e}")
-
-    # def _save_command_output_to_memory(self, command: str, output: str):
-    #     """Save command output to memory for future reference."""
-    #     if not self.enable_memory or not output:
-    #         return
-
-    #     try:
-    #         # Detect content type
-    #         content_type = "tabular" if '\t' in output or re.search(r'\S\s{2,}\S', output) else "text"
-
-    #         # Create metadata
-    #         metadata = {
-    #             "source": "command_output",
-    #             "command": command,
-    #             "timestamp": datetime.now().timestamp(),
-    #             "content_type": content_type
-    #         }
-
-    #         # Add to memory
-    #         memory_id = self.memory_manager.add(
-    #             content=output,
-    #             metadata=metadata
-    #         )
-
-    #         if memory_id:
-    #             print(f"{self.get_time()} Command output saved to memory (ID: {memory_id})")
-    #     except Exception as e:
-    #         print(f"{self.get_time()} Error saving command output to memory: {e}")
 
     def get_time(self) -> str:
         """Get formatted timestamp for logging."""
@@ -645,7 +613,7 @@ class MemoryEnhancedChat:
 
         # Create memory-enhanced messages if memory is enabled
         memory_enabled = self.enable_memory if enable_memory is None else enable_memory
-        print (f"{self.get_time()} IS MEMORY ENABLED?", memory_enabled)
+
         if memory_enabled and user_query:
             memory_enhanced_messages, retrieved_memories = self._integrate_memory(messages, user_query)
             messages = memory_enhanced_messages
@@ -674,7 +642,7 @@ class MemoryEnhancedChat:
             add_generation_prompt=True
         )
 
-        print(f"\n============ DEBUG PROMPT ============\n{prompt}\n====================================\n")
+        # print(f"\n============ DEBUG PROMPT ============\n{prompt}\n====================================\n")
 
         # Tokenize prompt
         try:
@@ -1008,90 +976,6 @@ class MemoryEnhancedChat:
 
         return formatted
 
-    def _format_combined_memories(self, memories: List[Dict[str, Any]], query: str) -> str:
-        """Format combined memories with better visibility and explicit instructions."""
-
-        output = "MEMORY CONTEXT:\n\n"
-
-        # First, include direct answers from qa_pair sources (highest priority)
-        qa_memories = [m for m in memories if m.get("metadata", {}).get("source") == "qa_pair"]
-        if qa_memories:
-            output += "DIRECT ANSWERS TO YOUR QUESTION:\n"
-            for memory in qa_memories:
-                output += f"- {memory.get('content')}\n\n"
-
-        # Then add factual statements
-        fact_memories = [m for m in memories if m.get("metadata", {}).get("source") == "fact"]
-        if fact_memories:
-            output += "RELEVANT FACTS:\n"
-            for memory in fact_memories:
-                output += f"- {memory.get('content')}\n\n"
-
-        # More explicit instructions for the model
-        output += "\nINSTRUCTIONS FOR USING MEMORY:\n"
-        output += "0. Use the information above to answer the user's question.\n"
-        output += "1. The information above is FACTUAL and CURRENT.\n"
-        output += "2. You MUST use this information to answer the query directly.\n"
-        output += "3. If date or time information is present, use it explicitly rather than saying you don't know.\n"
-        output += "4. Command outputs represent real-time data - treat them as current and accurate.\n\n"
-
-        return output
-
-    # def _format_combined_memories(self, memories: List[Dict[str, Any]], query: str) -> str:
-    #     """Format combined memories with proper context separation."""
-
-    #     # Separate different types of memories
-    #     command_memories = []
-    #     conversation_memories = []
-    #     direct_answers = []
-
-    #     for memory in memories:
-    #         metadata = memory.get("metadata", {})
-    #         source_hint = metadata.get("source_hint", "")
-
-    #         if metadata.get("source") == "command_output":
-    #             command_memories.append(memory)
-    #         elif source_hint == "direct_answer":
-    #             direct_answers.append(memory)
-    #         elif source_hint in ["conversation", "qa_pair"]:
-    #             conversation_memories.append(memory)
-
-    #     # Build formatted output
-    #     output = "MEMORY CONTEXT:\n"
-
-    #     # Add command outputs first
-    #     if command_memories:
-    #         output += "\nCOMMAND OUTPUT INFORMATION:\n"
-    #         for memory in command_memories:
-    #             command = memory.get("metadata", {}).get("command", "unknown command")
-    #             content = memory.get("content", "").strip()
-    #             output += f"Output from command '{command}':\n"
-    #             indented_content = "\n".join(f"  {line}" for line in content.split("\n"))
-    #             output += f"{indented_content}\n\n"
-
-    #     # Add direct answers
-    #     if direct_answers:
-    #         output += "\nRELEVANT INFORMATION:\n"
-    #         for memory in direct_answers:
-    #             content = memory.get("content", "").strip()
-    #             similarity = memory.get("similarity", 0)
-    #             if not content.startswith("Q:") and not content.startswith("- Q:"):
-    #                 output += f"- [{similarity:.2f}] {content}\n"
-
-    #     # Add conversation context only if specifically requested
-    #     if conversation_memories and len(query.split()) > 10:  # Only for longer queries
-    #         output += "\nPREVIOUS CONVERSATION CONTEXT:\n"
-    #         for memory in conversation_memories:
-    #             content = memory.get("content", "").strip()
-    #             # Skip if it's in the awkward Q&A format
-    #             if not content.startswith("Q:") and not content.startswith("- Q:"):
-    #                 output += f"- {content}\n"
-
-    #     # Add guidance
-    #     output += "\nUse the above information to help answer the query if relevant. Do not repeat the information verbatim.\n"
-
-    #     return output
-
     def _integrate_memory(self, messages: List[Dict[str, str]], query: str) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]]]:
         """
         Enhanced method to integrate relevant memories into conversation messages.
@@ -1106,118 +990,59 @@ class MemoryEnhancedChat:
         """
         try:
             # Classify query
+
             query_classification = classify_content(query, self.question_classifier)
             main_category = query_classification.get("main_category", "unknown")
             subcategory = query_classification.get("subcategory")
 
             # First check for QA pairs that might directly answer the query
-            qa_memories = self.memory_manager.retrieve(
+            memories = self.memory_manager.retrieve(
                 query=query,
                 top_k=3,
                 min_similarity=0.6,
-                metadata_filter={"source": "qa_pair"}
+                metadata_filter={"main_category": main_category}
             )
 
-            # Check for command outputs related to the query
-            command_memories = self.memory_manager.retrieve(
-                query=query,
-                top_k=2,
-                min_similarity=0.2,
-                metadata_filter={"source": "command_output"}
-            )
 
-            # Retrieve memories based on classification
-            domain_settings = self.question_classifier.get_domain_settings(query)
-            retrieval_count = domain_settings.get('retrieval_count', 5)
+            memory_text = format_memories_by_category(memories, main_category, subcategory)
 
-            # Prepare metadata filter based on category
-            metadata_filter = {}
+            # Create memory-enhanced messages - use the "memory" role
+            memory_enhanced_messages = messages.copy()
 
-            # Add main category filter if we have a classification
-            if main_category not in ['unknown', 'arithmetic', 'translation']:
-                metadata_filter["main_category"] = main_category
+            # Find the right place to insert memory (before the user query)
+            last_user_idx = next((i for i in reversed(range(len(memory_enhanced_messages)))
+                                 if messages[i]["role"] == "user"), None)
 
-                # Add subcategory if available
-                if subcategory:
-                    # This will work as an OR with main_category
-                    metadata_filter["subcategory"] = subcategory
+            if last_user_idx is not None:
+                memory_enhanced_messages.insert(last_user_idx, {
+                    "role": "memory",  # Use a custom role
+                    "content": memory_text
+                })
 
-            # Retrieve category-specific memories
-            category_memories = self.memory_manager.retrieve(
-                query=query,
-                top_k=retrieval_count,
-                min_similarity=0.3,
-                metadata_filter=metadata_filter if metadata_filter else None
-            )
+            # Update retrieval stats
+            self.memory_stats["retrievals"] += 1
 
-            # Combine all memories, prioritizing QA pairs and command outputs
-            combined_memories = []
-            seen_ids = set()
+            # Print debug info if enabled
+            # if self.memory_debug:
+            print(f"\n{self.get_time()} Memory diagnostic: Retrieved {len(memories)} items")
+            print("-----------------------------------")
+            for i, memory in enumerate(memories[:5]):  # Show top 5
+                content = memory.get("content", "").strip()
+                # Truncate long content for display
+                if len(content) > 100:
+                    content = content[:97] + "..."
 
-            # Process QA pairs first (highest priority)
-            for memory in qa_memories:
-                memory_id = memory.get("id")
-                if memory_id not in seen_ids:
-                    combined_memories.append(memory)
-                    seen_ids.add(memory_id)
+                similarity = memory.get("similarity", 0)
+                metadata = memory.get("metadata", {})
 
-            # Then command outputs (medium priority)
-            for memory in command_memories:
-                memory_id = memory.get("id")
-                if memory_id not in seen_ids:
-                    combined_memories.append(memory)
-                    seen_ids.add(memory_id)
+                main_cat = metadata.get("main_category", "unknown")
+                subcat = metadata.get("subcategory", "unknown")
 
-            # Then category-specific memories (lowest priority but more numerous)
-            for memory in category_memories:
-                memory_id = memory.get("id")
-                if memory_id not in seen_ids:
-                    combined_memories.append(memory)
-                    seen_ids.add(memory_id)
+                print(f"Memory #{i+1} (sim: {similarity:.3f}, cat: {main_cat}/{subcat}, main category: {main_cat})")
+                print(f"Content: {content}")
+                print("-----------------------------------")
 
-            # Format memories based on category if we have any
-            if combined_memories:
-                memory_text = format_memories_by_category(combined_memories, main_category)
-
-                # Create memory-enhanced messages - use the "memory" role
-                memory_enhanced_messages = messages.copy()
-
-                # Find the right place to insert memory (before the user query)
-                last_user_idx = next((i for i in reversed(range(len(messages)))
-                                     if messages[i]["role"] == "user"), None)
-
-                if last_user_idx is not None:
-                    memory_enhanced_messages.insert(last_user_idx, {
-                        "role": "memory",  # Use a custom role
-                        "content": memory_text
-                    })
-
-                # Update retrieval stats
-                self.memory_stats["retrievals"] += 1
-
-                # Print debug info if enabled
-                if self.memory_debug:
-                    print(f"\n{self.get_time()} Memory diagnostic: Retrieved {len(combined_memories)} items")
-                    print("-----------------------------------")
-                    for i, memory in enumerate(combined_memories[:5]):  # Show top 5
-                        content = memory.get("content", "").strip()
-                        # Truncate long content for display
-                        if len(content) > 100:
-                            content = content[:97] + "..."
-
-                        similarity = memory.get("similarity", 0)
-                        metadata = memory.get("metadata", {})
-                        source = metadata.get("source", "unknown")
-                        main_cat = metadata.get("main_category", "unknown")
-                        subcat = metadata.get("subcategory", "unknown")
-
-                        print(f"Memory #{i+1} (sim: {similarity:.3f}, cat: {main_cat}/{subcat}, source: {source})")
-                        print(f"Content: {content}")
-                        print("-----------------------------------")
-
-                return memory_enhanced_messages, combined_memories
-
-            return messages, []
+            return memory_enhanced_messages, memories
 
         except Exception as e:
             print(f"{self.get_time()} Error integrating memory: {e}")
@@ -1239,15 +1064,14 @@ class MemoryEnhancedChat:
         """
         try:
             # Classify query
-            query_classification = classify_content(query, self.question_classifier)
+            # query_classification = classify_content(query, self.question_classifier)
 
             # Save query
-            query_result = save_to_memory(
-                memory_manager=self.memory_manager,
-                content=query.strip(),
-                classification=query_classification,
-                source="user_query"
-            )
+            # query_result = save_to_memory(
+            #     memory_manager=self.memory_manager,
+            #     content=query.strip(),
+            #     classification=query_classification
+            # )
 
             # Classify response
             response_classification = classify_content(response, self.question_classifier)
@@ -1257,8 +1081,7 @@ class MemoryEnhancedChat:
                 memory_manager=self.memory_manager,
                 content=response.strip(),
                 classification=response_classification,
-                source="assistant_response",
-                related_content=query.strip()  # Link to the query
+                related_content=query.strip()
             )
 
             # Extract and save key statements from the response
@@ -1273,8 +1096,7 @@ class MemoryEnhancedChat:
                 statement_result = save_to_memory(
                     memory_manager=self.memory_manager,
                     content=statement,
-                    classification=statement_classification,
-                    source="extracted_fact"
+                    classification=statement_classification
                 )
 
                 if statement_result.get("saved", False):
@@ -1282,22 +1104,22 @@ class MemoryEnhancedChat:
 
             # Format as QA pairs for better retrieval
             # This helps when users ask similar questions later
-            qa_format = f"Q: {query.strip()}\nA: {response.strip()}"
-            qa_classification = {
-                "main_category": "qa_pair",
-                "confidence": 0.9
-            }
+            qa_format = f"User told - {query.strip()}\nI responded - {response.strip()}"
+            qa_pair_classification = classify_content(qa_format, self.question_classifier)
+
+            # qa_classification = {
+            #     "main_category": qa_pair_classification,
+            #     "confidence": 0.9
+            # }
 
             qa_result = save_to_memory(
                 memory_manager=self.memory_manager,
                 content=qa_format,
-                classification=qa_classification,
-                source="qa_pair"
+                classification=qa_pair_classification
             )
 
-            # Update stats
-            memories_added = (1 if query_result.get("saved", False) else 0) + \
-                             (1 if response_result.get("saved", False) else 0) + \
+            # Update stats #(1 if query_result.get("saved", False) else 0) + \
+            memories_added = (1 if response_result.get("saved", False) else 0) + \
                              statements_saved + \
                              (1 if qa_result.get("saved", False) else 0)
 
@@ -1349,7 +1171,7 @@ class MemoryEnhancedChat:
             response: Generated response
 
         Returns:
-            List of (content, source_hint) tuples
+            List of (content) tuples
         """
         memories = []
 
@@ -1429,12 +1251,12 @@ class MemoryEnhancedChat:
         unique_memories = []
         seen_content = set()
 
-        for content, source_hint in memories:
+        for content in memories:
             # Normalize to avoid near-duplicates
             normalized = re.sub(r'\s+', ' ', content.lower())
             if normalized not in seen_content:
                 seen_content.add(normalized)
-                unique_memories.append((content, source_hint))
+                unique_memories.append((content, content.get('main_category')))
 
         # Limit total memories from a single exchange
         return unique_memories[:5]  # Cap at 5 memories per exchange
@@ -1585,6 +1407,7 @@ class MemoryEnhancedChat:
 
         except Exception as e:
             print(f"{self.get_time()} Error getting domain settings: {e}")
+            traceback.print_exc()
 
         return config
 
@@ -1893,15 +1716,15 @@ def main():
     print(f"{chat.get_time()} Command history stored in: {history_file}")
 
     # Warm up the model with a short prompt
-    if chat.device == "cuda":
-        print(f"{chat.get_time()} Warming up model...")
-        import random
+    # if chat.device == "cuda":
+    #     print(f"{chat.get_time()} Warming up model...")
+    #     import random
 
-        _ = chat.chat(
-            [{"role": "user", "content": f"Calculate the result of {random.randint(1, 100)} + {random.randint(1, 100)}.  Print just result without any explanation or preamble, like in this example: 242+4=246." }],
-            max_new_tokens=20,
-            temperature=0.7
-        )
+    #     _ = chat.chat(
+    #         [{"role": "user", "content": f"Calculate the result of {random.randint(1, 100)} + {random.randint(1, 100)}.  Print just result without any explanation or preamble, like in this example: 242+4=246." }],
+    #         max_new_tokens=20,
+    #         temperature=0.7
+    #     )
 
     # Display welcome header
     print("\n" + "="*50)

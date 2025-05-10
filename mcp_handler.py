@@ -4,6 +4,15 @@ import json
 import subprocess
 from typing import Dict, List, Tuple, Optional, Any, Union
 from datetime import datetime
+from question_classifier import QuestionClassifier
+from memory_utils import (
+    classify_content,
+    generate_memory_metadata,
+    format_content_for_storage,
+    save_to_memory,
+    format_memories_by_category,
+    extract_key_statements
+)
 
 class MCPHandler:
     """
@@ -36,7 +45,7 @@ class MCPHandler:
 
         # Buffer for accumulating MCP content during streaming
         self.current_mcp_blocks = {}
-
+        self.question_classifier = QuestionClassifier()
         self.memory_manager = memory_manager
 
     def extract_mcp_blocks(self, content: str) -> Tuple[str, Dict[str, str]]:
@@ -342,16 +351,14 @@ Output files are saved to: {os.path.abspath(self.output_dir)}
                     if hasattr(self, 'memory_manager') and self.memory_manager:
                         # Detect content type
                         content_type = self._detect_content_type(output)
+                        classification = classify_content(match, self.question_classifier)
+                        metadata = generate_memory_metadata(match, classification)
 
-                        # Create metadata for memory item
-                        metadata = {
-                            "source": "command_output",
-                            "command": match,
-                            "timestamp": datetime.now().timestamp(),
-                            "content_type": content_type,
-                            "error": error if error else None,
-                            "output_file": output_file
-                        }
+                        # Add few more metadata for mcp types
+                        metadata["command"] = match
+                        metadata["output_file"] = output_file
+                        metadata["content_type"] = content_type
+                        metadata["error"] = error if error else None
 
                         # Add to memory
                         memory_id = self.memory_manager.add(

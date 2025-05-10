@@ -157,23 +157,8 @@ def load_memory_data(memory_dir, max_items=100):
 
             # Extract category information
             item_metadata = item.get('metadata', {})
-            if 'category' in item_metadata:
-                meta['category'] = item_metadata['category']
-            elif 'source_hint' in item_metadata:
-                meta['category'] = item_metadata['source_hint']
-            elif 'source' in item_metadata:
-                meta['category'] = item_metadata['source']
-            else:
-                # Infer category from content
-                content = item.get('content', '').lower()
-                if any(kw in content for kw in ['def ', 'class ', 'function', 'var ']):
-                    meta['category'] = 'code'
-                elif any(kw in content for kw in ['#', '##', 'markdown']):
-                    meta['category'] = 'markdown'
-                elif any(kw in content for kw in ['<html', '<div', '<p>']):
-                    meta['category'] = 'html'
-                else:
-                    meta['category'] = 'text'
+            if 'main_category' in item_metadata:
+                meta['main_category'] = item_metadata['main_category']
 
             metadata.append(meta)
 
@@ -238,7 +223,8 @@ def create_semantic_cluster_visualization(data, output_dir):
     reduced_embeddings = pca.fit_transform(combined_embeddings)
 
     # Get categories for coloring
-    categories = [meta.get('category', 'unknown') for meta in metadata]
+    categories = [meta.get('main_category', 'unknown') for meta in metadata]
+    # print("CATEGORIES", metadata)
     unique_categories = sorted(set(categories))
     cat_to_color = {cat: i for i, cat in enumerate(unique_categories)}
 
@@ -454,8 +440,8 @@ def create_embedding_fingerprints(data, output_dir):
         score += meta.get('retrieval_count', 0) * 10
 
         # Ensure variety of categories
-        category = meta.get('category', 'unknown')
-        if category in ['code', 'markdown', 'html']:
+        category = meta.get('main_category', 'unknown')
+        if category not in ['unknown']:
             score += 20
 
         # Check if item has enhanced embeddings
@@ -506,7 +492,7 @@ def create_embedding_fingerprints(data, output_dir):
 
         # Get item metadata
         meta = metadata[item_idx]
-        category = meta.get('category', 'unknown')
+        category = meta.get('main_category', 'unknown')
         title = meta.get('content_preview', '').strip()[:50]
 
         # To create a fingerprint, we'll visualize how the embedding values change across levels
@@ -632,7 +618,7 @@ def create_content_similarity_matrix(data, output_dir):
     )
 
     # Add category and ID labels
-    categories = [f"{i}: {meta.get('category', 'unknown')}" for i, meta in enumerate(metadata)]
+    categories = [f"{i}: {meta.get('main_category', 'unknown')}" for i, meta in enumerate(metadata)]
     plt.xticks(np.arange(len(categories)) + 0.5, categories, rotation=90, fontsize=8)
     plt.yticks(np.arange(len(categories)) + 0.5, categories, fontsize=8)
 
@@ -805,19 +791,20 @@ def create_concept_flow_visualization(data, output_dir):
     }
 
     # Get categories for coloring and markers
-    categories = [meta.get('category', 'unknown') for meta in metadata]
+    categories = [meta.get('main_category', 'unknown') for meta in metadata]
     unique_categories = sorted(set(categories))
     cat_to_marker = {
-        'code': 'o',        # Circle
-        'markdown': 's',    # Square
-        'html': '^',        # Triangle
-        'text': 'P',        # Plus
-        'js': '*',          # Star
-        'py': 'X',          # X
-        'md': 'D',          # Diamond
-        'htm': 'v',         # Triangle down
-        'general': 'd'      # Thin diamond
+        'unknown': 'o',                 # Circle
+        'declarative': 's',             # Square
+        'procedural_knowledge': '^',    # Triangle
+        'experiential': 'P',            # Plus
+        'tacit': '*',                   # Star
+        'explicit': 'X',                # X
+        'conceptual_knowledge': 'D',    # Diamond
+        'contextual': 'v'               # Triangle down
+        # 'general': 'd'      # Thin diamond
     }
+
 
     # Assign markers to any missing categories
     available_markers = ['o', 's', '^', 'P', '*', 'X', 'D', 'v', 'd', 'p', 'h', '8']
@@ -1005,7 +992,7 @@ def create_interactive_viz(data, output_dir):
     )
 
     # Get categories for coloring
-    categories = [meta.get('category', 'unknown') for meta in metadata]
+    categories = [meta.get('main_category', 'unknown') for meta in metadata]
     unique_categories = sorted(set(categories))
 
     # Add base embeddings
@@ -1026,7 +1013,7 @@ def create_interactive_viz(data, output_dir):
                 ),
                 showscale=True
             ),
-            text=[f"Base - {meta.get('category', 'unknown')}: {meta.get('content_preview', '')[:30]}..."
+            text=[f"Base - {meta.get('main_category', 'unknown')}: {meta.get('content_preview', '')[:30]}..."
                  for meta in metadata],
             name='Base Level'
         )
@@ -1063,7 +1050,7 @@ def create_interactive_viz(data, output_dir):
                     showscale=False,
                     symbol='diamond'
                 ),
-                text=[f"L{level} - {meta.get('category', 'unknown')}: {meta.get('content_preview', '')[:30]}..."
+                text=[f"L{level} - {meta.get('main_category', 'unknown')}: {meta.get('content_preview', '')[:30]}..."
                      for meta in level_metadata],
                 name=f'Level {level}'
             )

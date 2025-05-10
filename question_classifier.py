@@ -13,16 +13,39 @@ class QuestionClassifier:
 
     def __init__(self):
         """Initialize the classifier with pre-defined categories and training data"""
+        # Use consecutive indices starting from 0 to avoid index out of bounds errors
         self.categories = {
-            # Knowledge categories only
-            'declarative': 1,        # Facts and information
-            'procedural_knowledge': 2,   # How to do something
-            'experiential': 3,       # Personal experiences
-            'tacit': 4,              # Intuition, insights
-            'explicit': 5,           # Articulated knowledge
-            'conceptual_knowledge': 6,  # Principles and theories
-            'contextual': 7,         # Environmental understanding
-            'unknown': 0
+            'unknown': 0,
+            'declarative': 0,        # Facts and information
+            'procedural_knowledge': 1,   # How to do something
+            'experiential': 2,       # Personal experiences
+            'tacit': 3,              # Intuition, insights
+            'explicit': 4,           # Articulated knowledge
+            'conceptual_knowledge': 5,  # Principles and theories
+            'contextual': 6         # Environmental understanding
+        }
+
+        # Map from category name to internal index (for scikit-learn)
+        self.category_to_index = {
+            'unknown': 0,
+            'declarative': 0,
+            'procedural_knowledge': 1,
+            'experiential': 2,
+            'tacit': 3,
+            'explicit': 4,
+            'conceptual_knowledge': 5,
+            'contextual': 6
+        }
+
+        # Map from internal index to category name
+        self.index_to_category = {
+            0: 'declarative',
+            1: 'procedural_knowledge',
+            2: 'experiential',
+            3: 'tacit',
+            4: 'explicit',
+            5: 'conceptual_knowledge',
+            6: 'contextual'
         }
 
         # Subcategories dictionary
@@ -285,13 +308,13 @@ class QuestionClassifier:
         ]:
             for example in examples:
                 self.training_data.append(example)
-                self.training_labels.append(self.categories[category])
+                self.training_labels.append(self.category_to_index[category])
 
                 # Add variations with different question forms
                 variations = self._generate_variations(example)
                 for variation in variations:
                     self.training_data.append(variation)
-                    self.training_labels.append(self.categories[category])
+                    self.training_labels.append(self.category_to_index[category])
 
     def _generate_variations(self, question):
         """Generate variations of a question to improve training robustness"""
@@ -348,23 +371,27 @@ class QuestionClassifier:
         for category, patterns in self.patterns.items():
             for pattern in patterns:
                 if re.search(pattern, question.lower()):
-                    return category, 0.95  # High confidence for pattern matches
+                    subcategory, subcategory_confidence = self.identify_subcategory(question, category)
+                    return category, 0.95, subcategory, subcategory_confidence  # High confidence for pattern matches
 
         # If no strong pattern match, use the trained classifier
         try:
-            # Get prediction and probability
-            category_id = self.clf.predict([question])[0]
+            # Get prediction and probability using internal indices
+            internal_idx = self.clf.predict([question])[0]
             probabilities = self.clf.predict_proba([question])[0]
-            confidence = probabilities[category_id]
+            confidence = probabilities[internal_idx]
 
-            # Map back to category name
-            category_name = next(cat for cat, idx in self.categories.items() if idx == category_id)
+            # Map internal index to category name
+            category_name = self.index_to_category.get(internal_idx, "unknown")
+            subcategory, subcategory_confidence = self.identify_subcategory(question, category_name)
 
-            return category_name, confidence
+            return category_name, confidence, subcategory, subcategory_confidence
 
         except Exception as e:
             print(f"Classification error: {e}")
-            return "unknown", 0.0
+            import traceback
+            traceback.print_exc()
+            return "unknown", 0.0, "unknown", 0.0
 
     def identify_subcategory(self, text, main_category):
         """
@@ -525,7 +552,7 @@ class QuestionClassifier:
         Returns:
             dict: Settings including sharpening parameters, confidence thresholds, etc.
         """
-        domain, confidence = self.classify(question)
+        domain, confidence, subcategory, subcategory_confidence = self.classify(question)
 
         # Default settings
         settings = {
@@ -538,14 +565,9 @@ class QuestionClassifier:
             'retrieval_count': 8             # How many memories to retrieve
         }
 
-        # Find subcategory if we have a knowledge category
-        subcategory = None
-        subcategory_confidence = 0.0
-        if domain in self.subcategories:
-            subcategory, subcategory_confidence = self.identify_subcategory(question, domain)
-            if subcategory:
-                settings['subcategory'] = subcategory
-                settings['subcategory_confidence'] = subcategory_confidence
+        if subcategory:
+            settings['subcategory'] = subcategory
+            settings['subcategory_confidence'] = subcategory_confidence
 
         # Adjust settings based on domain
         if domain == 'declarative':

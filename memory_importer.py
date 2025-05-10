@@ -278,7 +278,7 @@ class MemoryImporter:
                     formatted_fact = format_content_for_storage(item, classification)
 
                     # Generate metadata
-                    metadata = generate_memory_metadata(formatted_fact, classification, source="imported_content")
+                    metadata = generate_memory_metadata(formatted_fact, classification)
 
                     # Add to memory
                     memory_id = self.memory_manager.add(
@@ -287,20 +287,20 @@ class MemoryImporter:
                     )
 
                     # For declarative content, also create question-answer format
-                    if classification.get('main_category') in ['declarative', 'factual']:
-                        qa_formats = self.generate_qa_formats(formatted_fact)
-                        for qa_format in qa_formats:
-                            qa_metadata = metadata.copy()
-                            qa_metadata["source"] = "qa_pair"
-                            qa_metadata["source_hint"] = "answer"
-                            qa_metadata["derived_from"] = memory_id
+                    # if classification.get('main_category') in ['declarative', 'factual']:
+                    #     qa_formats = self.generate_qa_formats(formatted_fact)
+                    #     for qa_format in qa_formats:
+                    #         qa_classification = classify_content(qa_format, self.question_classifier)
+                    #         qa_metadata = metadata.copy()
+                    #         qa_metadata["main_category"] = qa_classification
+                    #         qa_metadata["derived_from"] = memory_id
 
-                            self.memory_manager.add(
-                                content=qa_format,
-                                metadata=qa_metadata
-                            )
+                    #         self.memory_manager.add(
+                    #             content=qa_format,
+                    #             metadata=qa_metadata
+                    #         )
 
-                            self.stats["items_added"] += 1
+                    #         self.stats["items_added"] += 1
 
                     if memory_id:
                         self.stats["items_added"] += 1
