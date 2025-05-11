@@ -41,6 +41,7 @@ from mcp_prompt_completer import MCPCompleter
 from token_buffer import TokenBuffer
 
 from memory_utils import (
+    extract_topics,
     classify_content,
     generate_memory_metadata,
     format_content_for_storage,
@@ -990,21 +991,34 @@ class MemoryEnhancedChat:
         """
         try:
             # Classify query
-
             query_classification = classify_content(query, self.question_classifier)
             main_category = query_classification.get("main_category", "unknown")
             subcategory = query_classification.get("subcategory")
+
+            # Extract topics based on keywords
+            # topics = extract_topics(query.lower())
+
+            metadata_filter = {
+                "main_category": main_category,
+                "subcategory": subcategory
+            }
 
             # First check for QA pairs that might directly answer the query
             memories = self.memory_manager.retrieve(
                 query=query,
                 top_k=3,
                 min_similarity=0.6,
-                metadata_filter={"main_category": main_category}
+                metadata_filter=metadata_filter,
             )
 
+            if self.memory_debug:
+                print("\nMEMORIES\n", memories)
 
             memory_text = format_memories_by_category(memories, main_category, subcategory)
+            memory_text = "IMPORTANT: Pay careful attention to the HIGHLY RELEVANT INFORMATION section below, which directly answers the query.\n\n" + memory_text
+
+            if self.memory_debug:
+                print ("MEMORY_TEXT\n", memory_text)
 
             # Create memory-enhanced messages - use the "memory" role
             memory_enhanced_messages = messages.copy()
@@ -1023,24 +1037,24 @@ class MemoryEnhancedChat:
             self.memory_stats["retrievals"] += 1
 
             # Print debug info if enabled
-            # if self.memory_debug:
-            print(f"\n{self.get_time()} Memory diagnostic: Retrieved {len(memories)} items")
-            print("-----------------------------------")
-            for i, memory in enumerate(memories[:5]):  # Show top 5
-                content = memory.get("content", "").strip()
-                # Truncate long content for display
-                if len(content) > 100:
-                    content = content[:97] + "..."
-
-                similarity = memory.get("similarity", 0)
-                metadata = memory.get("metadata", {})
-
-                main_cat = metadata.get("main_category", "unknown")
-                subcat = metadata.get("subcategory", "unknown")
-
-                print(f"Memory #{i+1} (sim: {similarity:.3f}, cat: {main_cat}/{subcat}, main category: {main_cat})")
-                print(f"Content: {content}")
+            if self.memory_debug:
+                print(f"\n{self.get_time()} Memory diagnostic: Retrieved {len(memories)} items")
                 print("-----------------------------------")
+                for i, memory in enumerate(memories[:5]):  # Show top 5
+                    content = memory.get("content", "").strip()
+                    # Truncate long content for display
+                    if len(content) > 100:
+                        content = content[:97] + "..."
+
+                    similarity = memory.get("similarity", 0)
+                    metadata = memory.get("metadata", {})
+
+                    main_cat = metadata.get("main_category", "unknown")
+                    subcat = metadata.get("subcategory", "unknown")
+
+                    print(f"Memory #{i+1} (sim: {similarity:.3f}, cat: {main_cat}/{subcat}, main category: {main_cat})")
+                    print(f"Content: {content}")
+                    print("-----------------------------------")
 
             return memory_enhanced_messages, memories
 
@@ -1084,44 +1098,63 @@ class MemoryEnhancedChat:
                 related_content=query.strip()
             )
 
-            # Extract and save key statements from the response
-            key_statements = extract_key_statements(response)
-            statements_saved = 0
+            # topics = extract_topics(query.lower())
+            # topics_saved = 0
 
-            for statement in key_statements:
-                # Classify each statement
-                statement_classification = classify_content(statement, self.question_classifier)
+            # for topic in topics:
+            #     # Classify each statement
+            #     topic_classification = classify_content(topic, self.question_classifier)
 
-                # Save statement to memory
-                statement_result = save_to_memory(
-                    memory_manager=self.memory_manager,
-                    content=statement,
-                    classification=statement_classification
-                )
+            #     # Save statement to memory
+            #     topic_result = save_to_memory(
+            #         memory_manager=self.memory_manager,
+            #         content=topic,
+            #         classification=topic_classification
+            #     )
 
-                if statement_result.get("saved", False):
-                    statements_saved += 1
+            #     if topic_result.get("saved", False):
+            #         topics_saved += 1
+
+            # # Extract and save key statements from the response
+            # key_statements = extract_key_statements(response)
+            # statements_saved = 0
+
+            # for statement in key_statements:
+            #     # Classify each statement
+            #     statement_classification = classify_content(statement, self.question_classifier)
+
+            #     # Save statement to memory
+            #     statement_result = save_to_memory(
+            #         memory_manager=self.memory_manager,
+            #         content=statement,
+            #         classification=statement_classification
+            #     )
+
+            #     if statement_result.get("saved", False):
+            #         statements_saved += 1
 
             # Format as QA pairs for better retrieval
             # This helps when users ask similar questions later
-            qa_format = f"User told - {query.strip()}\nI responded - {response.strip()}"
-            qa_pair_classification = classify_content(qa_format, self.question_classifier)
+            # qa_format = f"User asked or stated the following - {query.strip()}\nI responded - {response.strip()}"
+            # qa_pair_classification = classify_content(qa_format, self.question_classifier)
 
             # qa_classification = {
             #     "main_category": qa_pair_classification,
             #     "confidence": 0.9
             # }
 
-            qa_result = save_to_memory(
-                memory_manager=self.memory_manager,
-                content=qa_format,
-                classification=qa_pair_classification
-            )
+            # qa_result = save_to_memory(
+            #     memory_manager=self.memory_manager,
+            #     content=qa_format,
+            #     classification=qa_pair_classification
+            # )
 
-            # Update stats #(1 if query_result.get("saved", False) else 0) + \
-            memories_added = (1 if response_result.get("saved", False) else 0) + \
-                             statements_saved + \
-                             (1 if qa_result.get("saved", False) else 0)
+            # memories_added = (1 if query_result.get("saved", False) else 0) + \
+            #                  (1 if response_result.get("saved", False) else 0) + \
+            #                  statements_saved + \
+            #                  (1 if qa_result.get("saved", False) else 0)
+
+            memories_added = (1 if response_result.get("saved", False) else 0)
 
             self.memory_stats["items_added"] += memories_added
             print(f"{self.get_time()} Added {memories_added} new memories")

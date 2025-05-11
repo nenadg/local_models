@@ -30,6 +30,7 @@ except ImportError as e:
     sys.exit(1)
 
 from memory_utils import (
+    extract_topics,
     classify_content,
     generate_memory_metadata,
     format_content_for_storage,
@@ -227,8 +228,7 @@ class MemoryImporter:
     
     def import_file(self, file_path: str) -> Dict[str, Any]:
         """
-        Enhanced method to import a file into memory with better classification.
-        For use in MemoryImporter.
+        Import a file into memory using the same methodology as _save_to_memory.
 
         Args:
             file_path: Path to the file to import
@@ -271,46 +271,86 @@ class MemoryImporter:
             # Add each item to memory
             for item in batch:
                 try:
-                    # Classify content
-                    classification = classify_content(item, self.question_classifier)
+                    # 1. Save the complete statement first
+                    # statement_classification = classify_content(item, self.question_classifier)
 
-                    # Format fact for better retrieval
-                    formatted_fact = format_content_for_storage(item, classification)
+                    # # Save statement to memory
+                    # response_result = save_to_memory(
+                    #     memory_manager=self.memory_manager,
+                    #     content=item,
+                    #     classification=statement_classification,
+                    #     related_content="Imported fact" # Providing a placeholder related content
+                    # )
 
-                    # Generate metadata
-                    metadata = generate_memory_metadata(formatted_fact, classification)
+                    # topics = extract_topics(item)
+                    # topics_saved = 0
 
-                    # Add to memory
-                    memory_id = self.memory_manager.add(
-                        content=formatted_fact,
-                        metadata=metadata
+                    # # 2. Extract and save key statements from the item
+                    # key_statements = extract_key_statements(item)
+                    # statements_saved = 0
+
+
+
+                    # print ('\nt: ', topics, '\n', 'ks: ', key_statements)
+
+                    # for topic in topics:
+                    #     # Classify each statement
+                    #     topic_classification = classify_content(topic, self.question_classifier)
+
+                    #     # Save statement to memory
+                    #     topic_result = save_to_memory(
+                    #         memory_manager=self.memory_manager,
+                    #         content=topic,
+                    #         classification=topic_classification
+                    #     )
+
+                    #     if topic_result.get("saved", False):
+                    #         topics_saved += 1
+
+                    # for statement in key_statements:
+                    #     # Classify each statement
+                    #     stmt_classification = classify_content(statement, self.question_classifier)
+
+                    #     # Save statement to memory
+                    #     statement_result = save_to_memory(
+                    #         memory_manager=self.memory_manager,
+                    #         content=statement,
+                    #         classification=stmt_classification
+                    #     )
+
+                    #     if statement_result.get("saved", False):
+                    #         statements_saved += 1
+                    # memories_added = statements_saved + topics_saved
+
+                    # 3. Create a QA format for better retrieval
+                    # This mimics the QA pairs created in normal conversation
+                    # qa_format = f"User asked or stated the following - {item}\nI responded - {item}"
+                    fact_classification = classify_content(item, self.question_classifier)
+
+                    print(f"\n{item}")
+                    fact_result = save_to_memory(
+                        memory_manager=self.memory_manager,
+                        content=item,
+                        classification=fact_classification
                     )
 
-                    # For declarative content, also create question-answer format
-                    # if classification.get('main_category') in ['declarative', 'factual']:
-                    #     qa_formats = self.generate_qa_formats(formatted_fact)
-                    #     for qa_format in qa_formats:
-                    #         qa_classification = classify_content(qa_format, self.question_classifier)
-                    #         qa_metadata = metadata.copy()
-                    #         qa_metadata["main_category"] = qa_classification
-                    #         qa_metadata["derived_from"] = memory_id
+                    # # Count memories added, matching _save_to_memory logic
+                    # memories_added = (1 if response_result.get("saved", False) else 0) + \
+                    #                  statements_saved + \
+                    #                  (1 if qa_result.get("saved", False) else 0)
+                    memories_added = (1 if fact_result.get("saved", False) else 0)
 
-                    #         self.memory_manager.add(
-                    #             content=qa_format,
-                    #             metadata=qa_metadata
-                    #         )
+                    self.stats["items_added"] += memories_added
 
-                    #         self.stats["items_added"] += 1
-
-                    if memory_id:
-                        self.stats["items_added"] += 1
-                    else:
+                    if memories_added == 0:
                         self.stats["items_skipped"] += 1
-                
+
+                    print("\nend")
+
                 except Exception as e:
                     print(f"{self.get_time()} Error adding item to memory: {e}")
                     self.stats["items_skipped"] += 1
-            
+
             # Update batch stats
             self.stats["batches_processed"] += 1
             

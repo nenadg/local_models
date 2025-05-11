@@ -37,7 +37,7 @@ def classify_content(content: str, question_classifier=None) -> Dict[str, Any]:
             result['confidence'] = confidence
             result['subcategory'] = subcategory
             result['subcategory_confidence'] = subcategory_confidence
-            print("CLASSIFICATION", category, confidence, subcategory, subcategory_confidence)
+
             # # Determine subcategory
             # if category in question_classifier.subcategories:
             #     subcategory, subcategory_confidence = question_classifier.identify_subcategory(content, category)
@@ -239,7 +239,7 @@ def save_to_memory(memory_manager, content: str, classification: Optional[Dict[s
         # Generate metadata
         metadata = generate_memory_metadata(formatted_content, classification)
         
-        print("CLASSIFICATION", formatted_content, metadata)
+        # print("CLASSIFICATION", classification)
         # Add to memory
         memory_id = memory_manager.add(
             content=formatted_content,
@@ -285,157 +285,112 @@ def save_to_memory(memory_manager, content: str, classification: Optional[Dict[s
 
 def format_memories_by_category(memories: List[Dict[str, Any]], main_category: str, subcategory) -> str:
     """
-    Format memories based on the main knowledge category.
-    
+    Format memories based on the main knowledge category with improved relevance sorting.
+
     Args:
         memories: List of retrieved memories
         main_category: Main knowledge category
-        
+        subcategory: Subcategory for filtering
+
     Returns:
         Formatted memory text
     """
     if not memories:
         return ""
 
-    output = "MEMORY CONTEXT:\n\n"
-    
-    # Group memories by category and subcategory
-    categorized = {}
-    
+    output = "\nUse the following retrieved memories\n\n"
+
+    output += "Consider a memory relevant if: \n\
+        1. It's in the list under the HIGHLY RELEVANT INFORMATION \n \
+        2. The ones with higher score are to be used first \n \
+        3. Other memories in ADDITIONAL [category] INFORMATION are here to support the memories selected in 1. and 2.\n"
+
+    # Sort memories by relevance first - this is critical for proper presentation
+    memories = sorted(memories, key=lambda x: x.get('similarity', 0), reverse=True)
+
+    # Find the highest similarity score for reference
+    max_similarity = max([m.get('similarity', 0) for m in memories]) if memories else 0
+
+    # Define a relevance threshold relative to max similarity
+    # Documents with similarity > 75% of max are considered highly relevant
+    relevance_threshold = max_similarity # * 0.75
+
+    # Group memories by relevance first, then by category
+    highly_relevant = []
+    relevant_by_category = {}
+
+    # Identify search terms from query content (if available)
+    search_terms = []
+    for memory in memories[:1]:  # Look at highest match
+        if "who" in memory.get("content", "").lower() and "what" in memory.get("content", "").lower():
+            # Extract search terms from question
+            content = memory.get("content", "").lower()
+            search_parts = re.findall(r'(?:who|what|when|where|why|how).*?([\w\s]+)(?:\?|$)', content)
+            if search_parts:
+                search_terms = [term.strip() for term in search_parts[0].split()]
+
+    # Process each memory
     for memory in memories:
         metadata = memory.get("metadata", {})
-        mem_category = metadata.get("main_category", metadata.get("main_category", "unknown"))
-        mem_subcategory = metadata.get("subcategory", subcategory if subcategory else "general")
-        
-        if mem_category not in categorized:
-            categorized[mem_category] = {}
-            
-        if mem_subcategory not in categorized[mem_category]:
-            categorized[mem_category][mem_subcategory] = []
-            
-        categorized[mem_category][mem_subcategory].append(memory)
-    
-    # Format based on query category
-    if main_category in ['declarative', 'factual']:
-        # For declarative queries, prioritize factual information
-        output += "RELEVANT FACTS:\n"
-        
-        # Add declarative memories first if available
-        if 'declarative' in categorized or 'factual' in categorized:
-            fact_categories = [cat for cat in categorized if cat in ['declarative', 'factual']]
-            for cat in fact_categories:
-                for subcategory, subcategory_memories in categorized[cat].items():
-                    for memory in subcategory_memories:
-                        content = memory.get("content", "").strip()
-                        similarity = memory.get("similarity", 0)
-                        output += f"- [{similarity:.2f}] {content}\n\n"
-        
-        # Add other categories with headers
-        other_categories = [cat for cat in categorized if cat not in ['declarative', 'factual']]
-        if other_categories:
-            for category in other_categories:
-                readable_category = category.replace('_', ' ').capitalize()
-                output += f"\nADDITIONAL {readable_category.upper()} INFORMATION:\n"
-                
-                for subcategory, subcategory_memories in categorized[category].items():
-                    for memory in subcategory_memories:
-                        content = memory.get("content", "").strip()
-                        similarity = memory.get("similarity", 0)
-                        output += f"- [{similarity:.2f}] {content}\n\n"
-                        
-    elif main_category in ['procedural', 'procedural_knowledge']:
-        # For procedural queries, prioritize step-by-step information
-        output += "HOW-TO INFORMATION:\n"
-        
-        # Add procedural memories first if available
-        proc_categories = [cat for cat in categorized if cat in ['procedural', 'procedural_knowledge']]
-        if proc_categories:
-            for cat in proc_categories:
-                for subcategory, subcategory_memories in categorized[cat].items():
-                    for memory in subcategory_memories:
-                        content = memory.get("content", "").strip()
-                        similarity = memory.get("similarity", 0)
-                        output += f"- [{similarity:.2f}] {content}\n\n"
-        
-        # Add other categories with headers
-        other_categories = [cat for cat in categorized if cat not in ['procedural', 'procedural_knowledge']]
-        if other_categories:
-            for category in other_categories:
-                readable_category = category.replace('_', ' ').capitalize()
-                output += f"\nADDITIONAL {readable_category.upper()} INFORMATION:\n"
-                
-                for subcategory, subcategory_memories in categorized[category].items():
-                    for memory in subcategory_memories:
-                        content = memory.get("content", "").strip()
-                        similarity = memory.get("similarity", 0)
-                        output += f"- [{similarity:.2f}] {content}\n\n"
-    
-    elif main_category in ['conceptual', 'conceptual_knowledge']:
-        # For conceptual queries, prioritize theories and principles
-        output += "CONCEPTUAL INFORMATION:\n"
-        
-        # Add conceptual memories first
-        concept_categories = [cat for cat in categorized if cat in ['conceptual', 'conceptual_knowledge']]
-        if concept_categories:
-            for cat in concept_categories:
-                for subcategory, subcategory_memories in categorized[cat].items():
-                    for memory in subcategory_memories:
-                        content = memory.get("content", "").strip()
-                        similarity = memory.get("similarity", 0)
-                        output += f"- [{similarity:.2f}] {content}\n\n"
-        
-        # Add other categories that might provide supporting info
-        other_categories = [cat for cat in categorized if cat not in ['conceptual', 'conceptual_knowledge']]
-        if other_categories:
-            for category in other_categories:
-                readable_category = category.replace('_', ' ').capitalize()
-                output += f"\nSUPPORTING {readable_category.upper()} INFORMATION:\n"
-                
-                for subcategory, subcategory_memories in categorized[category].items():
-                    for memory in subcategory_memories:
-                        content = memory.get("content", "").strip()
-                        similarity = memory.get("similarity", 0)
-                        output += f"- [{similarity:.2f}] {content}\n\n"
-    
-    # Handle other categories with similar logic...
-    elif main_category == 'experiential':
-        output += "EXPERIENCE-BASED INFORMATION:\n"
-        # Similar formatting for experiential memories
-        
-    elif main_category == 'tacit':
-        output += "INSIGHTS AND OPINIONS:\n"
-        # Similar formatting for tacit knowledge
-        
-    elif main_category == 'explicit':
-        output += "DOCUMENTED INFORMATION:\n"
-        # Similar formatting for explicit knowledge
-        
-    elif main_category == 'contextual':
-        output += "CONTEXTUAL INFORMATION:\n"
-        # Similar formatting for contextual knowledge
-    
-    else:
-        # Default formatting for unknown or other categories
-        for category, subcategories in categorized.items():
-            readable_category = category.replace('_', ' ').capitalize()
-            output += f"\n{readable_category.upper()} INFORMATION:\n"
-            
-            for subcategory, subcategory_memories in subcategories.items():
-                for memory in subcategory_memories:
-                    content = memory.get("content", "").strip()
-                    similarity = memory.get("similarity", 0)
-                    output += f"- [{similarity:.2f}] {content}\n\n"
-    
-    # Add guidance based on category
-    if main_category in ['declarative', 'factual']:
-        output += "\nUSE THE FACTUAL INFORMATION ABOVE TO PROVIDE AN ACCURATE ANSWER.\n"
-    elif main_category in ['procedural', 'procedural_knowledge']:
-        output += "\nUSE THE PROCEDURAL STEPS ABOVE TO PROVIDE CLEAR INSTRUCTIONS.\n"
-    elif main_category in ['conceptual', 'conceptual_knowledge']:
-        output += "\nUSE THE CONCEPTUAL INFORMATION ABOVE TO EXPLAIN THE UNDERLYING PRINCIPLES.\n"
-    else:
-        output += "\nUSE THE ABOVE INFORMATION TO HELP ANSWER THE QUERY IF RELEVANT.\n"
-    
+        category = metadata.get("main_category", "unknown")
+        content = memory.get("content", "").strip()
+        similarity = memory.get("similarity", 0)
+
+        # Check for direct keyword matches
+        content_relevance = 0
+        for term in search_terms:
+            if term and len(term) > 3 and term.lower() in content.lower():
+                content_relevance += 0.2  # Boost for each search term match
+
+        # Consider a memory highly relevant if:
+        # 1. It's above the relative similarity threshold OR
+        # 2. It has direct keyword matches that push it above threshold
+        effective_similarity = similarity + content_relevance
+
+        if effective_similarity >= relevance_threshold:
+            # This is a highly relevant memory regardless of category
+            highly_relevant.append(memory)
+        else:
+            # Group by category for secondary relevance
+            if category not in relevant_by_category:
+                relevant_by_category[category] = []
+            relevant_by_category[category].append(memory)
+
+    # Output highly relevant memories first, regardless of category
+    if highly_relevant:
+        output += "\nHIGHLY RELEVANT INFORMATION:\n"
+        for memory in highly_relevant:
+            content = memory.get("content", "").strip()
+            item_id = memory.get("id", "")[-6:] if memory.get("id") else ""
+            similarity = memory.get("similarity", 0)
+            output += f"- [{similarity:.2f}] {content}\n\n"
+
+    # Then output remaining memories by category
+    for category_name, category_memories in relevant_by_category.items():
+        if not category_memories:
+            continue
+
+        # Skip if we've already shown all memories in this category as highly relevant
+        if all(memory in highly_relevant for memory in category_memories):
+            continue
+
+        # Format category name for display
+        readable_category = category_name.replace("_", " ").title()
+        output += f"\nADDITIONAL {readable_category.upper()} INFORMATION:\n"
+
+        # Show memories not already shown as highly relevant
+        for memory in category_memories:
+            if memory in highly_relevant:
+                continue
+
+            content = memory.get("content", "").strip()
+            item_id = memory.get("id", "")[-6:] if memory.get("id") else ""
+            similarity = memory.get("similarity", 0)
+            output += f"- [{similarity:.2f}] {content}\n\n"
+
+    # Add guidance based on query category
+    output += "\nUSE THE INFORMATION ABOVE TO ANSWER THE QUERY, PRIORITIZING THE HIGHLY RELEVANT INFORMATION.\n"
+
     return output
 
 def extract_key_statements(text: str) -> List[str]:

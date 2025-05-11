@@ -3,7 +3,7 @@ Unified memory system for TinyLlama Chat.
 Provides a cohesive approach to storing and retrieving different types of information
 with improved integration and simplified architecture.
 """
-
+import re
 import os
 import json
 import faiss
@@ -91,6 +91,7 @@ class MemoryItem:
 class MemoryManager:
     """
     Unified memory manager with simplified architecture and improved integration.
+    Fixes issues with standard and enhanced search functions.
     """
 
     def __init__(self,
@@ -365,25 +366,26 @@ class MemoryManager:
                                length=40)
 
             # Set fixed seed per level
-            np.random.seed(42 + i)
+            np.random.seed(42 + i * 10)  # Increased seed difference
 
             # Create rotation matrix with increasing randomness by level
-            rotation_factor = 0.1 + (i * 0.03)
+            # FIXED: Adjust rotation factor to increase diversity between levels
+            rotation_factor = 0.15 + (i * 0.05)  # Increased base factor and increment
             rotation = np.random.normal(0, rotation_factor, (embedding_dim, embedding_dim))
 
             # For earlier levels, preserve more of the original structure
-            if i <= 3:
+            if i <= 2:  # Changed from 3 to 2
                 # Add identity matrix component to preserve original information
-                preservation_factor = 0.9 - (i * 0.15)
+                preservation_factor = 0.8 - (i * 0.2)  # More aggressive reduction
                 rotation = rotation + np.eye(embedding_dim) * preservation_factor
 
             # Ensure the matrix is orthogonal
             u, _, vh = np.linalg.svd(rotation, full_matrices=False)
             self._rotation_matrices[i] = u @ vh
 
-            # Create level-specific bias vector
-            np.random.seed(137 + i)
-            bias_factor = 0.01 + (i * 0.002)
+            # Create level-specific bias vector with increased variation
+            np.random.seed(137 + i * 10)  # Increased seed difference
+            bias_factor = 0.02 + (i * 0.01)  # Doubled impact
             self._level_biases[i] = np.random.normal(0, bias_factor, (embedding_dim,))
 
         print(f"{self.get_time()} Enhancement matrices initialization complete.")
@@ -647,11 +649,11 @@ class MemoryManager:
             return similarity
 
         # Apply non-linear enhancement
-        if similarity > 0.6:
+        if similarity > 0.50:
             # Boost high similarities (more confident matches)
             boost = (similarity - 0.6) * self.similarity_enhancement_factor * 2.0
             enhanced = min(1.0, similarity + boost)
-        elif similarity < 0.4:
+        elif similarity < 0.50:
             # Reduce low similarities (less confident matches)
             reduction = (0.4 - similarity) * self.similarity_enhancement_factor * 2.0
             enhanced = max(0.0, similarity - reduction)
@@ -695,7 +697,6 @@ class MemoryManager:
                 print(f"{self.get_time()} No embedding function set")
                 return []
 
-
             # Generate query embedding with potential batch processing optimization
             try:
                 query_embedding = self.embedding_function(query)
@@ -724,26 +725,26 @@ class MemoryManager:
             can_use_enhanced = use_enhanced and have_enhanced_indices
 
             # Perform search
-            if can_use_enhanced:
-                results = self._enhanced_search(
-                    normalized_query,
-                    top_k=top_k,
-                    min_similarity=min_similarity
-                )
-            else:
-                results = self._standard_search(
-                    normalized_query,
-                    top_k=top_k,
-                    min_similarity=min_similarity
-                )
+            # if can_use_enhanced:
+            results = self._enhanced_search(
+                normalized_query,
+                top_k=top_k,
+                min_similarity=min_similarity
+            )
+            # else:
+            #     results = self._standard_search(
+            #         normalized_query,
+            #         top_k=top_k,
+            #         min_similarity=min_similarity
+            #     )
 
             # Apply metadata filtering if provided
-            if metadata_filter:
-                filtered_results = []
-                for result in results:
-                    if all(result.get('metadata', {}).get(k) == v for k, v in metadata_filter.items()):
-                        filtered_results.append(result)
-                results = filtered_results
+            # if metadata_filter:
+            #     filtered_results = []
+            #     for result in results:
+            #         if all(result.get('metadata', {}).get(k) == v for k, v in metadata_filter.items()):
+            #             filtered_results.append(result)
+            #     results = filtered_results
 
             # Update retrieval metadata
             for result in results:
@@ -757,7 +758,47 @@ class MemoryManager:
                         # Update last access time
                         item.metadata["last_access"] = datetime.now().timestamp()
 
+            # Apply deduplication
+            # results = self._deduplicate_results(results)
+
             return results
+
+    def _deduplicate_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Deduplicate results based on content similarity.
+
+        Args:
+            results: List of retrieval results
+
+        Returns:
+            Deduplicated list
+        """
+        if not results:
+            return []
+
+        # Sort by similarity first
+        sorted_results = sorted(results, key=lambda x: x.get("similarity", 0), reverse=True)
+
+        # Track seen content hashes
+        seen_hashes = set()
+        deduplicated = []
+
+        for result in sorted_results:
+            content = result.get("content", "").strip().lower()
+
+            # Create a content hash for comparison
+            content_hash = hashlib.md5(content.encode()).hexdigest()
+
+            # For very similar content, use a simplified hash
+            simple_hash = hashlib.md5(re.sub(r'\W+', ' ', content).encode()).hexdigest()
+
+            # Check if we've seen this content before
+            if content_hash not in seen_hashes and simple_hash not in seen_hashes:
+                seen_hashes.add(content_hash)
+                seen_hashes.add(simple_hash)
+                deduplicated.append(result)
+
+        return deduplicated
 
     def _standard_search(self, query_embedding: np.ndarray, top_k: int, min_similarity: float) -> List[Dict[str, Any]]:
         """
@@ -771,19 +812,54 @@ class MemoryManager:
         Returns:
             List of matching items with similarity scores
         """
-        # Get more results than needed to account for filtering
-        search_k = min(top_k * 2, self.index.ntotal)
+        try:
+            # Validate input
+            if query_embedding is None or not isinstance(query_embedding, np.ndarray):
+                print(f"{self.get_time()} Invalid query embedding in _standard_search")
+                return []
 
-        # Prepare query for FAISS
-        query_array = np.array([query_embedding], dtype=np.float32)
+            if self.index is None or self.index.ntotal == 0:
+                print(f"{self.get_time()} FAISS index is empty or not initialized")
+                return []
 
-        # Perform search
-        similarities, indices = self.index.search(query_array, search_k)
+            # Ensure query has correct dimension
+            if len(query_embedding) != self.embedding_dim:
+                print(f"{self.get_time()} Query dimension mismatch: {len(query_embedding)} vs {self.embedding_dim}")
+                if len(query_embedding) > self.embedding_dim:
+                    query_embedding = query_embedding[:self.embedding_dim]
+                else:
+                    query_embedding = np.pad(query_embedding, (0, self.embedding_dim - len(query_embedding)))
 
-        # Process results
-        results = []
-        for i, idx in enumerate(indices[0]):
-            if idx != -1 and similarities[0][i] > min_similarity:
+                # Renormalize
+                query_norm = np.linalg.norm(query_embedding)
+                if query_norm > 1e-10:
+                    query_embedding = query_embedding / query_norm
+
+            # Get more results than needed to account for filtering
+            search_k = min(top_k * 3, self.index.ntotal)  # Increased from 2x to 3x
+
+            # Prepare query for FAISS - ensure it's float32
+            query_array = np.array([query_embedding], dtype=np.float32)
+
+            # Perform search
+            similarities, indices = self.index.search(query_array, search_k)
+
+            # Process results with validation
+            results = []
+            for i, idx in enumerate(indices[0]):
+                # Skip invalid indices
+                if idx == -1:
+                    continue
+
+                # Skip low similarity results
+                if similarities[0][i] < min_similarity:
+                    continue
+
+                # Validate index bounds
+                if idx >= len(self.items):
+                    print(f"{self.get_time()} Index out of bounds: {idx} >= {len(self.items)}")
+                    continue
+
                 # Skip deleted items
                 if idx in self.deleted_ids:
                     continue
@@ -793,22 +869,27 @@ class MemoryManager:
                 similarity = float(similarities[0][i])
 
                 # Apply similarity enhancement
-                enhanced_similarity = self._enhance_similarity(similarity)
+                # enhanced_similarity = self._enhance_similarity(similarity)
 
                 # Add to results
                 results.append({
                     "id": item.id,
                     "content": item.content,
-                    "similarity": enhanced_similarity,
+                    "similarity": similarity,
                     "raw_similarity": similarity,
                     "metadata": item.metadata
                 })
 
-        # Sort by similarity
-        results.sort(key=lambda x: x["similarity"], reverse=True)
+            # Sort by similarity
+            results.sort(key=lambda x: x["similarity"], reverse=True)
 
-        # Limit to top-k
-        return results[:top_k]
+            # Limit to top-k
+            return results[:top_k]
+
+        except Exception as e:
+            print(f"{self.get_time()} Error in standard search: {e}")
+            traceback.print_exc()
+            return []
 
     def _rebuild_enhanced_indices(self):
         """Rebuild FAISS indices for enhanced embeddings."""
@@ -872,7 +953,7 @@ class MemoryManager:
 
     def _enhanced_search(self, query_embedding: np.ndarray, top_k: int, min_similarity: float) -> List[Dict[str, Any]]:
         """
-        Perform enhanced search across multiple embedding levels.
+        Perform enhanced search across multiple embedding levels with proper error handling.
 
         Args:
             query_embedding: Normalized query embedding
@@ -882,207 +963,341 @@ class MemoryManager:
         Returns:
             List of matching items with similarity scores
         """
-        # Ensure query has correct dimension
-        if len(query_embedding) != self.embedding_dim:
-            print(f"{self.get_time()} Query dimension mismatch: {len(query_embedding)} vs {self.embedding_dim}")
-            # Resize query embedding
-            if len(query_embedding) > self.embedding_dim:
-                query_embedding = query_embedding[:self.embedding_dim]
+        try:
+            # Validate inputs
+            if query_embedding is None or not isinstance(query_embedding, np.ndarray):
+                print(f"{self.get_time()} Invalid query embedding in _enhanced_search")
+                return []
+
+            if not self.enhanced_indices:
+                print(f"{self.get_time()} No enhanced indices available")
+                return self._standard_search(query_embedding, top_k, min_similarity)
+
+            # Ensure query has correct dimension
+            if len(query_embedding) != self.embedding_dim:
+                print(f"{self.get_time()} Query dimension mismatch: {len(query_embedding)} vs {self.embedding_dim}")
+                # Resize query embedding
+                if len(query_embedding) > self.embedding_dim:
+                    query_embedding = query_embedding[:self.embedding_dim]
+                else:
+                    query_embedding = np.pad(query_embedding, (0, self.embedding_dim - len(query_embedding)))
+                # Renormalize
+                norm = np.linalg.norm(query_embedding)
+                if norm > 1e-10:
+                    query_embedding = query_embedding / norm
+
+            # Track results by item ID for merging across levels
+            result_dict = {}
+
+            # Start with base level search to ensure we always have results
+            base_results = [] # self._standard_search(query_embedding, top_k * 2, min_similarity)
+
+            # Initialize result dictionary with base results
+            for result in base_results:
+                item_id = result.get("id")
+                if item_id:  # Only add if ID exists
+                    result_dict[item_id] = result
+
+            # Check if enhanced indices exist and have correct dimension
+            valid_enhanced_indices = {}
+            for level, index in self.enhanced_indices.items():
+                if index.d == self.embedding_dim and index.ntotal > 0:  # Added index size check
+                    valid_enhanced_indices[level] = index
+
+            # Skip enhanced search if no valid indices
+            if not valid_enhanced_indices:
+                print(f"{self.get_time()} No valid enhanced indices found")
+                return list(result_dict.values())
+
+            # Search across all valid enhanced levels and merge results
+            # Process each enhancement level with improved search logic
+            for level in sorted(valid_enhanced_indices.keys()):
+                try:
+                    # Get index for this level and verify it has entries
+                    level_index = valid_enhanced_indices[level]
+                    if level_index.ntotal == 0:
+                        continue
+
+                    # Generate level-specific query with consolidated validation
+                    level_query = self._generate_level_embedding(query_embedding, level)
+                    if level_query is None or len(level_query) != self.embedding_dim:
+                        print(f"{self.get_time()} Invalid level {level} query embedding - skipping")
+                        continue
+
+                    # Normalize the query vector - use a higher epsilon for stability
+                    query_norm = np.linalg.norm(level_query)
+                    if query_norm < 1e-6:  # More forgiving threshold
+                        print(f"{self.get_time()} Level {level} query has near-zero norm - skipping")
+                        continue
+
+                    normalized_query = level_query / query_norm
+
+                    # Calculate dynamic search depth based on index size
+                    # More aggressive for higher levels to capture broader matches
+                    depth_factor = 1.0 + (level * 0.5)  # Increase search depth for higher levels
+                    index_size = level_index.ntotal
+                    search_k = min(int(top_k * depth_factor), index_size)
+
+                    # Perform the search with proper error handling
+                    query_array = np.array([normalized_query], dtype=np.float32)
+                    try:
+                        similarities, indices = level_index.search(query_array, search_k)
+                    except Exception as e:
+                        print(f"{self.get_time()} FAISS search failed for level {level}: {e}")
+                        continue
+
+                    # Track how many results we found at this level
+                    found_at_this_level = 0
+
+                    # Use more aggressive similarity thresholding for higher levels
+                    # This allows more diverse results at higher levels
+                    level_min_similarity = min_similarity * (0.8 ** level)  # Decrease threshold for higher levels
+
+                    # Process search results with proper bounds checking
+                    for i, idx in enumerate(indices[0]):
+                        # Skip invalid indices
+                        if idx == -1:
+                            continue
+
+                        # Validate similarity with level-specific threshold
+                        similarity = float(similarities[0][i])
+                        if similarity <= level_min_similarity:
+                            continue
+
+                        # Validate index bounds
+                        if idx < 0 or idx >= len(self.items):
+                            continue
+
+                        # Skip deleted items
+                        if idx in self.deleted_ids:
+                            continue
+
+                        # Get the item
+                        item = self.items[idx]
+
+                        # Calculate level-adjusted similarity
+                        # For higher levels, we boost the similarity of novel results
+                        # to promote diversity in the final result set
+                        base_similarity = similarity
+                        # enhanced_similarity = self._enhance_similarity(base_similarity)
+
+                        # Apply level-specific enhancement
+                        # if level == 1:
+                        #     # Level 1: emphasize recall with aggressive enhancement
+                        #     enhanced_similarity = self._enhance_similarity(min(1.0, base_similarity * 1.15))
+                        # elif level == 2:
+                        #     # Level 2: emphasize precision with base enhancement
+                        #     enhanced_similarity = self._enhance_similarity(base_similarity * 0.95)
+                        # elif level == 3:
+                        #     # Level 3: moderate enhancement
+                        #     enhanced_similarity = self._enhance_similarity(base_similarity)
+                        # else:
+                        #     # Other levels: standard enhancement
+                        #     enhanced_similarity = self._enhance_similarity(base_similarity * 0.5)
+
+                        # Add diversity bonus for novel content
+                        # if item.id not in result_dict:
+                        #     # New items get a small novelty bonus
+                        #     novelty_bonus = 0.001 * level
+                        #     enhanced_similarity = min(1.0, enhanced_similarity + novelty_bonus)
+
+                        # Add to result_dict if better than existing or not found yet
+                        if item.id not in result_dict: # or enhanced_similarity > result_dict[item.id]["similarity"]:
+                            # When replacing a previous level result, preserve the best raw similarity
+                            old_raw = result_dict.get(item.id, {}).get("raw_similarity", 0)
+                            best_raw = max(old_raw, similarity)
+
+                            # Create result with improved metadata for debugging
+                            result_dict[item.id] = {
+                                "id": item.id,
+                                "content": item.content,
+                                "similarity": similarity,
+                                "raw_similarity": best_raw,
+                                "metadata": item.metadata,
+                                "level": level,
+                                "level_metrics": {
+                                    "original_similarity": similarity,
+                                    "enhancement": 1 # enhanced_similarity - similarity
+                                }
+                            }
+
+                            found_at_this_level += 1
+
+                    # Log level results for debugging
+                    if found_at_this_level > 0:
+                        print(f"{self.get_time()} Level {level} found {found_at_this_level} items")
+
+                except Exception as e:
+                    print(f"{self.get_time()} Error processing level {level}: {e}")
+                    traceback.print_exc()
+                    # Continue to next level
+
+            # print("\nRESULT DICT", result_dict)
+            print("\n")
+
+            # Apply cross-level verification to boost confidence in items found in multiple levels
+            result_dict = self._apply_cross_level_verification(result_dict)
+
+            # Extract final results
+            results = list(result_dict.values())
+
+            # Sort by similarity
+            # results.sort(key=lambda x: x["similarity"], reverse=True)
+
+            # Apply diversity promotion
+            results = self._promote_diversity(results, top_k)
+
+            # print ("\nRESULTS", results)
+            # Limit to top-k
+            return results[:top_k]
+
+        except Exception as e:
+            print(f"{self.get_time()} Error in enhanced search: {e}")
+            traceback.print_exc()
+            # Fall back to standard search
+            return self._standard_search(query_embedding, top_k, min_similarity)
+
+    def _promote_diversity(self, results: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+        """
+        Promote diversity in search results to avoid redundancy.
+
+        Args:
+            results: Sorted list of search results
+            top_k: Desired number of results
+
+        Returns:
+            List of diverse results
+        """
+        if len(results) <= top_k:
+            return results
+
+        # Always keep the top result
+        diverse_results = [results[0]]
+
+        # Calculate content embeddings for remaining results
+        remaining = results[1:]
+
+        # Select additional results that maximize diversity
+        while len(diverse_results) < top_k and remaining:
+            # Find the result that has the highest minimum distance to selected results
+            best_idx = -1
+            best_min_distance = -1
+
+            for idx, candidate in enumerate(remaining):
+                # Calculate minimum distance to already selected results
+                min_distance = float('inf')
+                candidate_content = candidate.get("content", "")
+
+                for selected in diverse_results:
+                    selected_content = selected.get("content", "")
+
+                    # Simple text distance (could use embeddings for better results)
+                    distance = self._text_distance(candidate_content, selected_content)
+                    min_distance = min(min_distance, distance)
+
+                # If this candidate is more diverse, select it
+                if min_distance > best_min_distance:
+                    best_idx = idx
+                    best_min_distance = min_distance
+
+            # Add the most diverse result
+            if best_idx >= 0:
+                diverse_results.append(remaining[best_idx])
+                remaining.pop(best_idx)
             else:
-                query_embedding = np.pad(query_embedding, (0, self.embedding_dim - len(query_embedding)))
-            # Renormalize
-            norm = np.linalg.norm(query_embedding)
-            if norm > 1e-10:
-                query_embedding = query_embedding / norm
+                # Fall back to the next best result by similarity
+                diverse_results.append(remaining[0])
+                remaining.pop(0)
 
-        # Search base level
-        base_results = self._standard_search(query_embedding, top_k, min_similarity)
+        return diverse_results
 
-        # Track all results by item ID
-        result_dict = {item["id"]: item for item in base_results}
+    def _text_distance(self, text1: str, text2: str) -> float:
+        """
+        Calculate a simple distance metric between two texts.
 
-        # Check if enhanced indices exist and have correct dimension
-        valid_enhanced_indices = {}
-        for level, index in self.enhanced_indices.items():
-            if index.d == self.embedding_dim:
-                valid_enhanced_indices[level] = index
+        Args:
+            text1: First text
+            text2: Second text
 
-        # Skip enhanced search if no valid indices
-        if not valid_enhanced_indices:
-            return list(result_dict.values())
+        Returns:
+            Distance score (higher means more different)
+        """
+        # Convert to lowercase
+        text1 = text1.lower()
+        text2 = text2.lower()
 
-        # Search all valid enhanced levels
-        for level in sorted(valid_enhanced_indices.keys()):
-            try:
-                # Create level-specific query
-                level_query = self._generate_level_embedding(query_embedding, level)
-                if level_query is None or len(level_query) != self.embedding_dim:
-                    continue
+        # Get word sets
+        words1 = set(re.findall(r'\b\w+\b', text1))
+        words2 = set(re.findall(r'\b\w+\b', text2))
 
-                # Normalize query
-                query_norm = np.linalg.norm(level_query)
-                if query_norm < 1e-10:
-                    continue
-                normalized_query = level_query / query_norm
+        # Calculate Jaccard distance
+        if not words1 and not words2:
+            return 0.0
 
-                # Search with level-specific query
-                query_array = np.array([normalized_query], dtype=np.float32)
-                search_k = min(top_k * 2, valid_enhanced_indices[level].ntotal)
+        intersection = len(words1.intersection(words2))
+        union = len(words1.union(words2))
 
-                similarities, indices = valid_enhanced_indices[level].search(query_array, search_k)
+        # Higher value means more different
+        return 1.0 - (intersection / union)
 
-                # Process level results
-                for i, idx in enumerate(indices[0]):
-                    if idx == -1 or similarities[0][i] <= min_similarity:
-                        continue
-
-                    if idx >= len(self.items) or idx in self.deleted_ids:
-                        continue
-
-                    item = self.items[idx]
-                    similarity = float(similarities[0][i])
-                    enhanced_similarity = self._enhance_similarity(similarity)
-
-                    # Only update if better than existing or not found yet
-                    if item.id not in result_dict or enhanced_similarity > result_dict[item.id]["similarity"]:
-                        result_dict[item.id] = {
-                            "id": item.id,
-                            "content": item.content,
-                            "similarity": enhanced_similarity,
-                            "raw_similarity": similarity,
-                            "metadata": item.metadata,
-                            "level": level
-                        }
-            except Exception as e:
-                print(f"{self.get_time()} Error in enhanced search for level {level}: {e}")
-
-        results = self._apply_cross_level_verification(result_dict)
-
-        # Extract final results
-        results = list(result_dict.values())
-        results.sort(key=lambda x: x["similarity"], reverse=True)
-
-        # Limit to top-k
-        return results[:top_k]
-
-    def _apply_cross_level_verification(self, result_dict: Dict[str, Dict[str, Any]]):
+    def _apply_cross_level_verification(self, result_dict: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """
         Boost confidence for items found across multiple levels.
 
         Args:
-            result_dict: Dictionary of search results
-        """
-        # Group results by item
-        item_levels = {}
-        for item_id, result in result_dict.items():
-            if result.get("level") is not None:  # Check if level is specified
-                if item_id not in item_levels:
-                    item_levels[item_id] = []
-                item_levels[item_id].append((result.get("level", 0), result["raw_similarity"]))
-
-        # Apply boost for items found in multiple levels
-        for item_id, level_info in item_levels.items():
-            if len(level_info) > 1:
-                # Calculate weighted average based on level
-                weighted_sum = 0.0
-                total_weight = 0.0
-
-                for level, sim in level_info:
-                    # Higher weight for higher levels
-                    level_weight = 1.0 + (level * 0.2)
-                    weighted_sum += sim * level_weight
-                    total_weight += level_weight
-
-                # Calculate weighted average
-                weighted_avg = weighted_sum / total_weight if total_weight > 0 else 0.0
-
-                # Apply bonus based on level agreement (up to 20% boost)
-                cross_level_bonus = min(0.2, 0.05 * len(level_info))
-
-                # Apply the combined boost
-                if item_id in result_dict:
-                    current_sim = result_dict[item_id]["similarity"]
-
-                    # Greater boost for high-confidence matches
-                    if current_sim > 0.7:
-                        boost_factor = 1.0 + cross_level_bonus + (weighted_avg * 0.1)
-                    else:
-                        boost_factor = 1.0 + (cross_level_bonus + (weighted_avg * 0.1)) * 0.6
-
-                    # Apply the boost with a cap at 1.0
-                    result_dict[item_id]["similarity"] = min(1.0, current_sim * boost_factor)
-                    result_dict[item_id]["cross_level_bonus"] = cross_level_bonus
-                    result_dict[item_id]["found_in_levels"] = [lvl for lvl, _ in level_info]
-
-    def format_for_context(self, results: List[Dict[str, Any]], query: str = None) -> str:
-        """
-        Format retrieved items for inclusion in the context.
-
-        Args:
-            results: List of retrieval results
-            query: Optional query that triggered the retrieval
+            result_dict: Dictionary of search results by item ID
 
         Returns:
-            Formatted context string
+            Updated result_dict with verification applied
         """
-        if not results:
-            return ""
+        try:
+            # Group results by item
+            item_levels = {}
+            for item_id, result in result_dict.items():
+                if "level" in result:  # Check if level is specified
+                    if item_id not in item_levels:
+                        item_levels[item_id] = []
+                    item_levels[item_id].append((result.get("level", 0), result["raw_similarity"]))
 
-        # Sort by similarity (should already be sorted)
-        results.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+            # Apply boost for items found in multiple levels
+            for item_id, level_info in item_levels.items():
+                if len(level_info) > 1:
+                    # Calculate weighted average based on level
+                    weighted_sum = 0.0
+                    total_weight = 0.0
 
-        # Calculate adaptive thresholds
-        similarities = [r.get("similarity", 0) for r in results]
-        max_sim = max(similarities) if similarities else 0
+                    for level, sim in level_info:
+                        # Higher weight for higher levels
+                        level_weight = 1.0 + (level * 0.2)
+                        weighted_sum += sim * level_weight
+                        total_weight += level_weight
 
-        high_threshold = max(0.7, max_sim * 0.9)  # At least 90% of max
-        medium_threshold = max(0.5, max_sim * 0.7)  # At least 70% of max
+                    # Calculate weighted average
+                    weighted_avg = weighted_sum / total_weight if total_weight > 0 else 0.0
 
-        # Group by confidence levels
-        high_confidence = []
-        medium_confidence = []
-        low_confidence = []
+                    # Apply bonus based on level agreement (up to 20% boost)
+                    cross_level_bonus = min(0.2, 0.05 * len(level_info))
 
-        for result in results:
-            similarity = result.get("similarity", 0)
-            if similarity >= high_threshold:
-                high_confidence.append(result)
-            elif similarity >= medium_threshold:
-                medium_confidence.append(result)
-            else:
-                low_confidence.append(result)
+                    # Apply the combined boost
+                    if item_id in result_dict:
+                        current_sim = result_dict[item_id]["similarity"]
 
-        # Build formatted output
-        output = "MEMORY CONTEXT:\n"
+                        # Greater boost for high-confidence matches
+                        if current_sim > 0.7:
+                            boost_factor = 1.0 + cross_level_bonus + (weighted_avg * 0.1)
+                        else:
+                            boost_factor = 1.0 + (cross_level_bonus + (weighted_avg * 0.1)) * 0.6
 
-        # Add high confidence items
-        if high_confidence:
-            output += "\nHIGH RELEVANCE INFORMATION:\n"
-            for i, item in enumerate(high_confidence[:3]):  # Top 3
-                content = item['content'].strip()
-                item_id = item.get('id', '')[-6:]  # Short ID
-                output += f"- [{item_id}] {content}\n"
+                        # Apply the boost with a cap at 1.0
+                        result_dict[item_id]["similarity"] = min(1.0, current_sim * boost_factor)
+                        result_dict[item_id]["cross_level_bonus"] = cross_level_bonus
+                        result_dict[item_id]["found_in_levels"] = [lvl for lvl, _ in level_info]
+        except Exception as e:
+            print(f"{self.get_time()} Error in cross-level verification: {e}")
+            # Continue without applying verification rather than failing
 
-        # Add medium confidence items
-        if medium_confidence:
-            output += "\nRELEVANT INFORMATION:\n"
-            for i, item in enumerate(medium_confidence[:4]):  # Top 4
-                content = item['content'].strip()
-                item_id = item.get('id', '')[-6:]
-                output += f"- [{item_id}] {content}\n"
-
-        # Add low confidence items if needed
-        if low_confidence and len(high_confidence) + len(medium_confidence) < 3:
-            output += "\nPOTENTIALLY RELEVANT:\n"
-            for i, item in enumerate(low_confidence[:2]):  # Top 2
-                content = item['content'].strip()
-                item_id = item.get('id', '')[-6:]
-                output += f"- [{item_id}] {content}\n"
-
-        # Add a reminder about using the memory
-        output += "\nUse the information above to help answer the query if relevant.\n"
-
-        return output
+        # Return the modified dictionary
+        return result_dict
 
     def remove(self, item_id: str) -> bool:
         """
@@ -1231,6 +1446,10 @@ class MemoryManager:
             # Get batch
             batch = self.embeddings[i:i+batch_size]
 
+            # Skip empty batches
+            if not batch:
+                continue
+
             # Display progress
             self.display_progress_bar(batch_idx+1, total_batches,
                                prefix=f'{self.get_time()} Indexing:',
@@ -1347,21 +1566,48 @@ class MemoryManager:
                 self.embeddings = []
                 self.id_to_index = {}
 
-                # Process items with dimension handling
+                # Load metadata to get embedding dimension and deleted IDs
+                metadata_path = os.path.join(self.storage_path, "metadata.json")
+                if os.path.exists(metadata_path):
+                    try:
+                        with open(metadata_path, 'r', encoding='utf-8') as f:
+                            metadata = json.load(f)
+
+                        # Set embedding dimension from metadata if available
+                        if 'embedding_dim' in metadata and metadata['embedding_dim'] is not None:
+                            self.embedding_dim = metadata['embedding_dim']
+
+                        # Load deleted IDs
+                        if 'deleted_ids' in metadata:
+                            self.deleted_ids = set(metadata['deleted_ids'])
+                    except Exception as e:
+                        print(f"{self.get_time()} Error loading metadata: {e}")
+
+                # Process items with dimension detection and handling
                 for i, item_data in enumerate(items_data):
                     try:
+                        # Detect embedding dimension from first item if not set
+                        if self.embedding_dim is None and i == 0 and i < len(embeddings):
+                            self.embedding_dim = len(embeddings[i])
+                            print(f"{self.get_time()} Detected embedding dimension: {self.embedding_dim}")
+
                         # Get embedding with dimension handling
                         if i < len(embeddings):
                             embedding = embeddings[i]
 
                             # Check dimension and resize if needed
-                            if len(embedding) != self.embedding_dim:
+                            if self.embedding_dim is not None and len(embedding) != self.embedding_dim:
                                 if len(embedding) > self.embedding_dim:
                                     # Truncate
                                     embedding = embedding[:self.embedding_dim]
                                 else:
                                     # Pad with zeros
                                     embedding = np.pad(embedding, (0, self.embedding_dim - len(embedding)))
+
+                                # Normalize after resizing
+                                norm = np.linalg.norm(embedding)
+                                if norm > 1e-10:
+                                    embedding = embedding / norm
                         else:
                             # Create random embedding if no embedding available
                             print(f"{self.get_time()} No embedding for item {i}, creating random one")
