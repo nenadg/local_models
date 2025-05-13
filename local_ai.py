@@ -923,29 +923,30 @@ class MemoryEnhancedChat:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
             # Show heatmap legend if enabled
-            if show_confidence and not self.stop_event.is_set() and not fallback_shown:
+            # if show_confidence and not self.stop_event.is_set() and not fallback_shown:
                 # Calculate token usage
-                prompt_tokens = len(tokenized['input_ids'][0])
-                response_tokens_count = len(token_buffer) if 'token_buffer' in locals() else 0
-                total_tokens = prompt_tokens + response_tokens_count
+            
+            prompt_tokens = len(tokenized['input_ids'][0])
+            response_tokens_count = len(token_buffer) if 'token_buffer' in locals() else 0
+            total_tokens = prompt_tokens + response_tokens_count
 
-                # Get max context window from tokenizer
-                max_tokens = self.tokenizer.model_max_length
+            # Get max context window from tokenizer
+            max_tokens = self.tokenizer.model_max_length
 
-                # Display legend with context window usage
-                heatmap.print_legend(current_tokens=total_tokens, max_tokens=max_tokens)
+            # Display legend with context window usage
+            heatmap.print_legend(current_tokens=total_tokens, max_tokens=max_tokens)
 
-                print()  # Add a newline
-                confidence_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
-                normalized_metrics = self.response_filter.normalize_confidence_metrics(confidence_metrics)
-                should_filter, reason, details = self.response_filter.should_filter(normalized_metrics, response, user_query, tokens_received)
+            print()  # Add a newline
+            confidence_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
+            normalized_metrics = self.response_filter.normalize_confidence_metrics(confidence_metrics)
+            should_filter, reason, details = self.response_filter.should_filter(normalized_metrics, response, user_query, tokens_received)
+            print("DETAILS", json.dumps(details))
+            # Get confidence metrics
+            metrics = details
 
-                # Get confidence metrics
-                metrics = details
-
-                # Generate and display confidence indicator
-                indicator = self.response_filter.get_confidence_indicator(metrics)
-                print(indicator)
+            # Generate and display confidence indicator
+            indicator = self.response_filter.get_confidence_indicator(metrics)
+            print(indicator)
 
             # OPTIMIZATION: More aggressive cleanup
             self.resource_manager.clear_cache()

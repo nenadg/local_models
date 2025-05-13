@@ -313,7 +313,7 @@ def format_memories_by_category(memories: List[Dict[str, Any]], main_category: s
 
     # Define a relevance threshold relative to max similarity
     # Documents with similarity > 75% of max are considered highly relevant
-    relevance_threshold = max_similarity # * 0.75
+    relevance_threshold = max_similarity * 1.05
 
     # Group memories by relevance first, then by category
     highly_relevant = []

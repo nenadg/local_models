@@ -1124,8 +1124,8 @@ class MemoryManager:
                             found_at_this_level += 1
 
                     # Log level results for debugging
-                    if found_at_this_level > 0:
-                        print(f"{self.get_time()} Level {level} found {found_at_this_level} items")
+                    # if found_at_this_level > 0:
+                    #     print(f"{self.get_time()} Level {level} found {found_at_this_level} items")
 
                 except Exception as e:
                     print(f"{self.get_time()} Error processing level {level}: {e}")

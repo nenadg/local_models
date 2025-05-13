@@ -141,8 +141,6 @@ class ResponseFilter:
             }
         }
 
-
-
     def get_time(self) -> str:
         """Get formatted timestamp for logging."""
         return datetime.now().strftime("[%d/%m/%y %H:%M:%S] [ResponseFilter] ")
@@ -151,6 +149,317 @@ class ResponseFilter:
         """Log messages if debug mode is enabled."""
         if self.debug_mode:
             print(f"[ResponseFilter] {message}")
+
+    def _calculate_text_similarity(self, response: str, memories: List[Dict[str, Any]]) -> float:
+        """Calculate text-based similarity as a fallback."""
+        import re
+
+        # Extract key terms from response
+        response_terms = set(re.findall(r'\b[A-Za-z]{3,}\b', response.lower()))
+
+        # Calculate term overlap with each memory
+        similarities = []
+        for memory in memories:
+            memory_content = memory.get('content', '').lower()
+            memory_terms = set(re.findall(r'\b[A-Za-z]{3,}\b', memory_content))
+
+            # Calculate Jaccard similarity
+            if response_terms and memory_terms:
+                intersection = len(response_terms.intersection(memory_terms))
+                union = len(response_terms.union(memory_terms))
+                similarity = intersection / union
+
+                # Apply memory's original similarity weight if available
+                memory_similarity = memory.get('similarity', 1.0)
+                weighted_similarity = similarity * memory_similarity
+
+                similarities.append(weighted_similarity)
+
+        # Return max similarity if any, otherwise 0
+        return max(similarities) if similarities else 0.0
+
+    def calculate_aggressive_content_entropy(self, content: str) -> Dict[str, float]:
+        """
+        Aggressive content-based semantic entropy calculation that's more sensitive to problematic patterns.
+
+        Args:
+            content: Text content to analyze
+
+        Returns:
+            Dictionary with entropy metrics and pattern indicators
+        """
+        # Quick check for very short content
+        tokens = content.split()
+        if len(tokens) < 3:
+            return {
+                "entropy": 0.5,  # Low entropy for very short content
+                "severity": 0.3,
+                "pattern_score": 0.0,
+                "repetition_score": 0.0
+            }
+
+        # Base semantic entropy calculation
+        base_entropy = self.calculate_semantic_entropy(content)
+
+        # Aggressive pattern detection
+        severity = 0.0
+        pattern_score = 0.0
+
+        # 1. Repetition detection - aggressively penalize repeated words/phrases
+        word_freq = {}
+        bigram_freq = {}
+
+        # Count word and bigram frequencies
+        for i, token in enumerate(tokens):
+            # Word frequency
+            token_lower = token.lower()
+            word_freq[token_lower] = word_freq.get(token_lower, 0) + 1
+
+            # Bigram frequency
+            if i < len(tokens) - 1:
+                bigram = f"{token_lower} {tokens[i+1].lower()}"
+                bigram_freq[bigram] = bigram_freq.get(bigram, 0) + 1
+
+        # Calculate repetition scores
+        repetition_score = 0.0
+
+        # Word repetition penalty (exclude common words)
+        common_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'in', 'on', 'at', 'to', 'for', 'of', 'and', 'or'}
+        for word, count in word_freq.items():
+            if word not in common_words and count > 2:
+                repetition_score += (count - 2) * 0.1
+
+        # Bigram repetition penalty (stronger signal)
+        for bigram, count in bigram_freq.items():
+            if count > 1:
+                repetition_score += (count - 1) * 0.3
+
+        # 2. Pattern complexity detection using POS tags
+        pos_transition_score = 0.0
+
+        try:
+            import nltk
+            try:
+                nltk.data.find('taggers/averaged_perceptron_tagger')
+            except LookupError:
+                nltk.download('averaged_perceptron_tagger', quiet=True)
+                nltk.download('punkt', quiet=True)
+
+            pos_tags = nltk.pos_tag(tokens)
+
+            # Analyze POS transitions (low diversity = potential issue)
+            pos_transitions = {}
+            for i in range(len(pos_tags) - 1):
+                transition = f"{pos_tags[i][1][:2]}->{pos_tags[i+1][1][:2]}"
+                pos_transitions[transition] = pos_transitions.get(transition, 0) + 1
+
+            # Low POS transition diversity indicates repetitive structure
+            unique_transitions = len(pos_transitions)
+            total_transitions = len(pos_tags) - 1
+
+            if total_transitions > 0:
+                transition_diversity = unique_transitions / total_transitions
+                # Penalize low diversity
+                if transition_diversity < 0.3:
+                    pos_transition_score = (0.3 - transition_diversity) * 2.0
+
+            # Check for specific problematic POS patterns
+            pos_sequence = [tag[1] for tag in pos_tags]
+
+            # Pattern: Too many consecutive same POS tags
+            max_consecutive = 0
+            current_consecutive = 1
+
+            for i in range(1, len(pos_sequence)):
+                if pos_sequence[i][:2] == pos_sequence[i-1][:2]:
+                    current_consecutive += 1
+                    max_consecutive = max(max_consecutive, current_consecutive)
+                else:
+                    current_consecutive = 1
+
+            if max_consecutive > 4:
+                pattern_score += (max_consecutive - 4) * 0.2
+
+        except ImportError:
+            # Fallback: Use simple pattern detection
+            # Look for repeated sentence structures
+            sentences = content.split('.')
+            sentence_patterns = {}
+
+            for sentence in sentences:
+                if sentence.strip():
+                    # Create simple pattern from sentence structure
+                    words = sentence.strip().split()
+                    if len(words) > 2:
+                        pattern = f"{len(words)}-{words[0].lower()}-{words[-1].lower()}"
+                        sentence_patterns[pattern] = sentence_patterns.get(pattern, 0) + 1
+
+            # Penalize repeated sentence patterns
+            for pattern, count in sentence_patterns.items():
+                if count > 1:
+                    pattern_score += (count - 1) * 0.3
+
+        # 3. Content quality indicators
+        quality_issues = 0.0
+
+        # Check for incomplete sentences
+        if not content.rstrip().endswith(('.', '!', '?')):
+            quality_issues += 0.2
+
+        # Check for very short sentences (potential fragmentation)
+        sentences = re.split(r'[.!?]+', content)
+        very_short_sentences = sum(1 for s in sentences if 0 < len(s.split()) < 3)
+        if len(sentences) > 0:
+            short_sentence_ratio = very_short_sentences / len(sentences)
+            if short_sentence_ratio > 0.3:
+                quality_issues += short_sentence_ratio * 0.5
+
+        # Check for excessive punctuation or special characters
+        special_char_ratio = len(re.findall(r'[^a-zA-Z0-9\s.,!?]', content)) / max(1, len(content))
+        if special_char_ratio > 0.1:
+            quality_issues += special_char_ratio * 2.0
+
+        # 4. Entropy adjustments based on content characteristics
+
+        # Adjust base entropy for problematic patterns
+        adjusted_entropy = base_entropy
+
+        # Low entropy with high repetition is worse
+        if base_entropy < 1.0 and repetition_score > 0.5:
+            adjusted_entropy *= 0.7  # Reduce entropy to flag as more problematic
+            severity += 0.3
+
+        # High entropy with quality issues indicates garbled content
+        if base_entropy > 2.0 and quality_issues > 0.3:
+            adjusted_entropy *= 1.5  # Increase entropy to flag as problematic
+            severity += 0.4
+
+        # 5. Calculate final severity score
+        severity = min(1.0, severity + (
+            repetition_score * 0.3 +
+            pos_transition_score * 0.2 +
+            pattern_score * 0.3 +
+            quality_issues * 0.2
+        ))
+
+        # 6. Special case detection for known problematic patterns
+
+        # Check for context overflow patterns
+        overflow_patterns = [
+            r'(-rw-r--r--.*?root.*?\d+[KMG]?)',  # File listings
+            r'(\$\s*\$\s*\$\s*\$+)',              # Repeated $ signs
+            r'(txt,txt,txt)',                     # Repeated words with commas
+            r'(\w+\.\w+\.\w+\.\w+)',              # Repeated dotted patterns
+        ]
+
+        for pattern in overflow_patterns:
+            if re.search(pattern, content):
+                severity = max(severity, 0.8)
+                pattern_score += 0.5
+                break
+
+        # return adjusted_entropy
+        return {
+            "entropy": adjusted_entropy,
+            "base_entropy": base_entropy,
+            "severity": severity,
+            "repetition_score": min(1.0, repetition_score),
+            "pattern_score": min(1.0, pattern_score),
+            "quality_issues": min(1.0, quality_issues),
+            "pos_transition_score": pos_transition_score,
+            "token_count": len(tokens)
+        }
+
+    # def calculate_semantic_entropy(self, token_confidences: List[float]) -> float:
+    #     """
+    #     Calculate semantic entropy using the formula: SE = -∑ₓ P(c|x) log P(c|x)
+
+    #     Args:
+    #         token_confidences: List of token confidence values
+
+    #     Returns:
+    #         Semantic entropy value
+    #     """
+    #     if not token_confidences or len(token_confidences) < 1:
+    #         return 0.0
+
+    #     # Create semantic clusters from token confidences
+    #     clusters = {}
+    #     # Simple clustering based on confidence ranges
+    #     for conf in token_confidences:
+    #         # Create 5 clusters (0.0-0.2, 0.2-0.4, etc.)
+    #         cluster_idx = min(4, int(conf * 5))
+    #         clusters[cluster_idx] = clusters.get(cluster_idx, 0) + 1
+
+    #     # Calculate probabilities
+    #     total = len(token_confidences)
+    #     probabilities = [count/total for count in clusters.values()]
+
+    #     # Calculate entropy using the formula SE = -∑ₓ P(c|x) log P(c|x)
+    #     entropy = -sum(p * np.log2(p) for p in probabilities if p > 0)
+
+    #     return entropy
+
+    def calculate_semantic_entropy(self, content: str) -> float:
+        """
+        Calculate semantic entropy of content using the SE = -∑ₓ P(c|x) log P(c|x) formula.
+
+        Args:
+            content: Text content to analyze
+
+        Returns:
+            Semantic entropy value (0.0-2.5 typically)
+        """
+        # Tokenize the content (simple word splitting as fallback)
+        tokens = content.split()
+
+        if len(tokens) < 5:
+            return 0.0  # Not enough tokens to calculate meaningful entropy
+
+        # Create semantic clusters (we'll use POS tags as a simple proxy for semantic roles)
+        try:
+            import nltk
+            try:
+                nltk.data.find('taggers/averaged_perceptron_tagger')
+            except LookupError:
+                nltk.download('averaged_perceptron_tagger', quiet=True)
+                nltk.download('punkt', quiet=True)
+
+            # Get POS tags
+            pos_tags = nltk.pos_tag(tokens)
+
+            # Group by POS category
+            clusters = {}
+            for _, pos in pos_tags:
+                # Simplify tags to broader categories
+                if pos.startswith('N'):  # Nouns
+                    category = 'noun'
+                elif pos.startswith('V'):  # Verbs
+                    category = 'verb'
+                elif pos.startswith('J'):  # Adjectives
+                    category = 'adj'
+                elif pos.startswith('R'):  # Adverbs
+                    category = 'adv'
+                else:
+                    category = 'other'
+
+                clusters[category] = clusters.get(category, 0) + 1
+        except ImportError:
+            # Fallback if nltk not available - use word length as a crude proxy
+            clusters = {}
+            for token in tokens:
+                length_category = min(5, len(token) // 3)  # Group by length category
+                clusters[length_category] = clusters.get(length_category, 0) + 1
+
+        # Calculate probabilities and entropy
+        total = len(tokens)
+        probabilities = [count/total for count in clusters.values()]
+
+        # Calculate entropy using the formula SE = -∑ₓ P(c|x) log P(c|x)
+        import math
+        entropy = -sum(p * math.log2(p) for p in probabilities if p > 0)
+
+        return entropy
 
     def detect_repetitive_patterns(self, response: str, incremental_only: bool = False) -> dict:
         """
@@ -1085,11 +1394,21 @@ class ResponseFilter:
                 max_similarity = max([m.get('similarity', 0) for m in memory_details], default=0)
                 memory_supported = max_similarity > 0.3
 
+        # Calculate semantic entropy - NEW!
+        semantic_entropy_calculation = self.calculate_aggressive_content_entropy(response) # self.calculate_semantic_entropy(response)
+        semantic_entropy = semantic_entropy_calculation.get('entropy', 0.0)
+
         # FIXED: Calculate a better bounded uncertainty score with weighted components
         confidence_component = max(0.0, min(1.0, (1 - confidence) * 0.35))
         quality_component = max(0.0, min(1.0, (1 - quality_results['quality_score']) * 0.25))
         entropy_component = max(0.0, min(1.0, (entropy / thresholds['entropy']) * 0.15))
         perplexity_component = max(0.0, min(1.0, (perplexity / thresholds['perplexity']) * 0.15))
+
+        # NEW! Add semantic entropy component
+        # semantic_entropy = pattern_results.get("semantic_entropy", 0.0)
+        max_expected_entropy = 1.16 # 2.32  # Theoretical max for 5 equal clusters
+        semantic_component = max(0.0, min(1.0, (semantic_entropy / max_expected_entropy) * 0.2))
+
         pattern_component = max(0.0, min(1.0, pattern_results['severity'] * self.pattern_detection_weight))
         memory_bonus = -0.1 if memory_supported else 0
 
@@ -1099,6 +1418,7 @@ class ResponseFilter:
             quality_component +
             entropy_component +
             perplexity_component +
+            semantic_component +
             pattern_component +
             memory_bonus
         ))
@@ -1119,8 +1439,23 @@ class ResponseFilter:
             'memory_count': memory_count,
             'memory_details': memory_details,  # Explicitly pass all memory details
             'thresholds': thresholds,
-            'overflow_results': overflow_results
+            'overflow_results': overflow_results,
+            'semantic_entropy': semantic_entropy,
+            'semantic_component': semantic_component,
+
+            'semantic_base_entropy': semantic_entropy_calculation.get('base_entropy', 0.0),
+            'semantic_severity': semantic_entropy_calculation.get('severity', 0.0),
+            'semantic_repetition_score': min(1.0, semantic_entropy_calculation.get('repetition_score', 0.0)),
+            'semantic_pattern_score': min(1.0, semantic_entropy_calculation.get('pattern_score', 0.0)),
+            'semantic_quality_issues': min(1.0, semantic_entropy_calculation.get('quality_issues', 0.0)),
+            'semantic_pos_transition_score': semantic_entropy_calculation.get('pos_transition_score', 0.0),
+            'semantic_token_count': semantic_entropy_calculation.get('token_cound', 0.0)
+            # 'aggressive_entropy': aggressive_entropy
         }
+
+        # Use semantic entropy as an indicator of pattern issues
+        if semantic_entropy > 2.0:  # High entropy indicates uncertainty
+            return True, "high_semantic_uncertainty", details
 
         if has_reason:
             return return_reason, reason, details

@@ -64,6 +64,11 @@ For OCR:
 
 `sudo apt-get install tesseract-ocr`
 
+For semantic entropy:
+
+> > > import nltk
+> > > nltk.download('averaged_perceptron_tagger_eng')
+
 ## Usage
 
 ### Basic Usage
