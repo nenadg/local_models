@@ -1300,6 +1300,15 @@ class ResponseFilter:
 
         return results
 
+    def is_likely_hallucination(self, metrics, semantic_component):
+        return (
+            metrics['entropy'] > 1.65 or
+            semantic_component > 0.28 or
+            metrics['severity'] > 0.05 or
+            (metrics['entropy'] > 1.5 and
+             metrics['repetition_score'] > 0.1)
+        )
+
     def should_filter(
         self,
         metrics: Dict[str, float],
@@ -1423,6 +1432,8 @@ class ResponseFilter:
             memory_bonus
         ))
 
+        is_likely_hallucination = self.is_likely_hallucination(semantic_entropy_calculation, semantic_component)
+
         # Adjust filtering threshold based on query domain
         uncertainty_threshold = 0.7  # Higher than previous 0.55
 
@@ -1440,21 +1451,11 @@ class ResponseFilter:
             'memory_details': memory_details,  # Explicitly pass all memory details
             'thresholds': thresholds,
             'overflow_results': overflow_results,
-            'semantic_entropy': semantic_entropy,
-            'semantic_component': semantic_component,
-
-            'semantic_base_entropy': semantic_entropy_calculation.get('base_entropy', 0.0),
-            'semantic_severity': semantic_entropy_calculation.get('severity', 0.0),
-            'semantic_repetition_score': min(1.0, semantic_entropy_calculation.get('repetition_score', 0.0)),
-            'semantic_pattern_score': min(1.0, semantic_entropy_calculation.get('pattern_score', 0.0)),
-            'semantic_quality_issues': min(1.0, semantic_entropy_calculation.get('quality_issues', 0.0)),
-            'semantic_pos_transition_score': semantic_entropy_calculation.get('pos_transition_score', 0.0),
-            'semantic_token_count': semantic_entropy_calculation.get('token_cound', 0.0)
-            # 'aggressive_entropy': aggressive_entropy
+            'is_likely_hallucination': is_likely_hallucination
         }
 
         # Use semantic entropy as an indicator of pattern issues
-        if semantic_entropy > 2.0:  # High entropy indicates uncertainty
+        if semantic_entropy > 2.0 or is_likely_hallucination:  # High entropy indicates uncertainty
             return True, "high_semantic_uncertainty", details
 
         if has_reason:

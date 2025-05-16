@@ -1078,18 +1078,27 @@ class MemoryEnhancedChat:
             Success status
         """
         try:
-            # Classify query
-            # query_classification = classify_content(query, self.question_classifier)
+            # Get current metrics to check for hallucination
+            current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
+            normalized_metrics = self.response_filter.normalize_confidence_metrics(current_metrics)
 
-            # Save query
-            # query_result = save_to_memory(
-            #     memory_manager=self.memory_manager,
-            #     content=query.strip(),
-            #     classification=query_classification
-            # )
+            # Check if response was flagged as hallucination
+            should_filter, reason, details = self.response_filter.should_filter(
+                normalized_metrics, response, query, len(response.split())
+            )
 
+            # Check for hallucination flag
+            is_hallucination = details.get('is_likely_hallucination', False)
             # Classify response
             response_classification = classify_content(response, self.question_classifier)
+
+            # Add hallucination metadata if detected
+            if is_hallucination:
+                response_classification['hallucination_detected'] = True
+                response_classification['hallucination_score'] = details.get('uncertainty_score', 0.5)
+                response_classification['reliability_penalty'] = 0.7  # Apply 70% penalty
+
+                # print(f"{self.get_time()} Warning: Storing potentially hallucinated response with penalty")
 
             # Save response
             response_result = save_to_memory(

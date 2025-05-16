@@ -845,45 +845,47 @@ class MemoryManager:
             similarities, indices = self.index.search(query_array, search_k)
 
             # Process results with validation
+            # Process results with hallucination penalty
             results = []
             for i, idx in enumerate(indices[0]):
-                # Skip invalid indices
-                if idx == -1:
+                if idx == -1 or similarities[0][i] < min_similarity:
                     continue
 
-                # Skip low similarity results
-                if similarities[0][i] < min_similarity:
-                    continue
-
-                # Validate index bounds
                 if idx >= len(self.items):
-                    print(f"{self.get_time()} Index out of bounds: {idx} >= {len(self.items)}")
                     continue
 
-                # Skip deleted items
                 if idx in self.deleted_ids:
                     continue
 
-                # Get the memory item
                 item = self.items[idx]
                 similarity = float(similarities[0][i])
 
-                # Apply similarity enhancement
-                # enhanced_similarity = self._enhance_similarity(similarity)
+                # Apply hallucination penalty if present
+                if item.metadata.get('hallucination_detected', False):
+                    penalty = item.metadata.get('reliability_penalty', 0.7)
+                    original_similarity = similarity
+                    similarity *= penalty  # Reduce similarity score
 
-                # Add to results
+                    # Log the penalty application
+                    if self.memory_debug:
+                        print(f"{self.get_time()} Applied hallucination penalty: {original_similarity:.3f} -> {similarity:.3f}")
+
+                # Apply similarity enhancement (if not hallucinated)
+                if not item.metadata.get('hallucination_detected', False):
+                    similarity = self._enhance_similarity(similarity)
+
                 results.append({
                     "id": item.id,
                     "content": item.content,
                     "similarity": similarity,
                     "raw_similarity": similarity,
-                    "metadata": item.metadata
+                    "metadata": item.metadata,
+                    "hallucination_warning": item.metadata.get('hallucination_detected', False)
                 })
 
             # Sort by similarity
             results.sort(key=lambda x: x["similarity"], reverse=True)
 
-            # Limit to top-k
             return results[:top_k]
 
         except Exception as e:
@@ -953,7 +955,7 @@ class MemoryManager:
 
     def _enhanced_search(self, query_embedding: np.ndarray, top_k: int, min_similarity: float) -> List[Dict[str, Any]]:
         """
-        Perform enhanced search across multiple embedding levels with proper error handling.
+        Perform enhanced search across multiple embedding levels with proper error handling and hallucination penalties.
 
         Args:
             query_embedding: Normalized query embedding
@@ -988,15 +990,6 @@ class MemoryManager:
 
             # Track results by item ID for merging across levels
             result_dict = {}
-
-            # Start with base level search to ensure we always have results
-            base_results = [] # self._standard_search(query_embedding, top_k * 2, min_similarity)
-
-            # Initialize result dictionary with base results
-            for result in base_results:
-                item_id = result.get("id")
-                if item_id:  # Only add if ID exists
-                    result_dict[item_id] = result
 
             # Check if enhanced indices exist and have correct dimension
             valid_enhanced_indices = {}
@@ -1060,8 +1053,8 @@ class MemoryManager:
                             continue
 
                         # Validate similarity with level-specific threshold
-                        similarity = float(similarities[0][i])
-                        if similarity <= level_min_similarity:
+                        base_similarity = float(similarities[0][i])
+                        if base_similarity <= level_min_similarity:
                             continue
 
                         # Validate index bounds
@@ -1075,49 +1068,60 @@ class MemoryManager:
                         # Get the item
                         item = self.items[idx]
 
-                        # Calculate level-adjusted similarity
-                        # For higher levels, we boost the similarity of novel results
-                        # to promote diversity in the final result set
-                        base_similarity = similarity
-                        # enhanced_similarity = self._enhance_similarity(base_similarity)
+                        # *** HALLUCINATION HANDLING - Apply penalty immediately ***
+                        if item.metadata.get('hallucination_detected', False):
+                            # Apply penalty factor to the similarity score
+                            penalty = item.metadata.get('reliability_penalty', 0.7)
+                            original_similarity = base_similarity
+                            base_similarity *= penalty  # Reduce similarity by penalty factor
 
-                        # Apply level-specific enhancement
-                        # if level == 1:
-                        #     # Level 1: emphasize recall with aggressive enhancement
-                        #     enhanced_similarity = self._enhance_similarity(min(1.0, base_similarity * 1.15))
-                        # elif level == 2:
-                        #     # Level 2: emphasize precision with base enhancement
-                        #     enhanced_similarity = self._enhance_similarity(base_similarity * 0.95)
-                        # elif level == 3:
-                        #     # Level 3: moderate enhancement
-                        #     enhanced_similarity = self._enhance_similarity(base_similarity)
-                        # else:
-                        #     # Other levels: standard enhancement
-                        #     enhanced_similarity = self._enhance_similarity(base_similarity * 0.5)
+                            # Log if debugging is enabled
+                            if hasattr(self, 'memory_debug') and self.memory_debug:
+                                print(f"{self.get_time()} Applied hallucination penalty: {original_similarity:.3f} -> {base_similarity:.3f}")
 
-                        # Add diversity bonus for novel content
-                        # if item.id not in result_dict:
-                        #     # New items get a small novelty bonus
-                        #     novelty_bonus = 0.001 * level
-                        #     enhanced_similarity = min(1.0, enhanced_similarity + novelty_bonus)
+                            # Skip if penalized similarity now falls below threshold
+                            if base_similarity <= level_min_similarity:
+                                continue
+
+                        # Apply regular similarity enhancement only if not hallucinated
+                        if not item.metadata.get('hallucination_detected', False):
+                            enhanced_similarity = self._enhance_similarity(base_similarity)
+                        else:
+                            # For hallucinated content, don't apply the enhancement
+                            enhanced_similarity = base_similarity
+
+                        # Calculate level-adjusted similarity for ranking
+                        final_similarity = enhanced_similarity
+
+                         # Add diversity bonus for novel content only if reliable
+                        if item.id not in result_dict and not item.metadata.get('hallucination_detected', False):
+                            # New items get a small novelty bonus if not hallucinated
+                            novelty_bonus = 0.01 * level
+                            final_similarity = min(1.0, final_similarity + novelty_bonus)
+
+                        # Create a rank score that considers both similarity and reliability
+                        reliability_score = 1.0 - item.metadata.get('hallucination_score', 0.0)
+                        rank_score = final_similarity * reliability_score
 
                         # Add to result_dict if better than existing or not found yet
-                        if item.id not in result_dict: # or enhanced_similarity > result_dict[item.id]["similarity"]:
+                        if item.id not in result_dict or rank_score > result_dict[item.id].get("rank_score", 0):
                             # When replacing a previous level result, preserve the best raw similarity
                             old_raw = result_dict.get(item.id, {}).get("raw_similarity", 0)
-                            best_raw = max(old_raw, similarity)
+                            best_raw = max(old_raw, base_similarity)
 
                             # Create result with improved metadata for debugging
                             result_dict[item.id] = {
                                 "id": item.id,
                                 "content": item.content,
-                                "similarity": similarity,
+                                "similarity": final_similarity,
                                 "raw_similarity": best_raw,
                                 "metadata": item.metadata,
                                 "level": level,
+                                "rank_score": rank_score,
+                                "hallucination_warning": item.metadata.get('hallucination_detected', False),
                                 "level_metrics": {
-                                    "original_similarity": similarity,
-                                    "enhancement": 1 # enhanced_similarity - similarity
+                                    "original_similarity": base_similarity,
+                                    "enhancement": final_similarity - base_similarity # 1 # enhanced_similarity - similarity
                                 }
                             }
 
@@ -1132,24 +1136,36 @@ class MemoryManager:
                     traceback.print_exc()
                     # Continue to next level
 
-            # print("\nRESULT DICT", result_dict)
-            print("\n")
-
-            # Apply cross-level verification to boost confidence in items found in multiple levels
+            # # Apply cross-level verification to boost confidence in items found in multiple levels
             result_dict = self._apply_cross_level_verification(result_dict)
 
             # Extract final results
             results = list(result_dict.values())
 
-            # Sort by similarity
-            # results.sort(key=lambda x: x["similarity"], reverse=True)
+            # Sort by rank_score rather than just similarity to prioritize reliable content
+            results.sort(key=lambda x: x.get("rank_score", x.get("similarity", 0)), reverse=True)
 
-            # Apply diversity promotion
+            # Apply diversity promotion (modified to consider hallucination)
             results = self._promote_diversity(results, top_k)
 
-            # print ("\nRESULTS", results)
             # Limit to top-k
             return results[:top_k]
+            # # print("\nRESULT DICT", result_dict)
+            # print("\n")
+
+
+            # # Extract final results
+            # results = list(result_dict.values())
+
+            # # Sort by similarity
+            # # results.sort(key=lambda x: x["similarity"], reverse=True)
+
+            # # Apply diversity promotion
+            # results = self._promote_diversity(results, top_k)
+
+            # # print ("\nRESULTS", results)
+            # # Limit to top-k
+            # return results[:top_k]
 
         except Exception as e:
             print(f"{self.get_time()} Error in enhanced search: {e}")
@@ -1159,7 +1175,7 @@ class MemoryManager:
 
     def _promote_diversity(self, results: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
         """
-        Promote diversity in search results to avoid redundancy.
+        Promote diversity in search results while prioritizing reliable results and avoid redundancy.
 
         Args:
             results: Sorted list of search results
@@ -1174,16 +1190,31 @@ class MemoryManager:
         # Always keep the top result
         diverse_results = [results[0]]
 
-        # Calculate content embeddings for remaining results
-        remaining = results[1:]
+        # Separate remaining results by reliability
+        reliable_remaining = []
+        unreliable_remaining = []
 
-        # Select additional results that maximize diversity
-        while len(diverse_results) < top_k and remaining:
+        for result in results[1:]:
+            if result.get("hallucination_warning", False):
+                unreliable_remaining.append(result)
+            else:
+                reliable_remaining.append(result)
+
+        # Select additional results that maximize diversity, prioritizing reliable ones
+        while len(diverse_results) < top_k:
+            # Try to pick from reliable results first
+            if reliable_remaining:
+                candidate_pool = reliable_remaining
+            elif unreliable_remaining:  # Fall back to unreliable if no reliable left
+                candidate_pool = unreliable_remaining
+            else:  # No more candidates
+                break
+
             # Find the result that has the highest minimum distance to selected results
             best_idx = -1
             best_min_distance = -1
 
-            for idx, candidate in enumerate(remaining):
+            for idx, candidate in enumerate(candidate_pool):
                 # Calculate minimum distance to already selected results
                 min_distance = float('inf')
                 candidate_content = candidate.get("content", "")
@@ -1191,7 +1222,7 @@ class MemoryManager:
                 for selected in diverse_results:
                     selected_content = selected.get("content", "")
 
-                    # Simple text distance (could use embeddings for better results)
+                    # Simple text distance
                     distance = self._text_distance(candidate_content, selected_content)
                     min_distance = min(min_distance, distance)
 
@@ -1202,12 +1233,16 @@ class MemoryManager:
 
             # Add the most diverse result
             if best_idx >= 0:
-                diverse_results.append(remaining[best_idx])
-                remaining.pop(best_idx)
+                diverse_results.append(candidate_pool[best_idx])
+                candidate_pool.pop(best_idx)
             else:
-                # Fall back to the next best result by similarity
-                diverse_results.append(remaining[0])
-                remaining.pop(0)
+                # Fall back to the next best result by rank score
+                diverse_results.append(candidate_pool[0])
+                candidate_pool.pop(0)
+
+            # Update the pool references if we've emptied reliable candidates
+            if reliable_remaining == candidate_pool and not reliable_remaining:
+                candidate_pool = unreliable_remaining
 
         return diverse_results
 
