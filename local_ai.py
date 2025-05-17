@@ -43,11 +43,8 @@ from token_buffer import TokenBuffer
 from memory_utils import (
     extract_topics,
     classify_content,
-    generate_memory_metadata,
-    format_content_for_storage,
     save_to_memory,
-    format_memories_by_category,
-    extract_key_statements
+    format_memories_by_category
 )
 
 # Default system message template
@@ -562,12 +559,7 @@ class MemoryEnhancedChat:
 
         print(f"{self.get_time()} Similarity enhancement factor set to {factor}")
 
-    def chat(self,
-            messages: List[Dict[str, str]],
-            max_new_tokens: int = 128,
-            temperature: float = 0.7,
-            enable_memory: Optional[bool] = None,
-            show_confidence: bool = False) -> str:
+    def chat(self, messages: List[Dict[str, str]], max_new_tokens: int = 128, temperature: float = 0.7, enable_memory: Optional[bool] = None, show_confidence: bool = False) -> str:
         """
         Generate a response with memory integration and streaming.
 
@@ -954,30 +946,6 @@ class MemoryEnhancedChat:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    def _format_tabular_memory(self, content: str) -> str:
-        """Format tabular data for better readability and comprehension."""
-        lines = content.strip().split('\n')
-        if len(lines) < 2:
-            return content
-
-        # Extract header and data rows
-        header = lines[0]
-        data_rows = lines[1:]
-
-        # Create a structured representation
-        formatted = "TABLE DATA:\n"
-        formatted += f"Headers: {header}\n"
-        formatted += "Data rows:\n"
-
-        # Add each row with a number for reference
-        for i, row in enumerate(data_rows, 1):
-            formatted += f"Row {i}: {row}\n"
-
-        # Add guidance for interpretation
-        formatted += "\nWhen answering questions about this table, refer to specific columns by name and rows by number.\n"
-
-        return formatted
-
     def _integrate_memory(self, messages: List[Dict[str, str]], query: str) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]]]:
         """
         Enhanced method to integrate relevant memories into conversation messages.
@@ -1108,62 +1076,6 @@ class MemoryEnhancedChat:
                 related_content=query.strip()
             )
 
-            # topics = extract_topics(query.lower())
-            # topics_saved = 0
-
-            # for topic in topics:
-            #     # Classify each statement
-            #     topic_classification = classify_content(topic, self.question_classifier)
-
-            #     # Save statement to memory
-            #     topic_result = save_to_memory(
-            #         memory_manager=self.memory_manager,
-            #         content=topic,
-            #         classification=topic_classification
-            #     )
-
-            #     if topic_result.get("saved", False):
-            #         topics_saved += 1
-
-            # # Extract and save key statements from the response
-            # key_statements = extract_key_statements(response)
-            # statements_saved = 0
-
-            # for statement in key_statements:
-            #     # Classify each statement
-            #     statement_classification = classify_content(statement, self.question_classifier)
-
-            #     # Save statement to memory
-            #     statement_result = save_to_memory(
-            #         memory_manager=self.memory_manager,
-            #         content=statement,
-            #         classification=statement_classification
-            #     )
-
-            #     if statement_result.get("saved", False):
-            #         statements_saved += 1
-
-            # Format as QA pairs for better retrieval
-            # This helps when users ask similar questions later
-            # qa_format = f"User asked or stated the following - {query.strip()}\nI responded - {response.strip()}"
-            # qa_pair_classification = classify_content(qa_format, self.question_classifier)
-
-            # qa_classification = {
-            #     "main_category": qa_pair_classification,
-            #     "confidence": 0.9
-            # }
-
-            # qa_result = save_to_memory(
-            #     memory_manager=self.memory_manager,
-            #     content=qa_format,
-            #     classification=qa_pair_classification
-            # )
-
-            # memories_added = (1 if query_result.get("saved", False) else 0) + \
-            #                  (1 if response_result.get("saved", False) else 0) + \
-            #                  statements_saved + \
-            #                  (1 if qa_result.get("saved", False) else 0)
-
             memories_added = (1 if response_result.get("saved", False) else 0)
 
             self.memory_stats["items_added"] += memories_added
@@ -1174,135 +1086,6 @@ class MemoryEnhancedChat:
         except Exception as e:
             print(f"{self.get_time()} Error saving to memory: {e}")
             return False
-
-    def _extract_key_statements(self, text: str) -> List[str]:
-        """
-        Extract key factual statements from text.
-        Focus on simple declarative sentences and clear facts.
-        """
-        statements = []
-
-        # Simple sentence splitting
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-
-        for sentence in sentences:
-            sentence = sentence.strip()
-            # Skip short sentences
-            if len(sentence) < 10:
-                continue
-
-            # Look for factual declarative sentences
-            if re.match(r'^[A-Z].*?(?:is|are|was|were|has|have)\b', sentence):
-                # Check if it contains an actual assertion
-                if " is " in sentence or " are " in sentence or " was " in sentence:
-                    statements.append(sentence)
-
-            # Special handling for date/time information
-            if re.search(r'\b(?:today|current date|the date)\b', sentence.lower()):
-                if re.search(r'\b(?:is|was)\b', sentence.lower()):
-                    statements.append(sentence)
-
-        # Limit to 3 most important statements
-        return statements[:3]
-
-    def _extract_memory_worthy_content(self, query: str, response: str) -> List[Tuple[str, str]]:
-        """
-        Extract content worthy of memorization.
-
-        Args:
-            query: User query
-            response: Generated response
-
-        Returns:
-            List of (content) tuples
-        """
-        memories = []
-
-        # For short exchanges, memorize complete Q&A
-        if len(query) <= 100 and len(response) <= 200:
-            # Store as natural conversation context
-            conversation_text = f"{query.strip()} {response.strip()}"
-            memories.append((conversation_text, "conversation"))
-
-            # Also store response separately for direct retrieval
-            if len(response.strip()) > 20:
-                memories.append((response.strip(), "direct_answer"))
-
-            return memories
-
-        # Extract factual statements
-        factual_pattern = r'(?:is|are|was|were|has|have|had|will be)\s+([A-Z][a-z]+\s+(?:is|are|was|were|has|have|had)\s+[^.!?]+[.!?])'
-        matches = re.findall(factual_pattern, response)
-        for match in matches:
-            if len(match) > 10 and len(match) < 200:
-                memories.append((match, "factual"))
-
-        # Extract definitions
-        definition_pattern = r'([A-Z][a-z]+\s+(?:refers to|is defined as|means|is|are)\s+[^.!?]+[.!?])'
-        matches = re.findall(definition_pattern, response)
-        for match in matches:
-            if len(match) > 10 and len(match) < 200:
-                memories.append((match, "definition"))
-
-        # Extract lists
-        lines = response.split('\n')
-        list_items = []
-        in_list = False
-        list_topic = ""
-
-        for line in lines:
-            # Check for list headers
-            if re.match(r'^[^-*\d]*:$', line) or re.match(r'^[^-*\d]*:$', line.strip()):
-                list_topic = line.strip()
-                in_list = True
-                list_items = []
-            # Check for list items
-            elif in_list and (line.strip().startswith('-') or line.strip().startswith('*') or
-                             re.match(r'^\d+\.', line.strip())):
-                list_items.append(line.strip())
-            # List ended
-            elif in_list and line.strip() and not (line.strip().startswith('-') or
-                                                  line.strip().startswith('*') or
-                                                  re.match(r'^\d+\.', line.strip())):
-                if list_topic and list_items and len(list_items) >= 2:
-                    content = f"{list_topic}\n" + "\n".join(list_items)
-                    if 20 < len(content) < 300:
-                        memories.append((content, "list"))
-                in_list = False
-
-        # If no structured content found, extract key sentences
-        if not memories:
-            sentences = re.split(r'[.!?]', response)
-            key_sentences = []
-
-            for sentence in sentences:
-                sentence = sentence.strip()
-                if len(sentence) < 10:
-                    continue
-
-                # Look for sentences with informational value
-                if (re.search(r'\b(?:key|important|significant|essential|critical)\b', sentence) or
-                    re.search(r'\b(?:always|never|must|should|typically|generally)\b', sentence)):
-                    key_sentences.append(sentence + ".")
-
-            # Take top 3 most informative sentences
-            for sentence in key_sentences[:3]:
-                if 10 < len(sentence) < 200:
-                    memories.append((sentence, "key_info"))
-
-        # De-duplicate memories
-        unique_memories = []
-        seen_content = set()
-
-        for content in memories:
-            # Normalize to avoid near-duplicates
-            normalized = re.sub(r'\s+', ' ', content.lower())
-            if normalized not in seen_content:
-                seen_content.add(normalized)
-                unique_memories.append((content, content.get('main_category')))
-
-        # Limit total memories from a single exchange
-        return unique_memories[:5]  # Cap at 5 memories per exchange
 
     def _generate_with_streaming(self, input_ids, streamer, generation_config, use_draft_model):
         """
@@ -1646,16 +1429,6 @@ class MemoryEnhancedChat:
     def cleanup(self):
         """Release all resources properly."""
         try:
-            # First, ensure memory manager creates a cache
-            # Clean up memory
-            if hasattr(self, 'memory_manager'):
-                self.memory_manager.cleanup()
-
-            # Unload models
-            if hasattr(self, 'draft_model') and self.draft_model is not None:
-                self.resource_manager.unload_model(self.draft_model)
-                self.draft_model = None
-
             # Unload models
             if hasattr(self, 'draft_model') and self.draft_model is not None:
                 self.resource_manager.unload_model(self.draft_model)
@@ -1934,20 +1707,6 @@ def main():
         traceback.print_exc()
 
     finally:
-        # Final cleanup
-        """Setup signal handlers to ensure clean shutdown."""
-        # def handle_exit(signum, frame):
-        #     print("\nReceived exit signal, cleaning up...")
-        #     chat.cleanup()
-        #     sys.exit(0)
-
-        # # Register signal handlers
-        # signal.signal(signal.SIGINT, handle_exit)  # Ctrl+C
-        # signal.signal(signal.SIGTERM, handle_exit)  # Termination signal
-
-        # if hasattr(signal, 'SIGBREAK'):  # Windows Ctrl+Break
-        #     signal.signal(signal.SIGBREAK, handle_exit)
-        # else:
         chat.cleanup()
         sys.exit(0)
 

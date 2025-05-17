@@ -38,12 +38,6 @@ def classify_content(content: str, question_classifier=None) -> Dict[str, Any]:
             result['subcategory'] = subcategory
             result['subcategory_confidence'] = subcategory_confidence
 
-            # # Determine subcategory
-            # if category in question_classifier.subcategories:
-            #     subcategory, subcategory_confidence = question_classifier.identify_subcategory(content, category)
-            #     if subcategory:
-            #         result['subcategory'] = subcategory
-            #         result['subcategory_confidence'] = subcategory_confidence
         except Exception as e:
             print(f"Error classifying content: {e}")
     
@@ -246,38 +240,6 @@ def save_to_memory(memory_manager, content: str, classification: Optional[Dict[s
             metadata=metadata
         )
         
-        # if memory_id:
-        #     results["saved"] = True
-        #     results["memory_id"] = memory_id
-        #     results["metadata"] = metadata
-            
-        #     # Save related content if provided
-        #     if related_content and related_content.strip():
-        #         # Generate classification for related content
-        #         if classification and "question_classifier" in classification:
-        #             related_classification = classify_content(
-        #                 related_content,
-        #                 classification["question_classifier"]
-        #             )
-        #         else:
-        #             related_classification = None
-                
-        #         # Create related metadata
-        #         related_metadata = generate_memory_metadata(
-        #             related_content,
-        #             related_classification
-        #         )
-        #         related_metadata["related_to"] = memory_id
-                
-        #         # Add to memory
-        #         related_id = memory_manager.add(
-        #             content=related_content,
-        #             metadata=related_metadata
-        #         )
-                
-        #         if related_id:
-        #             results["additional_ids"].append(related_id)
-    
     except Exception as e:
         results["error"] = str(e)
     
@@ -393,54 +355,3 @@ def format_memories_by_category(memories: List[Dict[str, Any]], main_category: s
 
     return output
 
-def extract_key_statements(text: str) -> List[str]:
-    """
-    Extract key factual statements from text for memory storage.
-    
-    Args:
-        text: Text to analyze
-        
-    Returns:
-        List of extracted statements
-    """
-    statements = []
-    
-    # Simple sentence splitting
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    
-    for sentence in sentences:
-        sentence = sentence.strip()
-        # Skip short sentences
-        if len(sentence) < 15:
-            continue
-            
-        # Skip sentences that are questions
-        if sentence.endswith('?'):
-            continue
-            
-        # Look for factual declarative sentences
-        if re.match(r'^[A-Z].*?(?:is|are|was|were|has|have)\b', sentence):
-            # Check if it contains an actual assertion
-            if " is " in sentence or " are " in sentence or " was " in sentence or " have " in sentence:
-                if sentence not in statements:
-                    statements.append(sentence)
-                    
-        # Look for procedural statements
-        if re.search(r'\b(?:first|then|next|finally|step|process)\b', sentence, re.IGNORECASE):
-            if sentence not in statements:
-                statements.append(sentence)
-                    
-        # Look for conceptual explanations
-        if re.search(r'\b(?:concept|theory|principle|means|refers to)\b', sentence, re.IGNORECASE):
-            if sentence not in statements:
-                statements.append(sentence)
-                    
-        # Special handling for date/time information
-        if re.search(r'\b(?:today|current date|the date|time is)\b', sentence.lower()):
-            if re.search(r'\b(?:is|was)\b', sentence.lower()):
-                if sentence not in statements:
-                    statements.append(sentence)
-
-    # Limit to most important statements (longer sentences typically contain more information)
-    sorted_statements = sorted(statements, key=len, reverse=True)
-    return sorted_statements[:5]

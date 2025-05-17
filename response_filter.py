@@ -370,36 +370,6 @@ class ResponseFilter:
             "token_count": len(tokens)
         }
 
-    # def calculate_semantic_entropy(self, token_confidences: List[float]) -> float:
-    #     """
-    #     Calculate semantic entropy using the formula: SE = -∑ₓ P(c|x) log P(c|x)
-
-    #     Args:
-    #         token_confidences: List of token confidence values
-
-    #     Returns:
-    #         Semantic entropy value
-    #     """
-    #     if not token_confidences or len(token_confidences) < 1:
-    #         return 0.0
-
-    #     # Create semantic clusters from token confidences
-    #     clusters = {}
-    #     # Simple clustering based on confidence ranges
-    #     for conf in token_confidences:
-    #         # Create 5 clusters (0.0-0.2, 0.2-0.4, etc.)
-    #         cluster_idx = min(4, int(conf * 5))
-    #         clusters[cluster_idx] = clusters.get(cluster_idx, 0) + 1
-
-    #     # Calculate probabilities
-    #     total = len(token_confidences)
-    #     probabilities = [count/total for count in clusters.values()]
-
-    #     # Calculate entropy using the formula SE = -∑ₓ P(c|x) log P(c|x)
-    #     entropy = -sum(p * np.log2(p) for p in probabilities if p > 0)
-
-    #     return entropy
-
     def calculate_semantic_entropy(self, content: str) -> float:
         """
         Calculate semantic entropy of content using the SE = -∑ₓ P(c|x) log P(c|x) formula.

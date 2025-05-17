@@ -30,13 +30,8 @@ except ImportError as e:
     sys.exit(1)
 
 from memory_utils import (
-    extract_topics,
     classify_content,
-    generate_memory_metadata,
-    format_content_for_storage,
-    save_to_memory,
-    format_memories_by_category,
-    extract_key_statements
+    save_to_memory
 )
 
 class MemoryImporter:
@@ -271,60 +266,6 @@ class MemoryImporter:
             # Add each item to memory
             for item in batch:
                 try:
-                    # 1. Save the complete statement first
-                    # statement_classification = classify_content(item, self.question_classifier)
-
-                    # # Save statement to memory
-                    # response_result = save_to_memory(
-                    #     memory_manager=self.memory_manager,
-                    #     content=item,
-                    #     classification=statement_classification,
-                    #     related_content="Imported fact" # Providing a placeholder related content
-                    # )
-
-                    # topics = extract_topics(item)
-                    # topics_saved = 0
-
-                    # # 2. Extract and save key statements from the item
-                    # key_statements = extract_key_statements(item)
-                    # statements_saved = 0
-
-
-
-                    # print ('\nt: ', topics, '\n', 'ks: ', key_statements)
-
-                    # for topic in topics:
-                    #     # Classify each statement
-                    #     topic_classification = classify_content(topic, self.question_classifier)
-
-                    #     # Save statement to memory
-                    #     topic_result = save_to_memory(
-                    #         memory_manager=self.memory_manager,
-                    #         content=topic,
-                    #         classification=topic_classification
-                    #     )
-
-                    #     if topic_result.get("saved", False):
-                    #         topics_saved += 1
-
-                    # for statement in key_statements:
-                    #     # Classify each statement
-                    #     stmt_classification = classify_content(statement, self.question_classifier)
-
-                    #     # Save statement to memory
-                    #     statement_result = save_to_memory(
-                    #         memory_manager=self.memory_manager,
-                    #         content=statement,
-                    #         classification=stmt_classification
-                    #     )
-
-                    #     if statement_result.get("saved", False):
-                    #         statements_saved += 1
-                    # memories_added = statements_saved + topics_saved
-
-                    # 3. Create a QA format for better retrieval
-                    # This mimics the QA pairs created in normal conversation
-                    # qa_format = f"User asked or stated the following - {item}\nI responded - {item}"
                     fact_classification = classify_content(item, self.question_classifier)
 
                     print(f"\n{item}")
@@ -334,10 +275,6 @@ class MemoryImporter:
                         classification=fact_classification
                     )
 
-                    # # Count memories added, matching _save_to_memory logic
-                    # memories_added = (1 if response_result.get("saved", False) else 0) + \
-                    #                  statements_saved + \
-                    #                  (1 if qa_result.get("saved", False) else 0)
                     memories_added = (1 if fact_result.get("saved", False) else 0)
 
                     self.stats["items_added"] += memories_added
