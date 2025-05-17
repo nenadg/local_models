@@ -132,6 +132,13 @@ class MemoryManager:
         self.id_to_index = {}  # Map from item ID to index in items list
         self.deleted_ids = set()  # Set of deleted item IDs
 
+        self.batch_settings = {
+            'batch_size': 32,
+            'adaptive': True,
+            'handle_oom': True,
+            'max_length': 512
+        }
+
         # Initialize FAISS index
         self.index = None
 
