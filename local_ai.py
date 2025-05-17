@@ -567,8 +567,6 @@ class MemoryEnhancedChat:
             pattern_check_interval = 20
             next_pattern_check = 40
 
-
-
             # Print assistant marker
             print(f"{self.get_time()} Assistant: \n", end='', flush=True)
 

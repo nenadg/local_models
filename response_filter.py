@@ -1272,11 +1272,11 @@ class ResponseFilter:
 
     def is_likely_hallucination(self, metrics, semantic_component):
         return (
-            metrics['entropy'] > 1.65 or
-            semantic_component > 0.28 or
-            metrics['severity'] > 0.05 or
-            (metrics['entropy'] > 1.5 and
-             metrics['repetition_score'] > 0.1)
+            metrics['entropy'] > 2.2 or          # Increased from 1.65
+            semantic_component > 0.45 or         # Increased from 0.28
+            metrics['severity'] > 0.15 or        # Increased from 0.05
+            (metrics['entropy'] > 1.8 and        # Increased from 1.5
+             metrics['repetition_score'] > 0.25)  # Increased from 0.1
         )
 
     def should_filter(
@@ -1405,7 +1405,7 @@ class ResponseFilter:
         is_likely_hallucination = self.is_likely_hallucination(semantic_entropy_calculation, semantic_component)
 
         # Adjust filtering threshold based on query domain
-        uncertainty_threshold = 0.7  # Higher than previous 0.55
+        uncertainty_threshold = 0.85 # was 0.7 (initial-0.55)
 
         details = {
             'uncertainty_score': uncertainty_score,
@@ -1436,21 +1436,21 @@ class ResponseFilter:
             pattern_type = pattern_results["pattern_type"]
             severity = pattern_results["severity"]
 
-            if severity > 0.3:  # Only filter for significant pattern issues
+            if severity > 0.5: # (initial-0.3:  # Only filter for significant pattern issues)
                 return True, f"pattern_detected_{pattern_type}", details
 
         # Still check quality but with more lenient threshold
-        if quality_results['is_low_quality'] and quality_results['quality_score'] < 0.4:  # Reduced from 0.5
+        if quality_results['is_low_quality'] and quality_results['quality_score'] < 0.3:  # was 0.4 Reduced from 0.5
             return True, f"low_quality_{','.join(quality_results['quality_issues'])}", details
 
         # Extreme cases for absolute thresholds - much lower than before
-        if confidence < thresholds['confidence'] * 0.7:  # 30% below threshold
+        if confidence < thresholds['confidence'] * 0.6:  # 40% below threshold (from 30%)
             return True, "very_low_confidence", details
 
-        if entropy > thresholds['entropy'] * 1.4:  # 40% above threshold
+        if entropy > thresholds['entropy'] * 1.6:  # 60% above threshold (from 40%)
             return True, "extremely_high_entropy", details
 
-        if perplexity > thresholds['perplexity'] * 1.5:  # 50% above threshold
+        if perplexity > thresholds['perplexity'] * 1.8:  # 80% above threshold (from 50%)
             return True, "extremely_high_perplexity", details
 
         # Final check with uncertainty score
