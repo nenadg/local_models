@@ -59,6 +59,145 @@ def estimate_optimal_batch_size(tensor_shape: Tuple[int, ...],
         logger.warning(f"Error estimating batch size: {e}, falling back to default")
         return 8  # Default fallback
 
+def batch_embed_texts(
+    texts: List[str],
+    tokenizer,
+    model,
+    device: str = "cuda",
+    batch_size: int = 32,
+    adaptive: bool = True,
+    handle_oom: bool = True,
+    max_length: int = 512
+) -> List[np.ndarray]:
+    """
+    Universal batch embedding function for all text embedding operations.
+
+    Args:
+        texts: List of texts to embed
+        tokenizer: Tokenizer to use
+        model: Model to generate embeddings
+        device: Device to use (cuda/cpu)
+        batch_size: Size of batches (calculated dynamically if adaptive is True)
+        adaptive: Whether to adapt batch size based on memory
+        handle_oom: Whether to handle OOM errors by reducing batch size
+        max_length: Maximum token length for truncation
+
+    Returns:
+        List of embedding arrays
+    """
+    if not texts:
+        return []
+
+    # Define the embedding operation
+    def batch_embedding_operation(batch_tokenized):
+        with torch.no_grad():
+            # Get model outputs
+            if hasattr(model, 'model'):
+                outputs = model.model(
+                    input_ids=batch_tokenized['input_ids'].to(device),
+                    attention_mask=batch_tokenized['attention_mask'].to(device)
+                )
+            else:
+                outputs = model(
+                    input_ids=batch_tokenized['input_ids'].to(device),
+                    attention_mask=batch_tokenized['attention_mask'].to(device),
+                    output_hidden_states=True
+                )
+
+            # Get mean pooled representation
+            last_hidden_states = outputs.last_hidden_state
+
+            # Mean pooling - take average of all token embeddings for each sequence
+            input_mask_expanded = batch_tokenized['attention_mask'].to(device).unsqueeze(-1).expand(last_hidden_states.size()).float()
+            sum_embeddings = torch.sum(last_hidden_states * input_mask_expanded, 1)
+            sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+            mean_pooled = sum_embeddings / sum_mask
+
+            return mean_pooled
+
+    try:
+        # Tokenize all texts
+        batch_tokenized = tokenizer(
+            texts,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_length,
+            padding=True
+        )
+
+        # Estimate optimal batch size if adaptive
+        if adaptive:
+            tensor_shape = tuple(batch_tokenized['input_ids'].shape[1:])
+            batch_size = estimate_optimal_batch_size(
+                tensor_shape=tensor_shape,
+                dtype=torch.float16 if device == "cuda" else torch.float32,
+                max_batch_size=batch_size
+            )
+
+        # Process in batches efficiently
+        pooled_outputs = tensor_batch_processing(
+            tensor_op=batch_embedding_operation,
+            input_tensor=batch_tokenized,
+            batch_size=batch_size,
+            cleanup=True,
+            adaptive=adaptive,
+            handle_oom=handle_oom
+        )
+
+        # Convert to numpy arrays
+        if isinstance(pooled_outputs, torch.Tensor):
+            embeddings = pooled_outputs.cpu().numpy()
+            return list(embeddings)
+        else:
+            # Handle case where tensor_batch_processing returns a list
+            return [output.cpu().numpy() for output in pooled_outputs]
+
+    except Exception as e:
+        print(f"Error in batch embedding: {e}")
+        # Fall back to individual processing
+        return [embed_single_text(text, tokenizer, model, device, max_length) for text in texts]
+
+def embed_single_text(text: str, tokenizer, model, device: str = "cuda", max_length: int = 512) -> np.ndarray:
+    """Single text embedding function as fallback."""
+    try:
+        with torch.no_grad():
+            # Tokenize
+            inputs = tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_length,
+                padding=True
+            ).to(device)
+
+            # Get model outputs
+            if hasattr(model, 'model'):
+                outputs = model.model(
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask
+                )
+            else:
+                outputs = model(
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                    output_hidden_states=True
+                )
+
+            # Get mean pooled representation
+            embedding = outputs.last_hidden_state.mean(dim=1).cpu().numpy()[0]
+
+            return embedding
+    except Exception as e:
+        print(f"Error generating embedding: {e}")
+        # Get embedding dimension from model
+        if hasattr(model, 'config') and hasattr(model.config, 'hidden_size'):
+            dim = model.config.hidden_size
+        else:
+            dim = 2048  # Default fallback for TinyLlama
+
+        # Return a zero vector as fallback
+        return np.zeros(dim)
+        
 def tensor_batch_processing(tensor_op: Callable[[torch.Tensor], torch.Tensor],
                           input_tensor: torch.Tensor,
                           batch_dim: int = 0,

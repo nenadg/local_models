@@ -337,7 +337,8 @@ class ResourceManager:
         return {
             'batch_size': 8,
             'cleanup': True,
-            'adaptive': True
+            'adaptive': True,
+            'handle_oom': True
         }
 
     def update_batch_settings(self, operation_type: str, settings: dict):
@@ -417,30 +418,32 @@ class ResourceManager:
             target_memory_usage=target_usage
         )
 
-    def batch_process_embeddings(self, texts: List[str], embedding_function: Callable) -> List[np.ndarray]:
+    def batch_process_embeddings(self, texts: List[str], model, tokenizer, device="cuda") -> List[np.ndarray]:
         """
-        Process embeddings in batches using the configured settings.
+        Process embeddings in batches using the batch_utils functions.
 
         Args:
             texts: List of texts to embed
-            embedding_function: Function to generate embeddings
+            model: Model to use
+            tokenizer: Tokenizer to use
+            device: Device to use
 
         Returns:
             List of embeddings
         """
-        from batch_utils import batch_embedding_processing
+        from batch_utils import batch_embed_texts
 
         # Get batch settings
         settings = self.get_batch_settings('embedding')
 
         # Process in batches
-        embeddings = batch_embedding_processing(
-            embedding_function=embedding_function,
+        return batch_embed_texts(
             texts=texts,
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
             **settings
         )
-
-        return embeddings
 
     def batch_process_inference(self,
                               model: torch.nn.Module,

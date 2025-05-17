@@ -126,99 +126,14 @@ class MemoryImporter:
         self.model.eval()
     
     def _setup_embedding_function(self):
-        """Set up embedding function for the memory system."""
-        print(f"{self.get_time()} Setting up embedding function")
-        
-        # Define a function to generate embeddings for text
-        def generate_embedding(text: str) -> np.ndarray:
-            """Generate an embedding vector for a text string."""
-            try:
-                with torch.no_grad():
-                    # Tokenize
-                    inputs = self.tokenizer(
-                        text,
-                        return_tensors="pt",
-                        truncation=True,
-                        max_length=512,
-                        padding=True
-                    ).to(self.device)
-                    
-                    # Get model outputs
-                    if hasattr(self.model, 'model'):
-                        outputs = self.model.model(
-                            input_ids=inputs.input_ids,
-                            attention_mask=inputs.attention_mask
-                        )
-                    else:
-                        outputs = self.model(
-                            input_ids=inputs.input_ids,
-                            attention_mask=inputs.attention_mask,
-                            output_hidden_states=True
-                        )
-                    
-                    # Get mean pooled representation
-                    embedding = outputs.last_hidden_state.mean(dim=1).cpu().numpy()[0]
-                    
-                    return embedding
-            except Exception as e:
-                print(f"{self.get_time()} Error generating embedding: {e}")
-                # Return a zero vector as fallback
-                return np.zeros(2048)
-        
-        # Define a batch embedding function
-        def generate_embeddings_batch(texts: List[str]) -> List[np.ndarray]:
-            """Generate embeddings for multiple texts efficiently using batching."""
-            # Skip empty inputs
-            if not texts:
-                return []
-            
-            try:
-                # Tokenize all texts
-                batch_tokenized = self.tokenizer(
-                    texts,
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=512,
-                    padding=True
-                ).to(self.device)
-                
-                with torch.no_grad():
-                    # Get model outputs
-                    if hasattr(self.model, 'model'):
-                        outputs = self.model.model(
-                            input_ids=batch_tokenized['input_ids'],
-                            attention_mask=batch_tokenized['attention_mask']
-                        )
-                    else:
-                        outputs = self.model(
-                            input_ids=batch_tokenized['input_ids'],
-                            attention_mask=batch_tokenized['attention_mask'],
-                            output_hidden_states=True
-                        )
-                    
-                    # Get mean pooled representations
-                    last_hidden_states = outputs.last_hidden_state
-                    
-                    # Mean pooling - take average of all token embeddings for each sequence
-                    input_mask_expanded = batch_tokenized['attention_mask'].unsqueeze(-1).expand(last_hidden_states.size()).float()
-                    sum_embeddings = torch.sum(last_hidden_states * input_mask_expanded, 1)
-                    sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-                    mean_pooled = sum_embeddings / sum_mask
-                    
-                    # Convert to numpy arrays
-                    embeddings = mean_pooled.cpu().numpy()
-                    
-                    return list(embeddings)
-                
-            except Exception as e:
-                print(f"{self.get_time()} Error in batch embedding: {e}")
-                # Fall back to individual processing
-                return [generate_embedding(text) for text in texts]
-        
-        # Set embedding functions in the memory manager
+        """Set up embedding function using standardized batch approach."""
+        from batch_utils import batch_embed_texts, embed_single_text
+
+        # Set embedding functions
         self.memory_manager.set_embedding_function(
-            function=generate_embedding,
-            batch_function=generate_embeddings_batch
+            model=self.model,
+            tokenizer=self.tokenizer,
+            device=self.device
         )
     
     def import_file(self, file_path: str) -> Dict[str, Any]:

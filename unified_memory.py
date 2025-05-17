@@ -171,18 +171,41 @@ class MemoryManager:
         if iteration >= total:
             print()
 
-    def set_embedding_function(self,
-                              function: Callable[[str], np.ndarray],
-                              batch_function: Optional[Callable[[List[str]], List[np.ndarray]]] = None):
+    def set_embedding_function(self, model, tokenizer, device="cuda"):
         """
-        Set embedding function for generating vector representations.
+        Set embedding function using the standardized batch embedding approach.
 
         Args:
-            function: Function to embed single text
-            batch_function: Function to embed multiple texts (for efficiency)
+            model: Model to use for embeddings
+            tokenizer: Tokenizer to use
+            device: Device to use
         """
-        self.embedding_function = function
-        self.batch_embedding_function = batch_function
+        from batch_utils import batch_embed_texts, embed_single_text
+
+        # Store model and tokenizer references
+        self.embedding_model = model
+        self.embedding_tokenizer = tokenizer
+        self.embedding_device = device
+
+        # Define single embedding function
+        def generate_embedding(text: str) -> np.ndarray:
+            return embed_single_text(text, tokenizer, model, device)
+
+        # Define batch embedding function
+        def generate_embeddings_batch(texts: List[str]) -> List[np.ndarray]:
+            return batch_embed_texts(
+                texts,
+                tokenizer,
+                model,
+                device,
+                batch_size=self.batch_settings.get('batch_size', 32),
+                adaptive=self.batch_settings.get('adaptive', True),
+                handle_oom=self.batch_settings.get('handle_oom', True)
+            )
+
+        # Set the functions
+        self.embedding_function = generate_embedding
+        self.batch_embedding_function = generate_embeddings_batch
 
     def update_embedding_dimension(self, new_dim):
         """
@@ -697,7 +720,7 @@ class MemoryManager:
                 print(f"{self.get_time()} No embedding function set")
                 return []
 
-            # Generate query embedding with potential batch processing optimization
+            # Generate query embedding
             try:
                 query_embedding = self.embedding_function(query)
 
