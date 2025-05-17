@@ -237,6 +237,9 @@ class MemoryEnhancedChat:
         # Create embedding function
         self._setup_embedding_function()
 
+        # Update embedding dimension based on model
+        self._update_embedding_dimension()
+
     def _setup_embedding_function(self):
         """Set up embedding function with standardized batch processing."""
         from batch_utils import batch_embed_texts, embed_single_text
@@ -279,6 +282,70 @@ class MemoryEnhancedChat:
                 self.enable_draft_model = False
         else:
             self.draft_model = None
+
+    def _update_embedding_dimension(self):
+        """Update embedding dimension based on loaded model."""
+        # Get model's hidden size
+        if hasattr(self.model.config, 'hidden_size'):
+            embedding_dim = self.model.config.hidden_size
+        elif hasattr(self.model.config, 'd_model'):
+            # Some models use d_model instead
+            embedding_dim = self.model.config.d_model
+        else:
+            # Default fallback if we can't detect
+            embedding_dim = 2048
+
+        print(f"{self.get_time()} Detected model embedding dimension: {embedding_dim}")
+
+        # Update memory manager if dimension differs
+        if self.memory_manager.embedding_dim != embedding_dim:
+            print(f"{self.get_time()} Updating memory embedding dimension: {self.memory_manager.embedding_dim} -> {embedding_dim}")
+            self.memory_manager.update_embedding_dimension(embedding_dim)
+
+    def _format_chat_prompt(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Format chat messages into a prompt string without using tokenizer.apply_chat_template.
+
+        Args:
+            messages: List of conversation messages
+
+        Returns:
+            Formatted prompt string
+        """
+        prompt = ""
+
+        # Extract system message (usually the first message)
+        system_message = next((m["content"] for m in messages if m["role"] == "system"), None)
+
+        # Add system message first if available
+        if system_message:
+            prompt += f"{system_message}\n\n"
+
+        # Process remaining messages
+        for message in messages:
+            role = message["role"]
+            content = message["content"]
+
+            # Skip system message (already added)
+            if role == "system":
+                continue
+
+            # Handle memory blocks
+            elif role == "memory":
+                prompt += f"{content}\n\n"
+
+            # Handle user messages
+            elif role == "user":
+                prompt += f"User: {content}\n\n"
+
+            # Handle assistant messages
+            elif role == "assistant":
+                prompt += f"Assistant: {content}\n\n"
+
+        # Add final assistant prompt
+        prompt += "Assistant: "
+
+        return prompt
 
     def _save_command_output_to_memory(self, command: str, output: str) -> None:
         """
@@ -490,11 +557,13 @@ class MemoryEnhancedChat:
         fallback_shown = False
 
         # Apply chat template
-        prompt = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
+        # prompt = self.tokenizer.apply_chat_template(
+        #     messages,
+        #     tokenize=False,
+        #     add_generation_prompt=True
+        # )
+
+        prompt = self._format_chat_prompt(messages)
 
         # print(f"\n============ DEBUG PROMPT ============\n{prompt}\n====================================\n")
 

@@ -71,6 +71,7 @@ def batch_embed_texts(
 ) -> List[np.ndarray]:
     """
     Universal batch embedding function for all text embedding operations.
+    Updated to work with various model architectures.
 
     Args:
         texts: List of texts to embed
@@ -88,28 +89,45 @@ def batch_embed_texts(
     if not texts:
         return []
 
-    # Define the embedding operation
+    # Define the embedding operation that works with different architectures
     def batch_embedding_operation(batch_tokenized):
         with torch.no_grad():
             # Get model outputs
-            if hasattr(model, 'model'):
-                outputs = model.model(
-                    input_ids=batch_tokenized['input_ids'].to(device),
-                    attention_mask=batch_tokenized['attention_mask'].to(device)
-                )
+            outputs = model(**batch_tokenized)
+
+            # Different models expose embeddings differently
+            if hasattr(outputs, 'last_hidden_state'):
+                # For models like BERT, RoBERTa, T5, etc.
+                hidden_states = outputs.last_hidden_state
+            elif hasattr(outputs, 'hidden_states') and outputs.hidden_states is not None:
+                # For models that return hidden states in a tuple
+                hidden_states = outputs.hidden_states[-1]  # Use the last layer
             else:
-                outputs = model(
-                    input_ids=batch_tokenized['input_ids'].to(device),
-                    attention_mask=batch_tokenized['attention_mask'].to(device),
-                    output_hidden_states=True
-                )
+                # For causal LM models like GPT, BLOOM, etc.
+                # Extract the embeddings from the model itself
+                if hasattr(model, 'transformer'):
+                    # Run the transformer directly
+                    transformer_outputs = model.transformer(**batch_tokenized)
+                    if hasattr(transformer_outputs, 'last_hidden_state'):
+                        hidden_states = transformer_outputs.last_hidden_state
+                    else:
+                        # Fall back to logits
+                        logits = outputs.logits
+                        # Convert to simple embedding by mean pooling
+                        hidden_states = torch.mean(logits, dim=1, keepdim=True).transpose(1, 2)
+                elif hasattr(model, 'model') and hasattr(model.model, 'encoder'):
+                    # Try to access encoder outputs for encoder-decoder models
+                    encoder_outputs = model.model.encoder(**batch_tokenized)
+                    hidden_states = encoder_outputs.last_hidden_state
+                else:
+                    # Last resort - use logits
+                    logits = outputs.logits
+                    hidden_states = torch.mean(logits, dim=1, keepdim=True).transpose(1, 2)
 
-            # Get mean pooled representation
-            last_hidden_states = outputs.last_hidden_state
-
-            # Mean pooling - take average of all token embeddings for each sequence
-            input_mask_expanded = batch_tokenized['attention_mask'].to(device).unsqueeze(-1).expand(last_hidden_states.size()).float()
-            sum_embeddings = torch.sum(last_hidden_states * input_mask_expanded, 1)
+            # Mean pooling - take attention mask into account for weighted averaging
+            attention_mask = batch_tokenized.get('attention_mask', torch.ones_like(batch_tokenized['input_ids'])).to(device)
+            input_mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
+            sum_embeddings = torch.sum(hidden_states * input_mask_expanded, 1)
             sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
             mean_pooled = sum_embeddings / sum_mask
 
@@ -123,7 +141,7 @@ def batch_embed_texts(
             truncation=True,
             max_length=max_length,
             padding=True
-        )
+        ).to(device)
 
         # Estimate optimal batch size if adaptive
         if adaptive:
@@ -154,11 +172,14 @@ def batch_embed_texts(
 
     except Exception as e:
         print(f"Error in batch embedding: {e}")
+        import traceback
+        traceback.print_exc()
+
         # Fall back to individual processing
         return [embed_single_text(text, tokenizer, model, device, max_length) for text in texts]
 
 def embed_single_text(text: str, tokenizer, model, device: str = "cuda", max_length: int = 512) -> np.ndarray:
-    """Single text embedding function as fallback."""
+    """Single text embedding function that works with various model architectures."""
     try:
         with torch.no_grad():
             # Tokenize
@@ -171,29 +192,62 @@ def embed_single_text(text: str, tokenizer, model, device: str = "cuda", max_len
             ).to(device)
 
             # Get model outputs
-            if hasattr(model, 'model'):
-                outputs = model.model(
-                    input_ids=inputs.input_ids,
-                    attention_mask=inputs.attention_mask
-                )
+            outputs = model(**inputs)
+
+            # Different models expose embeddings differently
+            if hasattr(outputs, 'last_hidden_state'):
+                # For models like BERT, RoBERTa, T5, etc.
+                hidden_states = outputs.last_hidden_state
+            elif hasattr(outputs, 'hidden_states') and outputs.hidden_states is not None:
+                # For models that return hidden states in a tuple
+                hidden_states = outputs.hidden_states[-1]  # Use the last layer
             else:
-                outputs = model(
-                    input_ids=inputs.input_ids,
-                    attention_mask=inputs.attention_mask,
-                    output_hidden_states=True
-                )
+                # For causal LM models like GPT, BLOOM, etc.
+                # Extract the embeddings from the model itself
+                if hasattr(model, 'transformer'):
+                    # Run the transformer directly to get embeddings
+                    transformer_outputs = model.transformer(**inputs)
+                    if hasattr(transformer_outputs, 'last_hidden_state'):
+                        hidden_states = transformer_outputs.last_hidden_state
+                    else:
+                        # Fall back to logits
+                        logits = outputs.logits
+                        # Convert to a simple embedding by mean pooling
+                        hidden_states = torch.mean(logits, dim=1, keepdim=True).transpose(1, 2)
+                elif hasattr(model, 'model') and hasattr(model.model, 'encoder'):
+                    # Try to access encoder outputs for encoder-decoder models
+                    encoder_outputs = model.model.encoder(**inputs)
+                    hidden_states = encoder_outputs.last_hidden_state
+                else:
+                    # Last resort fallback - use logits
+                    logits = outputs.logits
+                    hidden_states = torch.mean(logits, dim=1, keepdim=True).transpose(1, 2)
 
             # Get mean pooled representation
-            embedding = outputs.last_hidden_state.mean(dim=1).cpu().numpy()[0]
+            # Mean pooling - take attention mask into account for weighted averaging
+            attention_mask = inputs.get('attention_mask', torch.ones_like(inputs['input_ids']))
+            input_mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
+            sum_embeddings = torch.sum(hidden_states * input_mask_expanded, 1)
+            sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+            embedding = sum_embeddings / sum_mask
 
-            return embedding
+            return embedding.cpu().numpy()[0]
+
     except Exception as e:
         print(f"Error generating embedding: {e}")
-        # Get embedding dimension from model
-        if hasattr(model, 'config') and hasattr(model.config, 'hidden_size'):
-            dim = model.config.hidden_size
+        import traceback
+        traceback.print_exc()
+
+        # Get embedding dimension from model config
+        if hasattr(model, 'config'):
+            if hasattr(model.config, 'hidden_size'):
+                dim = model.config.hidden_size
+            elif hasattr(model.config, 'd_model'):
+                dim = model.config.d_model
+            else:
+                dim = 2048  # Default fallback
         else:
-            dim = 2048  # Default fallback for TinyLlama
+            dim = 2048
 
         # Return a zero vector as fallback
         return np.zeros(dim)
