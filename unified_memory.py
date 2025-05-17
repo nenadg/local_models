@@ -759,7 +759,7 @@ class MemoryManager:
                         item.metadata["last_access"] = datetime.now().timestamp()
 
             # Apply deduplication
-            # results = self._deduplicate_results(results)
+            results = self._deduplicate_results(results)
 
             return results
 

@@ -19,9 +19,6 @@ class TokenBuffer:
         self.tokenizer = tokenizer
         self.last_read_position = 0
 
-        # FIXED: Don't perform internal pattern detection
-        # Just track tokens efficiently
-
     def add_token(self, token: str) -> None:
         """
         Add a token to the buffer.

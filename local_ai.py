@@ -1458,8 +1458,6 @@ class MemoryEnhancedChat:
             traceback.print_exc()
             # Attempt basic cleanup
             try:
-                if hasattr(self, 'resource_manager'):
-                    self.resource_manager.cleanup()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             except:

@@ -314,64 +314,6 @@ class MemoryImporter:
         
         return self.stats
 
-    def generate_qa_formats(self, fact: str) -> List[str]:
-        """
-        Generate question-answer formats for a factual statement.
-
-        Args:
-            fact: Factual statement
-
-        Returns:
-            List of QA format strings
-        """
-        qa_formats = []
-
-        # Clean the fact for processing
-        clean_fact = fact.strip()
-        if clean_fact.endswith('.'):
-            clean_fact = clean_fact[:-1]
-
-        # For "X is Y" patterns
-        match = re.match(r'(.+?)\s+(?:is|are|was|were)\s+(.+)', clean_fact)
-        if match:
-            subject = match.group(1).strip()
-            predicate = match.group(2).strip()
-
-            # Create QA format
-            qa_formats.append(f"Q: What is {subject}?\nA: {subject} is {predicate}.")
-
-            # For location questions
-            if "located in" in predicate or "found in" in predicate:
-                qa_formats.append(f"Q: Where is {subject}?\nA: {subject} is {predicate}.")
-
-            # For definition questions
-            if "defined as" in predicate or "means" in predicate:
-                qa_formats.append(f"Q: Define {subject}?\nA: {subject} is {predicate}.")
-
-        # For statements about quantities
-        match = re.search(r'(.+?)\s+has\s+(\d+)\s+(.+)', clean_fact)
-        if match:
-            subject = match.group(1).strip()
-            number = match.group(2)
-            item = match.group(3).strip()
-
-            qa_formats.append(f"Q: How many {item} does {subject} have?\nA: {subject} has {number} {item}.")
-
-        # For statements about inventors/creators
-        match = re.search(r'(.+?)\s+(?:invented|created|discovered)\s+(.+)', clean_fact)
-        if match:
-            person = match.group(1).strip()
-            invention = match.group(2).strip()
-
-            qa_formats.append(f"Q: Who invented {invention}?\nA: {person} invented {invention}.")
-            qa_formats.append(f"Q: What did {person} invent?\nA: {person} invented {invention}.")
-
-        # If we couldn't generate specific formats, create a generic one
-        if not qa_formats:
-            qa_formats.append(f"Q: Tell me about {clean_fact.split()[0]}?\nA: {clean_fact}.")
-
-        return qa_formats
-    
     def cleanup(self):
         """Release resources."""
         print(f"{self.get_time()} Cleaning up resources...")
