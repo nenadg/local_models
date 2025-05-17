@@ -940,7 +940,7 @@ class MemoryEnhancedChat:
             confidence_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
             normalized_metrics = self.response_filter.normalize_confidence_metrics(confidence_metrics)
             should_filter, reason, details = self.response_filter.should_filter(normalized_metrics, response, user_query, tokens_received)
-            print("DETAILS", json.dumps(details))
+            # print("DETAILS", json.dumps(details))
             # Get confidence metrics
             metrics = details
 
