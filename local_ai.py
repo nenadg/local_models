@@ -74,7 +74,8 @@ class MemoryEnhancedChat:
                 top_p: float = 1.0,
                 top_k: int = 50,
                 enable_draft_model: bool = False,
-                system_message: Optional[str] = None):
+                system_message: Optional[str] = None,
+                no_filter: bool = False):
         """
         Initialize the chat interface.
 
@@ -105,6 +106,7 @@ class MemoryEnhancedChat:
         self.top_k = top_k
         self.enable_draft_model = enable_draft_model
         self.memory_debug = False  # Set to True for memory diagnostics
+        self.no_filter = no_filter
 
         # Set system message
         self.system_message = system_message or DEFAULT_SYSTEM_MESSAGE
@@ -175,18 +177,33 @@ class MemoryEnhancedChat:
         )
 
         # Initialize response filter
-        self.response_filter = ResponseFilter(
-            confidence_threshold=self.confidence_threshold,
-            entropy_threshold=3.5,         # Up from 2.5
-            perplexity_threshold=25.0,     # Up from 15.0
-            user_context={"model_name": self.model_name},
-            question_classifier=self.question_classifier,
-            sharpening_factor=self.similarity_enhancement_factor,
-            window_size=3,
-            use_relative_filtering=True,
-            pattern_detection_weight=0.6,
-            token_count_threshold=60       # Up from 30
-        )
+        if self.no_filter:
+            # Use very lenient thresholds for Gemma 3
+            self.response_filter = ResponseFilter(
+                confidence_threshold=0.1,  # Much lower than default 0.45
+                entropy_threshold=5.0,     # Much higher than default 3.5
+                perplexity_threshold=40.0, # Much higher than default 25.0
+                user_context={"model_name": self.model_name},
+                question_classifier=self.question_classifier,
+                sharpening_factor=self.similarity_enhancement_factor,
+                window_size=3,
+                use_relative_filtering=True,
+                pattern_detection_weight=0.3,  # Lower from 0.6
+                token_count_threshold=100      # Higher from 60
+            )
+        else:
+            self.response_filter = ResponseFilter(
+                confidence_threshold=self.confidence_threshold,
+                entropy_threshold=3.5,         # Up from 2.5
+                perplexity_threshold=25.0,     # Up from 15.0
+                user_context={"model_name": self.model_name},
+                question_classifier=self.question_classifier,
+                sharpening_factor=self.similarity_enhancement_factor,
+                window_size=3,
+                use_relative_filtering=True,
+                pattern_detection_weight=0.6,
+                token_count_threshold=60       # Up from 30
+            )
 
         self.response_filter.question_classifier = self.question_classifier
 
@@ -327,11 +344,7 @@ class MemoryEnhancedChat:
 
             # Add memory content right before the user query
             if memory_content:
-                # For Gemma, format memory directly before the last user query
-                # in a way that doesn't confuse the model
-                prompt += "I have the following relevant information:\n"
-                prompt += memory_content
-                prompt += "\n\n"
+                prompt += f"<knowledge>\n{memory_content}\n</knowledge>\n\n"
 
             # Now add conversation turns
             for message in messages:
@@ -592,13 +605,18 @@ class MemoryEnhancedChat:
         fallback_shown = False
 
         # Apply chat template
-        # prompt = self.tokenizer.apply_chat_template(
-        #     messages,
-        #     tokenize=False,
-        #     add_generation_prompt=True
-        # )
+        is_gemma = "gemma" in self.model_name.lower()
 
-        prompt = self._format_chat_prompt(messages)
+
+        if is_gemma:
+            prompt = self._format_chat_prompt(messages)
+        else:
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+
 
         # print(f"\n============ DEBUG PROMPT ============\n{prompt}\n====================================\n")
 
@@ -1454,6 +1472,8 @@ def main():
                         help="Top-p sampling parameter")
     parser.add_argument("--top-k", type=int, default=50,
                         help="Top-k sampling parameter")
+    parser.add_argument("--no-filter", action="store_true", default=False,
+                        help="Disable response filtering")
 
     # Parse args
     args = parser.parse_args()
@@ -1475,7 +1495,8 @@ def main():
         top_p=args.top_p,
         top_k=args.top_k,
         enable_draft_model=args.draft_model,
-        system_message=args.system_prompt
+        system_message=args.system_prompt,
+        no_filter=args.no_filter
     )
 
     # Set up history
