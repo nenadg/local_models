@@ -222,18 +222,38 @@ class MemoryEnhancedChat:
             "low_cpu_mem_usage": True,
         }
 
+
         # Load main model
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **loading_options)
         self.model = self.resource_manager.register_model(self.model)
 
+        # Check if this is a Qwen model
+        is_qwen = "qwen" in self.model_name.lower()
+
         custom_template = self.tokenizer.chat_template
+
         if custom_template:
-            # Add handling for memory role
-            custom_template = custom_template.replace(
-                "{% for message in messages %}",
-                "{% for message in messages %}{% if message['role'] == 'memory' %}{{ message['content'] }}{% endif %}"
-            )
+            if is_qwen:
+                # Qwen-specific template modification
+                # Insert memory content before the user's message
+                custom_template = custom_template.replace(
+                    "{% for message in messages %}",
+                    """{% for message in messages %}
+                    {% if message['role'] == 'memory' %}
+                    <reference>
+                    {{ message['content'] }}
+                    </reference>
+                    {% continue %}
+                    {% endif %}"""
+                )
+            else:
+                # Add handling for memory role
+                custom_template = custom_template.replace(
+                    "{% for message in messages %}",
+                    "{% for message in messages %}{% if message['role'] == 'memory' %}{{ message['content'] }}{% endif %}"
+                )
             # custom_template += "{% endif %}"
+
             self.tokenizer.chat_template = custom_template
 
         # Optimize for inference
@@ -607,6 +627,7 @@ class MemoryEnhancedChat:
         # Apply chat template
         is_gemma = "gemma" in self.model_name.lower()
 
+        print(f"{self.get_time()} Model used: {self.model_name.lower()}")
 
         if is_gemma:
             prompt = self._format_chat_prompt(messages)
@@ -618,7 +639,7 @@ class MemoryEnhancedChat:
             )
 
 
-        # print(f"\n============ DEBUG PROMPT ============\n{prompt}\n====================================\n")
+        print(f"\n============ DEBUG PROMPT ============\n{prompt}\n====================================\n")
 
         # Tokenize prompt
         try:
@@ -946,8 +967,9 @@ class MemoryEnhancedChat:
                 metadata_filter={"main_category": main_category, "subcategory": subcategory},
             )
 
-            # Check if we're using Gemma model
+            # Check if we're using Gemma or Qwen
             is_gemma = "gemma" in self.model_name.lower()
+            is_qwen = "qwen" in self.model_name.lower()
 
             # Format memory content appropriately for the model type
             if is_gemma:
@@ -957,6 +979,16 @@ class MemoryEnhancedChat:
                     similarity = memory.get("similarity", 0)
                     if similarity > 0.5:  # Only include highly relevant memories
                         memory_text += f"- {content}\n"
+            elif is_qwen:
+                # Wrap memory in Qwen-specific format
+                memory_text = "<|im_start|>memories\n"
+                for memory in memories:
+                    content = memory.get("content", "").strip()
+                    similarity = memory.get("similarity", 0)
+                    if similarity > 0.5:  # Only include highly relevant memories
+                        memory_text += f"- {content}\n"
+
+                memory_text += f"<|im_end|>"
             else:
                 # Standard formatting for other models
                 memory_text = format_memories_by_category(memories, main_category, subcategory)
