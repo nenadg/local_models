@@ -1271,13 +1271,30 @@ class ResponseFilter:
         return results
 
     def is_likely_hallucination(self, metrics, semantic_component):
-        return (
-            metrics['entropy'] > 2.2 or          # Increased from 1.65
-            semantic_component > 0.45 or         # Increased from 0.28
-            metrics['severity'] > 0.15 or        # Increased from 0.05
-            (metrics['entropy'] > 1.8 and        # Increased from 1.5
-             metrics['repetition_score'] > 0.25)  # Increased from 0.1
-        )
+        """
+        Determine if response is likely a hallucination based on model type.
+        """
+        # Check if we're using Gemma model
+        is_gemma = hasattr(self, 'user_context') and 'model_name' in self.user_context and 'gemma' in self.user_context['model_name'].lower()
+
+        if is_gemma:
+            # Gemma models need different thresholds
+            return (
+                metrics['entropy'] > 3.0 or          # Higher threshold for Gemma
+                semantic_component > 0.60 or         # Higher threshold for Gemma
+                metrics['severity'] > 0.25 or        # Higher threshold for Gemma
+                (metrics['entropy'] > 2.5 and        # Higher combined threshold
+                 metrics['repetition_score'] > 0.35)
+            )
+        else:
+            # Original thresholds for other models
+            return (
+                metrics['entropy'] > 2.2 or
+                semantic_component > 0.45 or
+                metrics['severity'] > 0.15 or
+                (metrics['entropy'] > 1.8 and
+                 metrics['repetition_score'] > 0.25)
+            )
 
     def should_filter(
         self,

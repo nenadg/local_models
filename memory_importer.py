@@ -97,7 +97,7 @@ class MemoryImporter:
         
         self.memory_manager = MemoryManager(
             storage_path=self.memory_dir,
-            embedding_dim=2048,  # Same as TinyLlama's hidden dimension
+            embedding_dim=None,
             enable_enhanced_embeddings=self.enable_enhanced_embeddings,
             max_enhancement_levels=4,
             auto_save=True,
@@ -107,23 +107,56 @@ class MemoryImporter:
     def _setup_model_and_tokenizer(self):
         """Load the model and tokenizer with appropriate settings."""
         print(f"{self.get_time()} Loading model: {self.model_name}")
-        
+
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=True)
-        self.tokenizer.model_max_length = 2048  # Same as local_ai.py
-        
+        self.tokenizer.model_max_length = 2048  # Set appropriate context window
+
         # Set up model loading options
         loading_options = {
             "torch_dtype": self.torch_dtype,
             "device_map": "auto" if self.device != "cpu" else None,
             "low_cpu_mem_usage": True,
         }
-        
+
         # Load model
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **loading_options)
-        
-        # Set model to evaluation mode
-        self.model.eval()
+
+        # Detect model's embedding dimension
+        self._detect_embedding_dimension()
+
+    def _detect_embedding_dimension(self):
+        """
+        Detect and update embedding dimension based on the loaded model.
+        For use in memory_importer.py and local_ai.py
+        """
+        embedding_dim = None
+
+        # Try to get from model config
+        if hasattr(self.model, 'config'):
+            if hasattr(self.model.config, 'hidden_size'):
+                embedding_dim = self.model.config.hidden_size
+            elif hasattr(self.model.config, 'd_model'):
+                embedding_dim = self.model.config.d_model
+            elif hasattr(self.model.config, 'n_embd'):
+                # Some models like GPT use n_embd
+                embedding_dim = self.model.config.n_embd
+
+        # If embedding dimension detected, update memory manager
+        if embedding_dim:
+            print(f"{self.get_time()} Detected model embedding dimension: {embedding_dim}")
+
+            # Update memory manager if dimension differs
+            if self.memory_manager.embedding_dim != embedding_dim:
+                print(f"{self.get_time()} Updating memory embedding dimension: {self.memory_manager.embedding_dim} -> {embedding_dim}")
+                self.memory_manager.update_embedding_dimension(embedding_dim)
+        else:
+            print(f"{self.get_time()} Could not determine embedding dimension from model config")
+            # If we can't detect it, set a reasonable default
+            if self.memory_manager.embedding_dim is None:
+                default_dim = 2048  # Default to a common size
+                print(f"{self.get_time()} Setting default embedding dimension: {default_dim}")
+                self.memory_manager.update_embedding_dimension(default_dim)
     
     def _setup_embedding_function(self):
         """Set up embedding function using standardized batch approach."""

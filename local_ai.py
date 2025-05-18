@@ -179,7 +179,7 @@ class MemoryEnhancedChat:
             confidence_threshold=self.confidence_threshold,
             entropy_threshold=3.5,         # Up from 2.5
             perplexity_threshold=25.0,     # Up from 15.0
-            user_context={},
+            user_context={"model_name": self.model_name},
             question_classifier=self.question_classifier,
             sharpening_factor=self.similarity_enhancement_factor,
             window_size=3,
@@ -196,7 +196,7 @@ class MemoryEnhancedChat:
 
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=True)
-        self.tokenizer.model_max_length = 2048  # Set appropriate context window, max - 2048 for tinyllama
+        self.tokenizer.model_max_length = 8192 # 2048  # Set appropriate context window, max - 2048 for tinyllama
 
         # Set up model loading options
         loading_options = {
@@ -304,48 +304,83 @@ class MemoryEnhancedChat:
 
     def _format_chat_prompt(self, messages: List[Dict[str, str]]) -> str:
         """
-        Format chat messages into a prompt string without using tokenizer.apply_chat_template.
-
-        Args:
-            messages: List of conversation messages
-
-        Returns:
-            Formatted prompt string
+        Format chat messages for Gemma 3 models.
         """
-        prompt = ""
+        # Check if model is Gemma based on name
+        is_gemma = "gemma" in self.model_name.lower()
 
-        # Extract system message (usually the first message)
-        system_message = next((m["content"] for m in messages if m["role"] == "system"), None)
+        if is_gemma:
+            prompt = ""
+            system_instruction = None
+            memory_content = None
 
-        # Add system message first if available
-        if system_message:
-            prompt += f"{system_message}\n\n"
+            # First pass to extract system and memory
+            for message in messages:
+                if message["role"] == "system":
+                    system_instruction = message["content"]
+                elif message["role"] == "memory":
+                    memory_content = message["content"]
 
-        # Process remaining messages
-        for message in messages:
-            role = message["role"]
-            content = message["content"]
+            # Start with system instruction if available
+            if system_instruction:
+                prompt += f"{system_instruction}\n\n"
 
-            # Skip system message (already added)
-            if role == "system":
-                continue
+            # Add memory content right before the user query
+            if memory_content:
+                # For Gemma, format memory directly before the last user query
+                # in a way that doesn't confuse the model
+                prompt += "I have the following relevant information:\n"
+                prompt += memory_content
+                prompt += "\n\n"
 
-            # Handle memory blocks
-            elif role == "memory":
-                prompt += f"{content}\n\n"
+            # Now add conversation turns
+            for message in messages:
+                if message["role"] == "user":
+                    prompt += f"<start_of_turn>user\n{message['content']}<end_of_turn>\n"
+                elif message["role"] == "assistant":
+                    prompt += f"<start_of_turn>model\n{message['content']}<end_of_turn>\n"
+                # Skip system and memory messages as they've already been handled
 
-            # Handle user messages
-            elif role == "user":
-                prompt += f"User: {content}\n\n"
+            # Add final prompt for generation
+            prompt += "<start_of_turn>model\n"
 
-            # Handle assistant messages
-            elif role == "assistant":
-                prompt += f"Assistant: {content}\n\n"
+            return prompt
+        else:
+            # Original format for other models
+            prompt = ""
 
-        # Add final assistant prompt
-        prompt += "Assistant: "
+            # Extract system message (usually the first message)
+            system_message = next((m["content"] for m in messages if m["role"] == "system"), None)
 
-        return prompt
+            # Add system message first if available
+            if system_message:
+                prompt += f"{system_message}\n\n"
+
+            # Process remaining messages
+            for message in messages:
+                role = message["role"]
+                content = message["content"]
+
+                # Skip system message (already added)
+                if role == "system":
+                    continue
+
+                # Handle memory blocks
+                elif role == "memory":
+                    prompt += f"{content}\n\n"
+
+                # Handle user messages
+                elif role == "user":
+                    prompt += f"User: {content}\n\n"
+
+                # Handle assistant messages
+                elif role == "assistant":
+                    prompt += f"Assistant: {content}\n\n"
+
+            # Add final assistant prompt
+            prompt += "Assistant: "
+
+            return prompt
 
     def _save_command_output_to_memory(self, command: str, output: str) -> None:
         """
@@ -878,13 +913,6 @@ class MemoryEnhancedChat:
         """
         Enhanced method to integrate relevant memories into conversation messages.
         For use in MemoryEnhancedChat.
-
-        Args:
-            messages: Current conversation messages
-            query: Current user query
-
-        Returns:
-            Tuple of (updated messages, retrieved memories)
         """
         try:
             # Classify query
@@ -892,66 +920,45 @@ class MemoryEnhancedChat:
             main_category = query_classification.get("main_category", "unknown")
             subcategory = query_classification.get("subcategory")
 
-            # Extract topics based on keywords
-            # topics = extract_topics(query.lower())
-
-            metadata_filter = {
-                "main_category": main_category,
-                "subcategory": subcategory
-            }
-
-            # First check for QA pairs that might directly answer the query
+            # Retrieve memories
             memories = self.memory_manager.retrieve(
                 query=query,
-                top_k=3,
-                min_similarity=0.6,
-                metadata_filter=metadata_filter,
+                top_k=5,
+                min_similarity=0.5,
+                metadata_filter={"main_category": main_category, "subcategory": subcategory},
             )
 
-            if self.memory_debug:
-                print("\nMEMORIES\n", memories)
+            # Check if we're using Gemma model
+            is_gemma = "gemma" in self.model_name.lower()
 
-            memory_text = format_memories_by_category(memories, main_category, subcategory)
-            memory_text = "IMPORTANT: Pay careful attention to the HIGHLY RELEVANT INFORMATION section below, which directly answers the query.\n\n" + memory_text
+            # Format memory content appropriately for the model type
+            if is_gemma:
+                memory_text = ""
+                for memory in memories:
+                    content = memory.get("content", "").strip()
+                    similarity = memory.get("similarity", 0)
+                    if similarity > 0.5:  # Only include highly relevant memories
+                        memory_text += f"- {content}\n"
+            else:
+                # Standard formatting for other models
+                memory_text = format_memories_by_category(memories, main_category, subcategory)
+                memory_text = "IMPORTANT: Pay careful attention to the HIGHLY RELEVANT INFORMATION section below, which directly answers the query.\n\n" + memory_text
 
-            if self.memory_debug:
-                print ("MEMORY_TEXT\n", memory_text)
-
-            # Create memory-enhanced messages - use the "memory" role
+            # Create memory-enhanced messages
             memory_enhanced_messages = messages.copy()
 
-            # Find the right place to insert memory (before the user query)
+            # Find the right place to insert memory
             last_user_idx = next((i for i in reversed(range(len(memory_enhanced_messages)))
                                  if messages[i]["role"] == "user"), None)
 
             if last_user_idx is not None:
                 memory_enhanced_messages.insert(last_user_idx, {
-                    "role": "memory",  # Use a custom role
+                    "role": "memory",
                     "content": memory_text
                 })
 
             # Update retrieval stats
             self.memory_stats["retrievals"] += 1
-
-            # Print debug info if enabled
-            if self.memory_debug:
-                print(f"\n{self.get_time()} Memory diagnostic: Retrieved {len(memories)} items")
-                print("-----------------------------------")
-                for i, memory in enumerate(memories[:5]):  # Show top 5
-                    content = memory.get("content", "").strip()
-                    # Truncate long content for display
-                    if len(content) > 100:
-                        content = content[:97] + "..."
-
-                    similarity = memory.get("similarity", 0)
-                    metadata = memory.get("metadata", {})
-
-                    main_cat = metadata.get("main_category", "unknown")
-                    subcat = metadata.get("subcategory", "unknown")
-
-                    print(f"Memory #{i+1} (sim: {similarity:.3f}, cat: {main_cat}/{subcat}, main category: {main_cat})")
-                    print(f"Content: {content}")
-                    print("-----------------------------------")
 
             return memory_enhanced_messages, memories
 
@@ -1131,6 +1138,24 @@ class MemoryEnhancedChat:
             "eos_token_id": self.tokenizer.eos_token_id,
             "use_cache": True
         }
+
+        # Special handling for Gemma 3
+        if "gemma" in self.model_name.lower():
+            # Use more conservative temperature
+            temperature = min(temperature, 0.5)
+
+            # Add stricter constraints for Gemma 3
+            config.update({
+                'do_sample': True,
+                'temperature': temperature,
+                'top_k': 40,  # Reduced from default
+                'top_p': 0.85,  # More conservative
+                'repetition_penalty': 1.2,  # Increased to avoid loops
+                # Add token constraints if you know the ID for non-English tokens
+                # 'bad_words_ids': [[id1], [id2], ...],
+            })
+
+            return config
 
         # Add sampling parameters
         if self.do_sample:

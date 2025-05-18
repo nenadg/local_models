@@ -189,14 +189,12 @@ class MemoryManager:
         """
         from batch_utils import batch_embed_texts, embed_single_text
 
-        # Store model and tokenizer references
-        self.embedding_model = model
-        self.embedding_tokenizer = tokenizer
-        self.embedding_device = device
+        # Get target dimension for memory system
+        target_dim = self.embedding_dim
 
         # Define single embedding function
         def generate_embedding(text: str) -> np.ndarray:
-            return embed_single_text(text, tokenizer, model, device)
+            return embed_single_text(text, tokenizer, model, device, max_length=512, target_dim=target_dim)
 
         # Define batch embedding function
         def generate_embeddings_batch(texts: List[str]) -> List[np.ndarray]:
@@ -207,8 +205,15 @@ class MemoryManager:
                 device,
                 batch_size=self.batch_settings.get('batch_size', 32),
                 adaptive=self.batch_settings.get('adaptive', True),
-                handle_oom=self.batch_settings.get('handle_oom', True)
+                handle_oom=self.batch_settings.get('handle_oom', True),
+                max_length=512,
+                target_dim=target_dim
             )
+
+        # Store model and tokenizer references
+        self.embedding_model = model
+        self.embedding_tokenizer = tokenizer
+        self.embedding_device = device
 
         # Set the functions
         self.embedding_function = generate_embedding
@@ -359,14 +364,16 @@ class MemoryManager:
         """
         Initialize matrices for enhanced embeddings with proper dimension detection and progress bar.
         """
-        # Use the actual embedding dimension from the first item or from config
-        if hasattr(self, 'embedding_dim'):
-            embedding_dim = self.embedding_dim
-        elif self.items and hasattr(self.items[0], 'embedding'):
-            embedding_dim = self.items[0].embedding.shape[0]
-        else:
-            # Default dimension if we can't determine it yet
-            embedding_dim = 2048  # TinyLlama's embedding dimension is 2048
+        # Handle None embedding_dim case
+        if self.embedding_dim is None:
+            # Don't try to initialize matrices yet
+            print(f"{self.get_time()} Skipping enhancement matrices initialization until embedding dimension is set")
+            self._rotation_matrices = {}
+            self._level_biases = {}
+            return
+
+        # Use the actual embedding dimension
+        embedding_dim = self.embedding_dim
 
         print(f"{self.get_time()} Initializing enhancement matrices for dimension {embedding_dim}")
 
