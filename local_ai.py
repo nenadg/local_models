@@ -234,15 +234,17 @@ class MemoryEnhancedChat:
 
         if custom_template:
             if is_qwen:
+                print(f"{self.get_time()} Using Qwen to template memories.")
                 # Qwen-specific template modification
                 # Insert memory content before the user's message
                 custom_template = custom_template.replace(
                     "{% for message in messages %}",
                     """{% for message in messages %}
                     {% if message['role'] == 'memory' %}
-                    <reference>
+                    <|im_start|>assistant\n<think>\n:
                     {{ message['content'] }}
-                    </reference>
+                    \n\n</think>\n\n'
+                    <|im_end>
                     {% continue %}
                     {% endif %}"""
                 )
@@ -981,14 +983,15 @@ class MemoryEnhancedChat:
                         memory_text += f"- {content}\n"
             elif is_qwen:
                 # Wrap memory in Qwen-specific format
-                memory_text = "<|im_start|>memories\n"
+                # memory_text = "<|im_start|>memories\n"
+                memory_text = ""
                 for memory in memories:
                     content = memory.get("content", "").strip()
                     similarity = memory.get("similarity", 0)
                     if similarity > 0.5:  # Only include highly relevant memories
                         memory_text += f"- {content}\n"
 
-                memory_text += f"<|im_end|>"
+                # memory_text += f"<|im_end|>"
             else:
                 # Standard formatting for other models
                 memory_text = format_memories_by_category(memories, main_category, subcategory)
@@ -1003,12 +1006,14 @@ class MemoryEnhancedChat:
 
             if last_user_idx is not None:
                 memory_enhanced_messages.insert(last_user_idx, {
-                    "role": "memory",
+                    "role": "system",
                     "content": memory_text
                 })
 
             # Update retrieval stats
             self.memory_stats["retrievals"] += 1
+
+            print('memories', json.dumps(memory_enhanced_messages), "\n\n\n\n\n ---------", memories)
 
             return memory_enhanced_messages, memories
 
