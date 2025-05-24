@@ -298,19 +298,7 @@ def batch_embed_texts(
 
 def embed_single_text(text: str, tokenizer, model, device: str = "cuda", max_length: int = 512, target_dim: Optional[int] = None) -> np.ndarray:
     """
-    Generic text embedding function that works with various model architectures.
-    Handles dimension mismatches and different model output structures.
-
-    Args:
-        text: Text to embed
-        tokenizer: Tokenizer to use
-        model: Model to generate embeddings
-        device: Device to use
-        max_length: Maximum token length
-        target_dim: Target embedding dimension (resize if necessary)
-
-    Returns:
-        Embedding vector as numpy array
+    Fixed version that properly handles Qwen model outputs.
     """
     try:
         with torch.no_grad():
@@ -323,169 +311,94 @@ def embed_single_text(text: str, tokenizer, model, device: str = "cuda", max_len
                 padding=True
             ).to(device)
 
-            # Get input shape for later validation
-            input_length = inputs['input_ids'].size(1)
+            # Get model outputs with hidden states
+            outputs = model(**inputs, output_hidden_states=True)
 
-            # Get model outputs
-            outputs = model(**inputs)
-
-            # Try different strategies to get embeddings, from best to fallback options
+            # Initialize embedding
             embedding = None
 
-            # Strategy 1: Use last_hidden_state if available (transformer models)
-            if hasattr(outputs, 'last_hidden_state') and outputs.last_hidden_state is not None:
-                hidden_states = outputs.last_hidden_state
+            # Strategy 1: Try hidden_states (Qwen and similar models)
+            if hasattr(outputs, 'hidden_states') and outputs.hidden_states is not None:
+                print(f"[DEBUG] hidden_states type: {type(outputs.hidden_states)}")
+                print(f"[DEBUG] hidden_states length: {len(outputs.hidden_states) if outputs.hidden_states else 'None'}")
 
-                # Validate shape compatibility with input
-                if hidden_states.size(1) == input_length:
-                    # Safe to use attention mask
-                    attention_mask = inputs.get('attention_mask', torch.ones_like(inputs['input_ids']))
-                    input_mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
-                    sum_embeddings = torch.sum(hidden_states * input_mask_expanded, 1)
-                    sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-                    embedding = sum_embeddings / sum_mask
-                else:
-                    # Dimensions don't match, use simple mean
-                    embedding = hidden_states.mean(dim=1)
+                if isinstance(outputs.hidden_states, tuple) and len(outputs.hidden_states) > 0:
+                    # Use the last layer's hidden states
+                    last_layer = outputs.hidden_states[-1]
+                    print(f"[DEBUG] Last layer shape: {last_layer.shape}")
 
-            # Strategy 2: Try to access hidden_states if available (some transformers)
-            elif hasattr(outputs, 'hidden_states') and outputs.hidden_states is not None:
-                # Usually hidden_states is a tuple of tensors from different layers
-                last_layer = outputs.hidden_states[-1]
-
-                # Check compatibility with input length
-                if last_layer.size(1) == input_length:
+                    # Average pooling over sequence length
                     attention_mask = inputs.get('attention_mask', torch.ones_like(inputs['input_ids']))
                     input_mask_expanded = attention_mask.unsqueeze(-1).expand(last_layer.size()).float()
                     sum_embeddings = torch.sum(last_layer * input_mask_expanded, 1)
                     sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
                     embedding = sum_embeddings / sum_mask
-                else:
-                    # Use simple mean pooling
-                    embedding = last_layer.mean(dim=1)
 
-            # Strategy 3: Try to extract embeddings from the transformer component
-            elif hasattr(model, 'transformer') and callable(getattr(model.transformer, 'forward', None)):
-                try:
-                    # Try to get transformer outputs
-                    transformer_outputs = model.transformer(**inputs)
+                    print(f"[DEBUG] Successfully extracted embedding with shape: {embedding.shape}")
 
-                    # Check for last_hidden_state
-                    if hasattr(transformer_outputs, 'last_hidden_state'):
-                        hidden_states = transformer_outputs.last_hidden_state
+            # Strategy 2: If no hidden states, try to get embeddings from the model's internals
+            if embedding is None and hasattr(model, 'model'):
+                print("[DEBUG] Trying to access model.model for embeddings")
 
-                        # Check compatibility with input length
-                        if hidden_states.size(1) == input_length:
-                            attention_mask = inputs.get('attention_mask', torch.ones_like(inputs['input_ids']))
-                            input_mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
-                            sum_embeddings = torch.sum(hidden_states * input_mask_expanded, 1)
-                            sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-                            embedding = sum_embeddings / sum_mask
-                        else:
-                            # Use simple mean pooling
-                            embedding = hidden_states.mean(dim=1)
-                except Exception as transformer_error:
-                    print(f"Transformer extraction failed, falling back to logits: {transformer_error}")
-                    embedding = None
+                if hasattr(model.model, 'embed_tokens'):
+                    # Get input embeddings and average them
+                    print("[DEBUG] Using embed_tokens approach")
+                    token_embeddings = model.model.embed_tokens(inputs['input_ids'])
 
-            # Strategy 4: Use logits directly (most causal language models)
+                    # Apply attention mask
+                    attention_mask = inputs.get('attention_mask', torch.ones_like(inputs['input_ids']))
+                    mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+                    sum_embeddings = torch.sum(token_embeddings * mask_expanded, 1)
+                    sum_mask = torch.clamp(mask_expanded.sum(1), min=1e-9)
+                    embedding = sum_embeddings / sum_mask
+
+                    print(f"[DEBUG] Got embedding from embed_tokens with shape: {embedding.shape}")
+
+            # Strategy 3: Use logits as last resort
             if embedding is None and hasattr(outputs, 'logits'):
+                print("[DEBUG] Using logits as fallback")
                 logits = outputs.logits
 
-                # Different approaches for logits based on shape
-                if len(logits.shape) == 3:  # [batch, seq_len, vocab]
-                    # Approach 1: Use last token's logits as a sentence embedding
-                    last_token_logits = logits[:, -1, :]
+                # Use mean of last token's logits
+                last_token_logits = logits[:, -1, :]
 
-                    # Normalize for cosine similarity
-                    norm = torch.norm(last_token_logits, dim=1, keepdim=True)
-                    normalized = last_token_logits / (norm + 1e-8)
-
-                    embedding = normalized
-                elif len(logits.shape) == 2:  # [batch, features]
-                    # For models that output features directly
-                    # Normalize for cosine similarity
-                    norm = torch.norm(logits, dim=1, keepdim=True)
-                    normalized = logits / (norm + 1e-8)
-
-                    embedding = normalized
-
-            # If we reach here and still don't have an embedding, try the encoder
-            if embedding is None and hasattr(model, 'model') and hasattr(model.model, 'encoder'):
-                try:
-                    encoder_outputs = model.model.encoder(**inputs)
-                    if hasattr(encoder_outputs, 'last_hidden_state'):
-                        # Use mean pooling
-                        embedding = encoder_outputs.last_hidden_state.mean(dim=1)
-                except Exception as encoder_error:
-                    print(f"Encoder extraction failed: {encoder_error}")
-                    embedding = None
-
-            # Last resort: If all strategies failed, generate a placeholder embedding
-            if embedding is None:
-                print("Using fallback embedding generation method")
-                # Try to get embedding dimension from model config
-                if hasattr(model, 'config'):
-                    if hasattr(model.config, 'hidden_size'):
-                        dim = model.config.hidden_size
-                    elif hasattr(model.config, 'd_model'):
-                        dim = model.config.d_model
-                    else:
-                        # Guess from the vocab size (less reliable)
-                        dim = min(2048, model.config.vocab_size // 2) if hasattr(model.config, 'vocab_size') else 2048
+                # Reduce dimensionality by taking top-k features
+                if target_dim and last_token_logits.shape[-1] > target_dim:
+                    topk_values, _ = torch.topk(last_token_logits.abs(), target_dim, dim=-1)
+                    embedding = topk_values
                 else:
-                    dim = 2048  # Default fallback
+                    # Use PCA-like reduction
+                    embedding = last_token_logits[:, :target_dim] if target_dim else last_token_logits
 
-                # Create a random embedding but make it consistent for the same text
-                import hashlib
-                text_hash = int(hashlib.md5(text.encode()).hexdigest(), 16) % 10000
-                torch.manual_seed(text_hash)
-                random_embedding = torch.randn(1, dim, device=device)
-                normalized = random_embedding / torch.norm(random_embedding)
-                embedding = normalized
+                print(f"[DEBUG] Got embedding from logits with shape: {embedding.shape}")
 
-            # Convert to numpy array
-            embedding_np = embedding.cpu().numpy()[0]
+            if embedding is None:
+                raise ValueError("Failed to extract embeddings from model outputs")
 
-            # Ensure embedding has the correct dimension if target_dim is specified
+            # Convert to numpy and ensure correct shape
+            embedding_np = embedding.cpu().numpy()
+            if len(embedding_np.shape) > 1:
+                embedding_np = embedding_np[0]  # Remove batch dimension
+
+            # Handle dimension adjustment
             if target_dim is not None and len(embedding_np) != target_dim:
                 if len(embedding_np) > target_dim:
-                    # Truncate
-                    resized_embedding = embedding_np[:target_dim]
+                    embedding_np = embedding_np[:target_dim]
                 else:
-                    # Pad with zeros
-                    resized_embedding = np.pad(embedding_np, (0, target_dim - len(embedding_np)))
+                    embedding_np = np.pad(embedding_np, (0, target_dim - len(embedding_np)))
 
-                # Normalize again after resizing
-                norm = np.linalg.norm(resized_embedding)
-                if norm > 1e-10:
-                    resized_embedding = resized_embedding / norm
-
-                return resized_embedding
+            # Normalize
+            norm = np.linalg.norm(embedding_np)
+            if norm > 1e-10:
+                embedding_np = embedding_np / norm
 
             return embedding_np
 
     except Exception as e:
-        print(f"Error generating embedding: {e}")
+        print(f"[DEBUG] Error in embed_single_text: {e}")
         import traceback
         traceback.print_exc()
-
-        # Get embedding dimension from model config
-        dim = None
-        if hasattr(model, 'config'):
-            if hasattr(model.config, 'hidden_size'):
-                dim = model.config.hidden_size
-            elif hasattr(model.config, 'd_model'):
-                dim = model.config.d_model
-
-        # Use target_dim if specified, otherwise use detected dimension or default
-        if target_dim is not None:
-            dim = target_dim
-        elif dim is None:
-            dim = 2048  # Default fallback
-
-        # Return a zero vector as fallback
-        return np.zeros(dim)
+        raise
         
 def tensor_batch_processing(tensor_op: Callable[[torch.Tensor], torch.Tensor],
                           input_tensor: torch.Tensor,

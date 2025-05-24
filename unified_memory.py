@@ -762,18 +762,11 @@ class MemoryManager:
             can_use_enhanced = use_enhanced and have_enhanced_indices
 
             # Perform search
-            # if can_use_enhanced:
             results = self._enhanced_search(
                 normalized_query,
                 top_k=top_k,
                 min_similarity=min_similarity
             )
-            # else:
-            #     results = self._standard_search(
-            #         normalized_query,
-            #         top_k=top_k,
-            #         min_similarity=min_similarity
-            #     )
 
             # Apply metadata filtering if provided
             # if metadata_filter:
@@ -837,99 +830,6 @@ class MemoryManager:
 
         return deduplicated
 
-    def _standard_search(self, query_embedding: np.ndarray, top_k: int, min_similarity: float) -> List[Dict[str, Any]]:
-        """
-        Perform standard vector search using the main index.
-
-        Args:
-            query_embedding: Normalized query embedding
-            top_k: Maximum number of results
-            min_similarity: Minimum similarity threshold
-
-        Returns:
-            List of matching items with similarity scores
-        """
-        try:
-            # Validate input
-            if query_embedding is None or not isinstance(query_embedding, np.ndarray):
-                print(f"{self.get_time()} Invalid query embedding in _standard_search")
-                return []
-
-            if self.index is None or self.index.ntotal == 0:
-                print(f"{self.get_time()} FAISS index is empty or not initialized")
-                return []
-
-            # Ensure query has correct dimension
-            if len(query_embedding) != self.embedding_dim:
-                print(f"{self.get_time()} Query dimension mismatch: {len(query_embedding)} vs {self.embedding_dim}")
-                if len(query_embedding) > self.embedding_dim:
-                    query_embedding = query_embedding[:self.embedding_dim]
-                else:
-                    query_embedding = np.pad(query_embedding, (0, self.embedding_dim - len(query_embedding)))
-
-                # Renormalize
-                query_norm = np.linalg.norm(query_embedding)
-                if query_norm > 1e-10:
-                    query_embedding = query_embedding / query_norm
-
-            # Get more results than needed to account for filtering
-            search_k = min(top_k * 3, self.index.ntotal)  # Increased from 2x to 3x
-
-            # Prepare query for FAISS - ensure it's float32
-            query_array = np.array([query_embedding], dtype=np.float32)
-
-            # Perform search
-            similarities, indices = self.index.search(query_array, search_k)
-
-            # Process results with validation
-            # Process results with hallucination penalty
-            results = []
-            for i, idx in enumerate(indices[0]):
-                if idx == -1 or similarities[0][i] < min_similarity:
-                    continue
-
-                if idx >= len(self.items):
-                    continue
-
-                if idx in self.deleted_ids:
-                    continue
-
-                item = self.items[idx]
-                similarity = float(similarities[0][i])
-
-                # Apply hallucination penalty if present
-                if item.metadata.get('hallucination_detected', False):
-                    penalty = item.metadata.get('reliability_penalty', 0.7)
-                    original_similarity = similarity
-                    similarity *= penalty  # Reduce similarity score
-
-                    # Log the penalty application
-                    if self.memory_debug:
-                        print(f"{self.get_time()} Applied hallucination penalty: {original_similarity:.3f} -> {similarity:.3f}")
-
-                # Apply similarity enhancement (if not hallucinated)
-                if not item.metadata.get('hallucination_detected', False):
-                    similarity = self._enhance_similarity(similarity)
-
-                results.append({
-                    "id": item.id,
-                    "content": item.content,
-                    "similarity": similarity,
-                    "raw_similarity": similarity,
-                    "metadata": item.metadata,
-                    "hallucination_warning": item.metadata.get('hallucination_detected', False)
-                })
-
-            # Sort by similarity
-            results.sort(key=lambda x: x["similarity"], reverse=True)
-
-            return results[:top_k]
-
-        except Exception as e:
-            print(f"{self.get_time()} Error in standard search: {e}")
-            traceback.print_exc()
-            return []
-
     def _rebuild_enhanced_indices(self):
         """Rebuild FAISS indices for enhanced embeddings."""
         if not self.enable_enhanced_embeddings:
@@ -992,7 +892,8 @@ class MemoryManager:
 
     def _enhanced_search(self, query_embedding: np.ndarray, top_k: int, min_similarity: float) -> List[Dict[str, Any]]:
         """
-        Perform enhanced search across multiple embedding levels with proper error handling and hallucination penalties.
+        Enhanced search using parallax effect across embedding levels.
+        Starts with base embeddings and shifts perspective for each higher level.
 
         Args:
             query_embedding: Normalized query embedding
@@ -1005,283 +906,199 @@ class MemoryManager:
         try:
             # Validate inputs
             if query_embedding is None or not isinstance(query_embedding, np.ndarray):
-                print(f"{self.get_time()} Invalid query embedding in _enhanced_search")
                 return []
 
-            if not self.enhanced_indices:
-                print(f"{self.get_time()} No enhanced indices available")
-                return self._standard_search(query_embedding, top_k, min_similarity)
-
-            # Ensure query has correct dimension
+            # Ensure correct dimension
             if len(query_embedding) != self.embedding_dim:
-                print(f"{self.get_time()} Query dimension mismatch: {len(query_embedding)} vs {self.embedding_dim}")
-                # Resize query embedding
                 if len(query_embedding) > self.embedding_dim:
                     query_embedding = query_embedding[:self.embedding_dim]
                 else:
                     query_embedding = np.pad(query_embedding, (0, self.embedding_dim - len(query_embedding)))
+
                 # Renormalize
                 norm = np.linalg.norm(query_embedding)
                 if norm > 1e-10:
                     query_embedding = query_embedding / norm
 
-            # Track results by item ID for merging across levels
-            result_dict = {}
+            # Results collector
+            all_results = {}  # item_id -> best result data
 
-            # Check if enhanced indices exist and have correct dimension
-            valid_enhanced_indices = {}
-            for level, index in self.enhanced_indices.items():
-                if index.d == self.embedding_dim and index.ntotal > 0:  # Added index size check
-                    valid_enhanced_indices[level] = index
+            # Step 1: Search base index first
+            base_embeddings = []  # Store base embeddings for parallax calculation
 
-            # Skip enhanced search if no valid indices
-            if not valid_enhanced_indices:
-                print(f"{self.get_time()} No valid enhanced indices found")
-                return list(result_dict.values())
+            if self.index is not None and self.index.ntotal > 0:
+                # Search base index
+                search_k = min(top_k * 3, self.index.ntotal)
+                query_array = np.array([query_embedding], dtype=np.float32)
 
-            # Search across all valid enhanced levels and merge results
-            # Process each enhancement level with improved search logic
-            for level in sorted(valid_enhanced_indices.keys()):
                 try:
-                    # Get index for this level and verify it has entries
-                    level_index = valid_enhanced_indices[level]
-                    if level_index.ntotal == 0:
-                        continue
+                    similarities, indices = self.index.search(query_array, search_k)
 
-                    # Generate level-specific query with consolidated validation
-                    level_query = self._generate_level_embedding(query_embedding, level)
-                    if level_query is None or len(level_query) != self.embedding_dim:
-                        print(f"{self.get_time()} Invalid level {level} query embedding - skipping")
-                        continue
-
-                    # Normalize the query vector - use a higher epsilon for stability
-                    query_norm = np.linalg.norm(level_query)
-                    if query_norm < 1e-6:  # More forgiving threshold
-                        print(f"{self.get_time()} Level {level} query has near-zero norm - skipping")
-                        continue
-
-                    normalized_query = level_query / query_norm
-
-                    # Calculate dynamic search depth based on index size
-                    # More aggressive for higher levels to capture broader matches
-                    depth_factor = 1.0 + (level * 0.5)  # Increase search depth for higher levels
-                    index_size = level_index.ntotal
-                    search_k = min(int(top_k * depth_factor), index_size)
-
-                    # Perform the search with proper error handling
-                    query_array = np.array([normalized_query], dtype=np.float32)
-                    try:
-                        similarities, indices = level_index.search(query_array, search_k)
-                    except Exception as e:
-                        print(f"{self.get_time()} FAISS search failed for level {level}: {e}")
-                        continue
-
-                    # Track how many results we found at this level
-                    found_at_this_level = 0
-
-                    # Use more aggressive similarity thresholding for higher levels
-                    # This allows more diverse results at higher levels
-                    level_min_similarity = min_similarity * (0.8 ** level)  # Decrease threshold for higher levels
-
-                    # Process search results with proper bounds checking
+                    # Process base results
                     for i, idx in enumerate(indices[0]):
-                        # Skip invalid indices
-                        if idx == -1:
+                        if idx == -1 or similarities[0][i] < min_similarity:
                             continue
 
-                        # Validate similarity with level-specific threshold
-                        base_similarity = float(similarities[0][i])
-                        if base_similarity <= level_min_similarity:
+                        if idx >= len(self.items) or idx in self.deleted_ids:
                             continue
 
-                        # Validate index bounds
-                        if idx < 0 or idx >= len(self.items):
-                            continue
-
-                        # Skip deleted items
-                        if idx in self.deleted_ids:
-                            continue
-
-                        # Get the item
                         item = self.items[idx]
+                        similarity = float(similarities[0][i])
 
-                        # *** HALLUCINATION HANDLING - Apply penalty immediately ***
-                        if item.metadata.get('hallucination_detected', False):
-                            # Apply penalty factor to the similarity score
-                            penalty = item.metadata.get('reliability_penalty', 0.7)
-                            original_similarity = base_similarity
-                            base_similarity *= penalty  # Reduce similarity by penalty factor
+                        # Store base embedding for parallax
+                        if len(base_embeddings) < 5:  # Keep top 5 for parallax
+                            base_embeddings.append(self.embeddings[idx])
 
-                            # Log if debugging is enabled
-                            if hasattr(self, 'memory_debug') and self.memory_debug:
-                                print(f"{self.get_time()} Applied hallucination penalty: {original_similarity:.3f} -> {base_similarity:.3f}")
-
-                            # Skip if penalized similarity now falls below threshold
-                            if base_similarity <= level_min_similarity:
-                                continue
-
-                        # Apply regular similarity enhancement only if not hallucinated
-                        if not item.metadata.get('hallucination_detected', False):
-                            enhanced_similarity = self._enhance_similarity(base_similarity)
-                        else:
-                            # For hallucinated content, don't apply the enhancement
-                            enhanced_similarity = base_similarity
-
-                        # Calculate level-adjusted similarity for ranking
-                        final_similarity = enhanced_similarity
-
-                         # Add diversity bonus for novel content only if reliable
-                        if item.id not in result_dict and not item.metadata.get('hallucination_detected', False):
-                            # New items get a small novelty bonus if not hallucinated
-                            novelty_bonus = 0.01 * level
-                            final_similarity = min(1.0, final_similarity + novelty_bonus)
-
-                        # Create a rank score that considers both similarity and reliability
-                        reliability_score = 1.0 - item.metadata.get('hallucination_score', 0.0)
-                        rank_score = final_similarity * reliability_score
-
-                        # Add to result_dict if better than existing or not found yet
-                        if item.id not in result_dict or rank_score > result_dict[item.id].get("rank_score", 0):
-                            # When replacing a previous level result, preserve the best raw similarity
-                            old_raw = result_dict.get(item.id, {}).get("raw_similarity", 0)
-                            best_raw = max(old_raw, base_similarity)
-
-                            # Create result with improved metadata for debugging
-                            result_dict[item.id] = {
-                                "id": item.id,
-                                "content": item.content,
-                                "similarity": final_similarity,
-                                "raw_similarity": best_raw,
-                                "metadata": item.metadata,
-                                "level": level,
-                                "rank_score": rank_score,
-                                "hallucination_warning": item.metadata.get('hallucination_detected', False),
-                                "level_metrics": {
-                                    "original_similarity": base_similarity,
-                                    "enhancement": final_similarity - base_similarity # 1 # enhanced_similarity - similarity
-                                }
-                            }
-
-                            found_at_this_level += 1
-
-                    # Log level results for debugging
-                    # if found_at_this_level > 0:
-                    #     print(f"{self.get_time()} Level {level} found {found_at_this_level} items")
+                        # Store result
+                        all_results[item.id] = {
+                            'item': item,
+                            'similarity': similarity,
+                            'raw_similarity': similarity,
+                            'index': idx,
+                            'source': 'base',
+                            'level': 0
+                        }
 
                 except Exception as e:
-                    print(f"{self.get_time()} Error processing level {level}: {e}")
-                    traceback.print_exc()
-                    # Continue to next level
+                    print(f"{self.get_time()} Error searching base index: {e}")
 
-            # # Apply cross-level verification to boost confidence in items found in multiple levels
-            result_dict = self._apply_cross_level_verification(result_dict)
+            # Step 2: Calculate parallax shift vector if we have base results
+            parallax_vector = None
+            if base_embeddings:
+                # Calculate centroid of top base results
+                centroid = np.mean(base_embeddings, axis=0)
+                centroid_norm = np.linalg.norm(centroid)
+                if centroid_norm > 1e-10:
+                    centroid = centroid / centroid_norm
 
-            # Extract final results
-            results = list(result_dict.values())
+                # Parallax vector points from query to centroid
+                parallax_vector = centroid - query_embedding
 
-            # Sort by rank_score rather than just similarity to prioritize reliable content
-            results.sort(key=lambda x: x.get("rank_score", x.get("similarity", 0)), reverse=True)
+            # Step 3: Search enhanced levels with parallax shift
+            if self.enable_enhanced_embeddings and self.enhanced_indices and parallax_vector is not None:
+                for level in sorted(self.enhanced_indices.keys()):
+                    index = self.enhanced_indices[level]
+                    if index.d != self.embedding_dim or index.ntotal == 0:
+                        continue
 
-            # Apply diversity promotion (modified to consider hallucination)
-            results = self._promote_diversity(results, top_k)
+                    try:
+                        # Apply parallax shift - more conservative for higher levels
+                        parallax_strength = level * 0.2  # 0.2, 0.4, 0.6, 0.8 for levels 1-4
+                        shifted_query = query_embedding + (parallax_vector * parallax_strength)
 
-            # Limit to top-k
-            return results[:top_k]
-            # # print("\nRESULT DICT", result_dict)
-            # print("\n")
+                        # Renormalize
+                        norm = np.linalg.norm(shifted_query)
+                        if norm > 1e-10:
+                            shifted_query = shifted_query / norm
 
+                        # Generate level embedding for shifted query
+                        level_query = self._generate_level_embedding(shifted_query, level)
+                        if level_query is None:
+                            continue
 
-            # # Extract final results
-            # results = list(result_dict.values())
+                        # Normalize
+                        norm = np.linalg.norm(level_query)
+                        if norm < 1e-10:
+                            continue
+                        level_query = level_query / norm
 
-            # # Sort by similarity
-            # # results.sort(key=lambda x: x["similarity"], reverse=True)
+                        # Search this level
+                        search_k = min(top_k * 2, index.ntotal)
+                        query_array = np.array([level_query], dtype=np.float32)
 
-            # # Apply diversity promotion
-            # results = self._promote_diversity(results, top_k)
+                        similarities, indices = index.search(query_array, search_k)
 
-            # # print ("\nRESULTS", results)
-            # # Limit to top-k
-            # return results[:top_k]
+                        # Process results with level-based weight that DECREASES for higher levels
+                        # Higher levels should add diversity but not dominate
+                        level_weight = 1.0 / (1.0 + level * 0.3)  # 0.77, 0.63, 0.53, 0.45 for levels 1-4
+
+                        for i, idx in enumerate(indices[0]):
+                            if idx == -1:
+                                continue
+
+                            if idx >= len(self.items) or idx in self.deleted_ids:
+                                continue
+
+                            item = self.items[idx]
+                            raw_similarity = float(similarities[0][i])
+
+                            # Apply level weight
+                            weighted_similarity = raw_similarity * level_weight
+
+                            # Skip if too low after weighting
+                            if weighted_similarity < min_similarity * 0.5:  # More lenient for higher levels
+                                continue
+
+                            # Update or add result
+                            if item.id not in all_results or weighted_similarity > all_results[item.id]['similarity']:
+                                all_results[item.id] = {
+                                    'item': item,
+                                    'similarity': weighted_similarity,
+                                    'raw_similarity': raw_similarity,
+                                    'index': idx,
+                                    'source': 'enhanced',
+                                    'level': level
+                                }
+
+                    except Exception as e:
+                        print(f"{self.get_time()} Error searching level {level}: {e}")
+
+            # Step 4: Convert to list and sort
+            results = []
+            for item_id, data in all_results.items():
+                item = data['item']
+
+                # Apply final adjustments
+                final_similarity = data['similarity']
+
+                # Penalty for hallucinated content
+                if item.metadata.get('hallucination_detected', False):
+                    penalty = item.metadata.get('reliability_penalty', 0.7)
+                    final_similarity *= penalty
+
+                result = {
+                    "id": item.id,
+                    "content": item.content,
+                    "similarity": final_similarity,
+                    "raw_similarity": data['raw_similarity'],
+                    "metadata": item.metadata,
+                    "source": data['source'],
+                    "level": data['level'],
+                    "hallucination_warning": item.metadata.get('hallucination_detected', False)
+                }
+
+                results.append(result)
+
+            # Sort by similarity
+            results.sort(key=lambda x: x['similarity'], reverse=True)
+
+            # Ensure we include the best base results even if enhanced results dominate
+            # Find the best base results
+            base_results = [r for r in results if r['source'] == 'base']
+            enhanced_results = [r for r in results if r['source'] == 'enhanced']
+
+            # Always include at least 2 base results if available
+            final_results = []
+            if base_results:
+                final_results.extend(base_results[:2])
+
+            # Add enhanced results
+            for r in enhanced_results:
+                if r not in final_results and len(final_results) < top_k:
+                    final_results.append(r)
+
+            # Fill remaining slots with any other results
+            for r in results:
+                if r not in final_results and len(final_results) < top_k:
+                    final_results.append(r)
+
+            return final_results[:top_k]
 
         except Exception as e:
             print(f"{self.get_time()} Error in enhanced search: {e}")
+            import traceback
             traceback.print_exc()
-            # Fall back to standard search
-            return self._standard_search(query_embedding, top_k, min_similarity)
-
-    def _promote_diversity(self, results: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
-        """
-        Promote diversity in search results while prioritizing reliable results and avoid redundancy.
-
-        Args:
-            results: Sorted list of search results
-            top_k: Desired number of results
-
-        Returns:
-            List of diverse results
-        """
-        if len(results) <= top_k:
-            return results
-
-        # Always keep the top result
-        diverse_results = [results[0]]
-
-        # Separate remaining results by reliability
-        reliable_remaining = []
-        unreliable_remaining = []
-
-        for result in results[1:]:
-            if result.get("hallucination_warning", False):
-                unreliable_remaining.append(result)
-            else:
-                reliable_remaining.append(result)
-
-        # Select additional results that maximize diversity, prioritizing reliable ones
-        while len(diverse_results) < top_k:
-            # Try to pick from reliable results first
-            if reliable_remaining:
-                candidate_pool = reliable_remaining
-            elif unreliable_remaining:  # Fall back to unreliable if no reliable left
-                candidate_pool = unreliable_remaining
-            else:  # No more candidates
-                break
-
-            # Find the result that has the highest minimum distance to selected results
-            best_idx = -1
-            best_min_distance = -1
-
-            for idx, candidate in enumerate(candidate_pool):
-                # Calculate minimum distance to already selected results
-                min_distance = float('inf')
-                candidate_content = candidate.get("content", "")
-
-                for selected in diverse_results:
-                    selected_content = selected.get("content", "")
-
-                    # Simple text distance
-                    distance = self._text_distance(candidate_content, selected_content)
-                    min_distance = min(min_distance, distance)
-
-                # If this candidate is more diverse, select it
-                if min_distance > best_min_distance:
-                    best_idx = idx
-                    best_min_distance = min_distance
-
-            # Add the most diverse result
-            if best_idx >= 0:
-                diverse_results.append(candidate_pool[best_idx])
-                candidate_pool.pop(best_idx)
-            else:
-                # Fall back to the next best result by rank score
-                diverse_results.append(candidate_pool[0])
-                candidate_pool.pop(0)
-
-            # Update the pool references if we've emptied reliable candidates
-            if reliable_remaining == candidate_pool and not reliable_remaining:
-                candidate_pool = unreliable_remaining
-
-        return diverse_results
+            return []
 
     def _text_distance(self, text1: str, text2: str) -> float:
         """

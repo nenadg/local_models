@@ -965,7 +965,7 @@ class MemoryEnhancedChat:
             memories = self.memory_manager.retrieve(
                 query=query,
                 top_k=5,
-                min_similarity=0.5,
+                min_similarity=0.3,
                 metadata_filter={"main_category": main_category, "subcategory": subcategory},
             )
 
