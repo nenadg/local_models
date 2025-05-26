@@ -213,7 +213,7 @@ class MemoryEnhancedChat:
 
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=True)
-        self.tokenizer.model_max_length = 8192 # 2048  # Set appropriate context window, max - 2048 for tinyllama
+        # self.tokenizer.model_max_length = self.tokenizer.model_max_length 8192 # 2048  # Set appropriate context window, max - 2048 for tinyllama
 
         # Set up model loading options
         loading_options = {
