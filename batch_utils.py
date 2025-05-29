@@ -319,13 +319,13 @@ def embed_single_text(text: str, tokenizer, model, device: str = "cuda", max_len
 
             # Strategy 1: Try hidden_states (Qwen and similar models)
             if hasattr(outputs, 'hidden_states') and outputs.hidden_states is not None:
-                print(f"[DEBUG] hidden_states type: {type(outputs.hidden_states)}")
-                print(f"[DEBUG] hidden_states length: {len(outputs.hidden_states) if outputs.hidden_states else 'None'}")
+                # print(f"[DEBUG] hidden_states type: {type(outputs.hidden_states)}")
+                # print(f"[DEBUG] hidden_states length: {len(outputs.hidden_states) if outputs.hidden_states else 'None'}")
 
                 if isinstance(outputs.hidden_states, tuple) and len(outputs.hidden_states) > 0:
                     # Use the last layer's hidden states
                     last_layer = outputs.hidden_states[-1]
-                    print(f"[DEBUG] Last layer shape: {last_layer.shape}")
+                    # print(f"[DEBUG] Last layer shape: {last_layer.shape}")
 
                     # Average pooling over sequence length
                     attention_mask = inputs.get('attention_mask', torch.ones_like(inputs['input_ids']))
@@ -334,15 +334,15 @@ def embed_single_text(text: str, tokenizer, model, device: str = "cuda", max_len
                     sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
                     embedding = sum_embeddings / sum_mask
 
-                    print(f"[DEBUG] Successfully extracted embedding with shape: {embedding.shape}")
+                    # print(f"[DEBUG] Successfully extracted embedding with shape: {embedding.shape}")
 
             # Strategy 2: If no hidden states, try to get embeddings from the model's internals
             if embedding is None and hasattr(model, 'model'):
-                print("[DEBUG] Trying to access model.model for embeddings")
+                # print("[DEBUG] Trying to access model.model for embeddings")
 
                 if hasattr(model.model, 'embed_tokens'):
                     # Get input embeddings and average them
-                    print("[DEBUG] Using embed_tokens approach")
+                    # print("[DEBUG] Using embed_tokens approach")
                     token_embeddings = model.model.embed_tokens(inputs['input_ids'])
 
                     # Apply attention mask
@@ -352,11 +352,11 @@ def embed_single_text(text: str, tokenizer, model, device: str = "cuda", max_len
                     sum_mask = torch.clamp(mask_expanded.sum(1), min=1e-9)
                     embedding = sum_embeddings / sum_mask
 
-                    print(f"[DEBUG] Got embedding from embed_tokens with shape: {embedding.shape}")
+                    # print(f"[DEBUG] Got embedding from embed_tokens with shape: {embedding.shape}")
 
             # Strategy 3: Use logits as last resort
             if embedding is None and hasattr(outputs, 'logits'):
-                print("[DEBUG] Using logits as fallback")
+                # print("[DEBUG] Using logits as fallback")
                 logits = outputs.logits
 
                 # Use mean of last token's logits
@@ -370,7 +370,7 @@ def embed_single_text(text: str, tokenizer, model, device: str = "cuda", max_len
                     # Use PCA-like reduction
                     embedding = last_token_logits[:, :target_dim] if target_dim else last_token_logits
 
-                print(f"[DEBUG] Got embedding from logits with shape: {embedding.shape}")
+                # print(f"[DEBUG] Got embedding from logits with shape: {embedding.shape}")
 
             if embedding is None:
                 raise ValueError("Failed to extract embeddings from model outputs")
@@ -395,7 +395,7 @@ def embed_single_text(text: str, tokenizer, model, device: str = "cuda", max_len
             return embedding_np
 
     except Exception as e:
-        print(f"[DEBUG] Error in embed_single_text: {e}")
+        # print(f"[DEBUG] Error in embed_single_text: {e}")
         import traceback
         traceback.print_exc()
         raise

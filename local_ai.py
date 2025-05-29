@@ -628,6 +628,7 @@ class MemoryEnhancedChat:
 
         # Apply chat template
         is_gemma = "gemma" in self.model_name.lower()
+        is_qwen = "qwen" in self.model_name.lower()
 
         print(f"{self.get_time()} Model used: {self.model_name.lower()}")
 
@@ -637,11 +638,12 @@ class MemoryEnhancedChat:
             prompt = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
-                add_generation_prompt=True
+                add_generation_prompt=True,
+                enable_thinking=is_qwen
             )
 
-
-        print(f"\n============ DEBUG PROMPT ============\n{prompt}\n====================================\n")
+        if self.memory_debug:
+            print(f"\n============ DEBUG PROMPT ============\n{prompt}\n====================================\n")
 
         # Tokenize prompt
         try:
@@ -1013,7 +1015,8 @@ class MemoryEnhancedChat:
             # Update retrieval stats
             self.memory_stats["retrievals"] += 1
 
-            print('memories', json.dumps(memory_enhanced_messages), "\n\n\n\n\n ---------", memories)
+            if self.memory_debug:
+                print('memories', json.dumps(memory_enhanced_messages), "\n\n\n\n\n ---------", memories)
 
             return memory_enhanced_messages, memories
 
