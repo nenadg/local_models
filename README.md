@@ -41,7 +41,7 @@ source local_models_venv/bin/activate
 ### 3. Install dependencies
 
 ```bash
-pip install torch transformers faiss-cpu numpy scikit-learn accelerate peft datasets spacy textpipeliner matplotlib nltk rake-nltk prompt_toolkit autoawq pyppeteer pytesseract Pillow numpy asyncio
+pip install torch transformers faiss-cpu numpy scikit-learn accelerate peft datasets spacy textpipeliner matplotlib nltk rake-nltk prompt_toolkit autoawq pyppeteer pytesseract Pillow numpy asyncio python-readability
 ```
 
 If you have CUDA, install the GPU version of FAISS for better performance:

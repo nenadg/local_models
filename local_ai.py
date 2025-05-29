@@ -47,6 +47,8 @@ from memory_utils import (
     format_memories_by_category
 )
 
+from web_search_integration import WebSearchIntegration, integrate_web_search
+
 # Default system message template
 DEFAULT_SYSTEM_MESSAGE = """You are a helpful and friendly assistant designed to provide accurate information. Follow these guidelines:
 1. When you don't know something, explicitly say "I don't know about [topic]" or "I'm not familiar with that."
@@ -118,6 +120,7 @@ class MemoryEnhancedChat:
         self._setup_memory_system()
         self._setup_utility_components()
         self._setup_speculative_decoding()
+        self._setup_web_search()
 
         # Initialize stats and state
         self.memory_stats = {"items_added": 0, "retrievals": 0}
@@ -322,6 +325,14 @@ class MemoryEnhancedChat:
         else:
             self.draft_model = None
 
+    def _setup_web_search(self):
+        """Set up web search integration."""
+        self.web_search = WebSearchIntegration(
+            memory_manager=self.memory_manager,
+            question_classifier=self.question_classifier
+        )
+        print(f"{self.get_time()} Web search integration initialized")
+
     def _update_embedding_dimension(self):
         """Update embedding dimension based on loaded model."""
         # Get model's hidden size
@@ -340,6 +351,22 @@ class MemoryEnhancedChat:
         if self.memory_manager.embedding_dim != embedding_dim:
             print(f"{self.get_time()} Updating memory embedding dimension: {self.memory_manager.embedding_dim} -> {embedding_dim}")
             self.memory_manager.update_embedding_dimension(embedding_dim)
+
+
+    def _check_and_perform_web_search(self, query: str) -> Dict[str, any]:
+        """Check if web search is needed and perform it."""
+        if not hasattr(self, 'web_search') or not self.enable_memory:
+            return {'searched': False}
+
+        # Check if search is needed
+        should_search, reason = self.web_search.should_search(query)
+
+        if should_search:
+            print(f"{self.get_time()} Performing web search: {reason}")
+            return self.web_search.process_query(query)
+
+        return {'searched': False}
+
 
     def _format_chat_prompt(self, messages: List[Dict[str, str]]) -> str:
         """
@@ -606,6 +633,12 @@ class MemoryEnhancedChat:
         memory_enabled = self.enable_memory if enable_memory is None else enable_memory
 
         if memory_enabled and user_query:
+            web_results = self._check_and_perform_web_search(user_query)
+            if web_results.get('searched') and web_results.get('saved_to_memory', 0) > 0:
+                print(f"{self.get_time()} Added {web_results['saved_to_memory']} web results to memory")
+                # Add slight delay to ensure memory is indexed
+                time.sleep(0.1)
+
             memory_enhanced_messages, retrieved_memories = self._integrate_memory(messages, user_query)
             messages = memory_enhanced_messages
 
@@ -870,6 +903,7 @@ class MemoryEnhancedChat:
                 if tokens_received % 100 == 0:
                     self.resource_manager.clear_cache()
 
+            self.tokens_received = tokens_received
             # Handle any remaining display buffer
             if display_buffer and not fallback_shown:
                 print(display_buffer, end="", flush=True)
@@ -1544,15 +1578,15 @@ def main():
     print(f"{chat.get_time()} Command history stored in: {history_file}")
 
     # Warm up the model with a short prompt
-    # if chat.device == "cuda":
-    #     print(f"{chat.get_time()} Warming up model...")
-    #     import random
+    if chat.device == "cuda":
+        print(f"{chat.get_time()} Warming up model...")
+        import random
 
-    #     _ = chat.chat(
-    #         [{"role": "user", "content": f"Calculate the result of {random.randint(1, 100)} + {random.randint(1, 100)}.  Print just result without any explanation or preamble, like in this example: 242+4=246." }],
-    #         max_new_tokens=20,
-    #         temperature=0.7
-    #     )
+        _ = chat.chat(
+            [{"role": "user", "content": f"Calculate the result of {random.randint(1, 100)} + {random.randint(1, 100)}.  Print just result without any explanation or preamble, like in this example: 242+4=246." }],
+            max_new_tokens=20,
+            temperature=0.7
+        )
 
     # Display welcome header
     print("\n" + "="*50)
@@ -1566,6 +1600,8 @@ def main():
     print("  !toggle-heatmap - Toggle confidence heatmap visualization")
     print("  !toggle-draft - Toggle draft model for speculative decoding")
     print("  !toggle-filter - Toggle confidence filtering")
+    print("  !toggle-websearch - Toggle web search on/off")
+    print("  !search: [query] - Force web search for a query")
     print("  !mcp-help - Show MCP commands for file output")
     print("  !memory-stats - Display info about memories")
     print("  !enhance-factor: [0.0-1.0] - Set similarity enhancement factor")
@@ -1685,6 +1721,23 @@ def main():
                 print(f"{chat.get_time()} Memory indices rebuilt")
                 continue
 
+            elif user_input.lower() == '!toggle-websearch':
+                if hasattr(chat, 'web_search'):
+                    chat.enable_web_search = not getattr(chat, 'enable_web_search', True)
+                    print(f"{chat.get_time()} Web search {'enabled' if chat.enable_web_search else 'disabled'}")
+                else:
+                    print(f"{chat.get_time()} Web search not available")
+                continue
+
+            elif user_input.lower().startswith('!search:'):
+                query = user_input[8:].strip()
+                if query and hasattr(chat, 'web_search'):
+                    results = chat.web_search.process_query(query)
+                    print(f"{chat.get_time()} Search results: {results['results_found']} found, {results['saved_to_memory']} saved")
+                    for i, content in enumerate(results['content'][:3]):
+                        print(f"  {i+1}. {content['title']} - {content['domain']}")
+                continue
+
             # Add user message to conversation
             user_message = {"role": "user", "content": user_input}
             conversation.append(user_message)
@@ -1705,7 +1758,7 @@ def main():
 
             # Calculate tokens and timing
             generation_time = time.time() - start_time
-            token_count = len(response.split())
+            token_count = chat.tokens_received
             tokens_per_second = token_count / max(0.01, generation_time)
 
             # Display generation stats
