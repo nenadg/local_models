@@ -240,6 +240,10 @@ def save_to_memory(memory_manager, content: str, classification: Optional[Dict[s
             metadata=metadata
         )
         
+        if memory_id:
+            results["saved"] = True
+            results["memory_id"] = memory_id
+
     except Exception as e:
         results["error"] = str(e)
     
