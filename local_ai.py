@@ -150,8 +150,19 @@ class MemoryEnhancedChat:
         self.torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
 
     def _setup_resource_manager(self):
-        # Resource manager for efficient memory usage
+        """Enhanced resource manager setup with device awareness."""
         self.resource_manager = ResourceManager(device=self.device)
+
+        # Add device validation
+        if self.device == "cuda" and torch.cuda.is_available():
+            # Set memory fraction to avoid OOM
+            torch.cuda.set_per_process_memory_fraction(0.9)
+
+            # Enable memory efficient attention if available
+            try:
+                torch.backends.cuda.enable_flash_sdp(True)
+            except:
+                pass
 
     def _setup_utility_components(self):
         """Set up utility components for the chat system."""
@@ -181,20 +192,36 @@ class MemoryEnhancedChat:
 
         # Initialize response filter
         if self.no_filter:
-            # Use very lenient thresholds for Gemma 3
+            # Use very lenient thresholds with no filter
+            print(f"{self.get_time()} Loading response filter with minimal settings.")
+
             self.response_filter = ResponseFilter(
-                confidence_threshold=0.1,  # Much lower than default 0.45
-                entropy_threshold=5.0,     # Much higher than default 3.5
-                perplexity_threshold=40.0, # Much higher than default 25.0
+                confidence_threshold=0.05,   # Much lower
+                entropy_threshold=8.0,       # Much higher
+                perplexity_threshold=60.0,   # Much higher
                 user_context={"model_name": self.model_name},
                 question_classifier=self.question_classifier,
-                sharpening_factor=self.similarity_enhancement_factor,
+                sharpening_factor=0.1,       # Lower sharpening
                 window_size=3,
-                use_relative_filtering=True,
-                pattern_detection_weight=0.3,  # Lower from 0.6
-                token_count_threshold=100      # Higher from 60
+                use_relative_filtering=False, # Disable pattern detection
+                pattern_detection_weight=0.1, # Much lower
+                token_count_threshold=200     # Higher threshold
+
+
+                # confidence_threshold=0.1,  # Much lower than default 0.45
+                # entropy_threshold=5.0,     # Much higher than default 3.5
+                # perplexity_threshold=40.0, # Much higher than default 25.0
+                # user_context={"model_name": self.model_name},
+                # question_classifier=self.question_classifier,
+                # sharpening_factor=self.similarity_enhancement_factor,
+                # window_size=3,
+                # use_relative_filtering=True,
+                # pattern_detection_weight=0.3,  # Lower from 0.6
+                # token_count_threshold=100      # Higher from 60
             )
         else:
+            print(f"{self.get_time()} Loading response filter with default settings.")
+
             self.response_filter = ResponseFilter(
                 confidence_threshold=self.confidence_threshold,
                 entropy_threshold=3.5,         # Up from 2.5
@@ -225,10 +252,16 @@ class MemoryEnhancedChat:
             "low_cpu_mem_usage": True,
         }
 
-
         # Load main model
         self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **loading_options)
         self.model = self.resource_manager.register_model(self.model)
+
+        # Force everything to the same device
+        self.model = self.model.to(self.device)
+
+        # Ensure all model parameters are on the same device
+        for param in self.model.parameters():
+            param.data = param.data.to(self.device)
 
         # Check if this is a Qwen model
         is_qwen = "qwen" in self.model_name.lower()
@@ -339,13 +372,21 @@ class MemoryEnhancedChat:
         if hasattr(self.model.config, 'hidden_size'):
             embedding_dim = self.model.config.hidden_size
         elif hasattr(self.model.config, 'd_model'):
-            # Some models use d_model instead
             embedding_dim = self.model.config.d_model
-        else:
-            # Default fallback if we can't detect
-            embedding_dim = 2048
+        elif hasattr(self.model.config, 'n_embd'):
+            embedding_dim = self.model.config.n_embd
 
-        print(f"{self.get_time()} Detected model embedding dimension: {embedding_dim}")
+        print(f"Model config attributes: {dir(self.model.config)}")
+        print(f"Detected model embedding dimension: {embedding_dim}")
+
+        if embedding_dim is None:
+            # Force detection by running a test inference
+            test_input = self.tokenizer("test", return_tensors="pt").to(self.device)
+            with torch.no_grad():
+                test_output = self.model(**test_input, output_hidden_states=True)
+                if hasattr(test_output, 'hidden_states'):
+                    embedding_dim = test_output.hidden_states[-1].shape[-1]
+                    print(f"Detected dimension from test inference: {embedding_dim}")
 
         # Update memory manager if dimension differs
         if self.memory_manager.embedding_dim != embedding_dim:
@@ -787,77 +828,77 @@ class MemoryEnhancedChat:
                     token_confidences.append(latest_confidence)
 
                 # Check confidence to possibly stop generation - ONLY IF NO FALLBACK YET
-                if (self.response_filter is not None and
-                    not low_confidence_detected and
-                    not fallback_shown and
-                    tokens_received >= 10):  # Check after reasonable context
+                # if (self.response_filter is not None and
+                #     not low_confidence_detected and
+                #     not fallback_shown and
+                #     tokens_received >= 10):  # Check after reasonable context
 
-                    # Get current metrics
-                    current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
+                #     # Get current metrics
+                #     current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
 
-                    # Should we show fallback instead of continuing?
-                    if self.response_filter.should_stream_fallback(
-                        current_metrics,
-                        user_query,
-                        token_buffer.get_text(),
-                        tokens_received
-                    ):
-                        # Set flags to avoid checking again
-                        low_confidence_detected = True
-                        ignore_fallback_answer = True
-                        fallback_shown = True
+                #     # Should we show fallback instead of continuing?
+                #     if self.response_filter.should_stream_fallback(
+                #         current_metrics,
+                #         user_query,
+                #         token_buffer.get_text(),
+                #         tokens_received
+                #     ):
+                #         # Set flags to avoid checking again
+                #         low_confidence_detected = True
+                #         ignore_fallback_answer = True
+                #         fallback_shown = True
 
-                        # Stop generation
-                        self.stop_event.set()
+                #         # Stop generation
+                #         self.stop_event.set()
 
-                        # FIXED: Clear the display buffer before showing fallback
-                        display_buffer = ""
+                #         # FIXED: Clear the display buffer before showing fallback
+                #         display_buffer = ""
 
-                        # FIXED: Get fallback message and show it
-                        fallback = self.response_filter.get_streamable_fallback(user_query)
-                        print(fallback, end="", flush=True)
+                #         # FIXED: Get fallback message and show it
+                #         fallback = self.response_filter.get_streamable_fallback(user_query)
+                #         print(fallback, end="", flush=True)
 
-                        # FIXED: Clear token_buffer and replace with fallback for final response
-                        token_buffer.clear()
-                        for c in fallback:
-                            token_buffer.add_token(c)
+                #         # FIXED: Clear token_buffer and replace with fallback for final response
+                #         token_buffer.clear()
+                #         for c in fallback:
+                #             token_buffer.add_token(c)
 
-                        break
+                #         break
 
                 # Check for pattern detection at adaptive intervals - ONLY IF NO FALLBACK YET
-                if tokens_received >= next_pattern_check and not fallback_shown:
-                    pattern_results = self.response_filter.detect_repetitive_patterns(token_buffer.get_text())
-                    if pattern_results['has_repetitive_patterns']:
-                        # Set flags
-                        ignore_fallback_answer = True
-                        fallback_shown = True
+                # if tokens_received >= next_pattern_check and not fallback_shown:
+                #     pattern_results = self.response_filter.detect_repetitive_patterns(token_buffer.get_text())
+                #     if pattern_results['has_repetitive_patterns']:
+                #         # Set flags
+                #         ignore_fallback_answer = True
+                #         fallback_shown = True
 
-                        # Stop generation
-                        self.stop_event.set()
+                #         # Stop generation
+                #         self.stop_event.set()
 
-                        # FIXED: Clear the display buffer before showing fallback
-                        display_buffer = ""
+                #         # FIXED: Clear the display buffer before showing fallback
+                #         display_buffer = ""
 
-                        # Get fallback message
-                        fallback = self.response_filter.get_streamable_fallback(
-                            user_query, reason="repetitive_pattern", details=pattern_results)
-                        print(fallback, end="", flush=True)
+                #         # Get fallback message
+                #         fallback = self.response_filter.get_streamable_fallback(
+                #             user_query, reason="repetitive_pattern", details=pattern_results)
+                #         print(fallback, end="", flush=True)
 
-                        # FIXED: Clear token_buffer and replace with fallback for final response
-                        token_buffer.clear()
-                        for c in fallback:
-                            token_buffer.add_token(c)
+                #         # FIXED: Clear token_buffer and replace with fallback for final response
+                #         token_buffer.clear()
+                #         for c in fallback:
+                #             token_buffer.add_token(c)
 
-                        break
+                #         break
 
-                    # OPTIMIZATION: Adaptive backoff for pattern checking
-                    pattern_check_interval = min(pattern_check_interval * 2, 100)
-                    next_pattern_check = tokens_received + pattern_check_interval
+                #     # OPTIMIZATION: Adaptive backoff for pattern checking
+                #     pattern_check_interval = min(pattern_check_interval * 2, 100)
+                #     next_pattern_check = tokens_received + pattern_check_interval
 
-                    # OPTIMIZATION: Explicit garbage collection after pattern checking
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                #     # OPTIMIZATION: Explicit garbage collection after pattern checking
+                #     gc.collect()
+                #     if torch.cuda.is_available():
+                #         torch.cuda.empty_cache()
 
                 # Only add displayable tokens to the display buffer if no fallback shown
                 if display_token and not fallback_shown:
@@ -921,19 +962,19 @@ class MemoryEnhancedChat:
             response = self._post_process_response(response)
 
             # Apply response filtering if not already handled during streaming
-            if self.response_filter is not None and not fallback_shown:
-                current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
-                # Update the user context with information about this exchange
-                if hasattr(self.response_filter, 'update_user_context'):
-                    self.response_filter.update_user_context(user_query, response, current_metrics)
-                # Apply filtering
-                response = self.response_filter.filter_response(
-                    response=response,
-                    metrics=current_metrics,
-                    query=user_query,
-                    preserve_mcp=True,
-                    allow_override=True
-                )
+            # if self.response_filter is not None and not fallback_shown:
+            #     current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
+            #     # Update the user context with information about this exchange
+            #     if hasattr(self.response_filter, 'update_user_context'):
+            #         self.response_filter.update_user_context(user_query, response, current_metrics)
+            #     # Apply filtering
+            #     response = self.response_filter.filter_response(
+            #         response=response,
+            #         metrics=current_metrics,
+            #         query=user_query,
+            #         preserve_mcp=True,
+            #         allow_override=True
+            #     )
 
             # Save to memory if enabled
             if memory_enabled and user_query and response and not ignore_fallback_answer:
@@ -978,7 +1019,7 @@ class MemoryEnhancedChat:
 
             # Generate and display confidence indicator
             indicator = self.response_filter.get_confidence_indicator(metrics)
-            print(indicator)
+            #print(indicator)
 
             # OPTIMIZATION: More aggressive cleanup
             self.resource_manager.clear_cache()
@@ -1115,17 +1156,17 @@ class MemoryEnhancedChat:
             return False
 
     def _generate_with_streaming(self, input_ids, streamer, generation_config, use_draft_model):
-        """
-        Generate a response with streaming output - optimized version.
-
-        Args:
-            input_ids: Input token IDs
-            streamer: Text streamer for output
-            generation_config: Generation configuration
-            use_draft_model: Whether to use draft model
-        """
+        """Generate with proper device management."""
         try:
-            # OPTIMIZATION: Clear CUDA cache before generation
+            # Ensure input_ids are on correct device
+            if hasattr(input_ids, 'device') and input_ids.device.type != self.device:
+                print(f"{self.get_time()} Moving input_ids from {input_ids.device} to {self.device}")
+                input_ids = input_ids.to(self.device)
+
+            # Create attention mask on same device
+            attention_mask = torch.ones_like(input_ids, device=self.device)
+
+            # Clear CUDA cache before generation
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -1133,76 +1174,50 @@ class MemoryEnhancedChat:
             if hasattr(self.confidence_metrics, 'reset'):
                 self.confidence_metrics.reset()
 
-            # Setup logits processor for confidence tracking
-            from transformers import LogitsProcessorList
-
-            # OPTIMIZATION: Create a copy of generation_config
-            # to avoid modifying the original
+            # Setup streaming config with device-aware logits processor
             streaming_config = {k: v for k, v in generation_config.items()
                                if k not in ['max_new_tokens', 'output_scores', 'return_dict_in_generate']}
 
-            # Add TokenProbabilityCaptureProcessor for confidence tracking
+            # Add logits processor for confidence tracking
+            from transformers import LogitsProcessorList
             if 'logits_processor' not in streaming_config:
                 streaming_config['logits_processor'] = LogitsProcessorList()
 
-            # Create the processor for capturing token probabilities
             metrics_processor = TokenProbabilityCaptureProcessor(self.confidence_metrics)
             streaming_config['logits_processor'].append(metrics_processor)
 
-            # OPTIMIZATION: Check if input sequence is very long
-            input_length = input_ids.shape[1]
-            if input_length > 1024:
-                # For very long inputs, reduce max_new_tokens to avoid OOM
-                max_tokens = generation_config.get('max_new_tokens', 128)
-                adjusted_max_tokens = min(max_tokens, max(30, 2048 - input_length))
+            # Ensure use_cache is set
+            if 'use_cache' not in streaming_config:
+                streaming_config['use_cache'] = True
 
-                if adjusted_max_tokens < max_tokens:
-                    print(f"{self.get_time()} Reducing max tokens from {max_tokens} to {adjusted_max_tokens} due to long input")
+            # Generate with proper device handling
+            try:
+                self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    streamer=streamer,
+                    max_new_tokens=generation_config.get('max_new_tokens', 128),
+                    **streaming_config
+                )
+            except RuntimeError as e:
+                if "device" in str(e).lower():
+                    print(f"{self.get_time()} Device error during generation, attempting recovery...")
 
-                # Create a modified config with adjusted max_tokens
-                if use_draft_model and self.draft_model is not None:
-                    self.spec_decoder.generate_with_speculative_decoding(
-                        input_ids=input_ids,
-                        streamer=streamer,
-                        max_new_tokens=adjusted_max_tokens,
-                        generation_config=streaming_config,
-                        stop_event=self.stop_event
-                    )
-                else:
+                    # Force all model parameters to correct device
+                    self.model = self.model.to(self.device)
+
+                    # Retry generation
                     self.model.generate(
                         input_ids=input_ids,
-                        attention_mask=torch.ones_like(input_ids),
-                        streamer=streamer,
-                        max_new_tokens=adjusted_max_tokens,
-                        **streaming_config
-                    )
-            else:
-                # Use standard generation with original max_tokens
-                # Use speculative decoding if enabled
-                if use_draft_model and self.draft_model is not None:
-                    # Generate with speculative decoding
-                    self.spec_decoder.generate_with_speculative_decoding(
-                        input_ids=input_ids,
-                        streamer=streamer,
-                        max_new_tokens=generation_config.get('max_new_tokens', 128),
-                        generation_config=streaming_config,
-                        stop_event=self.stop_event
-                    )
-                else:
-                    # OPTIMIZATION: Set use_cache=True for better performance
-                    if 'use_cache' not in streaming_config:
-                        streaming_config['use_cache'] = True
-
-                    # Use standard generation
-                    self.model.generate(
-                        input_ids=input_ids,
-                        attention_mask=torch.ones_like(input_ids),
+                        attention_mask=attention_mask,
                         streamer=streamer,
                         max_new_tokens=generation_config.get('max_new_tokens', 128),
                         **streaming_config
                     )
+                else:
+                    raise
 
-            # OPTIMIZATION: Clear cache after generation is complete
+            # Clear cache after generation
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -1214,7 +1229,7 @@ class MemoryEnhancedChat:
             except Exception:
                 pass
 
-            # OPTIMIZATION: Ensure memory is cleaned up on error
+            # Clean up on error
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -1364,35 +1379,61 @@ class MemoryEnhancedChat:
         return cleaned
 
     def _safe_tokenize(self, text, **kwargs):
-        """
-        Safe tokenization that handles 'Already borrowed' errors.
-
-        Args:
-            text: Text to tokenize
-            **kwargs: Arguments for tokenizer
-
-        Returns:
-            Tokenized result
-        """
+        """Safe tokenization with proper device placement."""
         try:
-            # Try normal tokenization
-            return self.tokenizer(text, **kwargs)
+            # Tokenize normally first
+            result = self.tokenizer(text, **kwargs)
+
+            # Ensure all tensors are on the correct device
+            if isinstance(result, dict):
+                for key, value in result.items():
+                    if isinstance(value, torch.Tensor):
+                        result[key] = value.to(self.device)
+
+            return result
+
         except RuntimeError as e:
             if "Already borrowed" in str(e):
                 print(f"{self.get_time()} Handling 'Already borrowed' error...")
 
-                # Create a fresh tokenizer instance
+                # Create fresh tokenizer and tokenize
                 import copy
                 temp_tokenizer = copy.deepcopy(self.tokenizer)
-
-                # Tokenize with fresh tokenizer
                 result = temp_tokenizer(text, **kwargs)
 
-                # Convert tensors to fresh copies
-                return {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in result.items()}
+                # Ensure tensors are on correct device
+                if isinstance(result, dict):
+                    for key, value in result.items():
+                        if isinstance(value, torch.Tensor):
+                            result[key] = value.to(self.device)
+
+                return result
             else:
-                # Re-raise other errors
                 raise
+
+
+    def validate_model_device_consistency(self):
+        """Validate that all model components are on the same device."""
+        devices = set()
+
+        for name, param in self.model.named_parameters():
+            devices.add(param.device)
+            if len(devices) > 1:
+                print(f"{self.get_time()} Warning: Model has parameters on multiple devices: {devices}")
+                print(f"Parameter {name} is on {param.device}")
+                break
+
+        if len(devices) == 1:
+            actual_device = list(devices)[0]
+            expected_device = torch.device(self.device)
+            if actual_device != expected_device:
+                print(f"{self.get_time()} Warning: Model device {actual_device} != expected {expected_device}")
+                return False
+            else:
+                print(f"{self.get_time()} Model device consistency validated: {actual_device}")
+                return True
+
+        return len(devices) == 1
 
     def get_multiline_input(self, prompt: str = "") -> str:
         """

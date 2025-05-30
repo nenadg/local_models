@@ -300,7 +300,7 @@ class WebSearchIntegration:
             url = result['url']
 
             # Skip certain domains that are hard to extract or low quality
-            skip_domains = ['youtube.com', 'twitter.com', 'instagram.com', 'facebook.com', 'linkedin.com', 'reddit.com']
+            skip_domains = ['youtube.com', 'twitter.com', 'instagram.com', 'facebook.com', 'linkedin.com', 'reddit.com', 'pdf']
             if any(domain in url.lower() for domain in skip_domains):
                 print(f"{self.get_time()} Skipping social media/forum domain: {url}")
                 continue
