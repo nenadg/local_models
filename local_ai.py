@@ -32,7 +32,6 @@ from enhanced_confidence_metrics import EnhancedConfidenceMetrics, TokenProbabil
 from response_filter import ResponseFilter
 from terminal_heatmap import EnhancedHeatmap
 from question_classifier import QuestionClassifier
-from speculative_decoder import SpeculativeDecoder, SpeculativeDecodingStats
 from topic_shift_detector import TopicShiftDetector
 
 # Import our refactored memory manager
@@ -60,7 +59,7 @@ DEFAULT_SYSTEM_MESSAGE = """You are a helpful and friendly assistant designed to
 
 class MemoryEnhancedChat:
     """
-    Improved chat interface with proper memory integration, streaming, and speculative decoding.
+    Improved chat interface with proper memory integration and streaming.
     """
 
     def __init__(self,
@@ -75,7 +74,6 @@ class MemoryEnhancedChat:
                 do_sample: bool = True,
                 top_p: float = 1.0,
                 top_k: int = 50,
-                enable_draft_model: bool = False,
                 system_message: Optional[str] = None,
                 no_filter: bool = False):
         """
@@ -93,7 +91,6 @@ class MemoryEnhancedChat:
             do_sample: Whether to use sampling for generation
             top_p: Top-p sampling parameter
             top_k: Top-k sampling parameter
-            enable_draft_model: Whether to enable draft model for speculative decoding
             system_message: Custom system message
         """
         self.model_name = model_name
@@ -106,7 +103,6 @@ class MemoryEnhancedChat:
         self.do_sample = do_sample
         self.top_p = top_p
         self.top_k = top_k
-        self.enable_draft_model = enable_draft_model
         self.memory_debug = False  # Set to True for memory diagnostics
         self.no_filter = no_filter
 
@@ -119,7 +115,6 @@ class MemoryEnhancedChat:
         self._setup_model_and_tokenizer()
         self._setup_memory_system()
         self._setup_utility_components()
-        self._setup_speculative_decoding()
         self._setup_web_search()
 
         # Initialize stats and state
@@ -325,38 +320,6 @@ class MemoryEnhancedChat:
             tokenizer=self.tokenizer,
             device=self.device
         )
-
-    def _setup_speculative_decoding(self):
-        """Set up speculative decoding with draft model if enabled."""
-        # Initialize stats tracker
-        self.spec_stats = SpeculativeDecodingStats()
-
-        # Initialize speculative decoder
-        self.spec_decoder = SpeculativeDecoder(
-            main_model=self.model,
-            draft_model=None,  # Will be set later if enabled
-            tokenizer=self.tokenizer,
-            confidence_metrics=self.confidence_metrics,
-            device=self.device,
-            stats=self.spec_stats,
-            repetition_penalty=1.2,
-            max_draft_tokens=5,
-            batch_processor=None
-        )
-
-        # Create draft model if enabled
-        if self.enable_draft_model:
-            print(f"{self.get_time()} Creating draft model for speculative decoding...")
-            self.draft_model = self.spec_decoder.create_draft_model(self.model)
-
-            if self.draft_model:
-                print(f"{self.get_time()} Successfully created draft model")
-                self.spec_decoder.draft_model = self.draft_model
-            else:
-                print(f"{self.get_time()} Could not create draft model, speculative decoding disabled")
-                self.enable_draft_model = False
-        else:
-            self.draft_model = None
 
     def _setup_web_search(self):
         """Set up web search integration."""
@@ -578,36 +541,6 @@ class MemoryEnhancedChat:
         self.enable_memory = not self.enable_memory
         return self.enable_memory
 
-    def toggle_draft_model(self) -> bool:
-        """Toggle draft model on/off for speculative decoding."""
-        if self.enable_draft_model and self.draft_model is not None:
-            # Disable draft model
-            self.enable_draft_model = False
-            print(f"{self.get_time()} Draft model disabled")
-            return False
-        elif not self.enable_draft_model and self.draft_model is None:
-            # Try to create draft model
-            print(f"{self.get_time()} Creating draft model...")
-            self.draft_model = self.spec_decoder.create_draft_model(self.model)
-
-            if self.draft_model:
-                self.enable_draft_model = True
-                self.spec_decoder.draft_model = self.draft_model
-                print(f"{self.get_time()} Draft model enabled")
-                return True
-            else:
-                print(f"{self.get_time()} Failed to create draft model")
-                return False
-        elif not self.enable_draft_model and self.draft_model is not None:
-            # Re-enable existing draft model
-            self.enable_draft_model = True
-            self.spec_decoder.draft_model = self.draft_model
-            print(f"{self.get_time()} Draft model re-enabled")
-            return True
-        else:
-            # No change needed
-            return True
-
     def set_similarity_enhancement(self, factor: float) -> None:
         """Set the similarity enhancement factor for memory and confidence."""
         # Validate range
@@ -698,8 +631,6 @@ class MemoryEnhancedChat:
         tokens_received = 0
         response = ""
 
-        fallback_shown = False
-
         # Apply chat template
         is_gemma = "gemma" in self.model_name.lower()
         is_qwen = "qwen" in self.model_name.lower()
@@ -766,7 +697,7 @@ class MemoryEnhancedChat:
             # Start generation in a separate thread
             thread = Thread(
                 target=self._generate_with_streaming,
-                args=(input_ids, streamer, generation_config, self.enable_draft_model)
+                args=(input_ids, streamer, generation_config)
             )
             thread.daemon = True
             thread.start()
@@ -782,7 +713,6 @@ class MemoryEnhancedChat:
 
             # Variables to track streaming state
             low_confidence_detected = False
-            ignore_fallback_answer = False
 
             # OPTIMIZATION: Adaptive pattern detection intervals
             pattern_check_interval = 20
@@ -827,81 +757,9 @@ class MemoryEnhancedChat:
                     latest_confidence = 0.8
                     token_confidences.append(latest_confidence)
 
-                # Check confidence to possibly stop generation - ONLY IF NO FALLBACK YET
-                # if (self.response_filter is not None and
-                #     not low_confidence_detected and
-                #     not fallback_shown and
-                #     tokens_received >= 10):  # Check after reasonable context
 
-                #     # Get current metrics
-                #     current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
-
-                #     # Should we show fallback instead of continuing?
-                #     if self.response_filter.should_stream_fallback(
-                #         current_metrics,
-                #         user_query,
-                #         token_buffer.get_text(),
-                #         tokens_received
-                #     ):
-                #         # Set flags to avoid checking again
-                #         low_confidence_detected = True
-                #         ignore_fallback_answer = True
-                #         fallback_shown = True
-
-                #         # Stop generation
-                #         self.stop_event.set()
-
-                #         # FIXED: Clear the display buffer before showing fallback
-                #         display_buffer = ""
-
-                #         # FIXED: Get fallback message and show it
-                #         fallback = self.response_filter.get_streamable_fallback(user_query)
-                #         print(fallback, end="", flush=True)
-
-                #         # FIXED: Clear token_buffer and replace with fallback for final response
-                #         token_buffer.clear()
-                #         for c in fallback:
-                #             token_buffer.add_token(c)
-
-                #         break
-
-                # Check for pattern detection at adaptive intervals - ONLY IF NO FALLBACK YET
-                # if tokens_received >= next_pattern_check and not fallback_shown:
-                #     pattern_results = self.response_filter.detect_repetitive_patterns(token_buffer.get_text())
-                #     if pattern_results['has_repetitive_patterns']:
-                #         # Set flags
-                #         ignore_fallback_answer = True
-                #         fallback_shown = True
-
-                #         # Stop generation
-                #         self.stop_event.set()
-
-                #         # FIXED: Clear the display buffer before showing fallback
-                #         display_buffer = ""
-
-                #         # Get fallback message
-                #         fallback = self.response_filter.get_streamable_fallback(
-                #             user_query, reason="repetitive_pattern", details=pattern_results)
-                #         print(fallback, end="", flush=True)
-
-                #         # FIXED: Clear token_buffer and replace with fallback for final response
-                #         token_buffer.clear()
-                #         for c in fallback:
-                #             token_buffer.add_token(c)
-
-                #         break
-
-                #     # OPTIMIZATION: Adaptive backoff for pattern checking
-                #     pattern_check_interval = min(pattern_check_interval * 2, 100)
-                #     next_pattern_check = tokens_received + pattern_check_interval
-
-                #     # OPTIMIZATION: Explicit garbage collection after pattern checking
-                #     gc.collect()
-                #     if torch.cuda.is_available():
-                #         torch.cuda.empty_cache()
-
-                # Only add displayable tokens to the display buffer if no fallback shown
-                if display_token and not fallback_shown:
+                # Only add displayable tokens to the display buffer
+                if display_token:
                     if show_confidence:
                         colored_token = heatmap.colorize_streaming_token(
                             display_token, latest_confidence)
@@ -946,7 +804,7 @@ class MemoryEnhancedChat:
 
             self.tokens_received = tokens_received
             # Handle any remaining display buffer
-            if display_buffer and not fallback_shown:
+            if display_buffer:
                 print(display_buffer, end="", flush=True)
 
             # Ensure confidence metrics exist
@@ -961,23 +819,8 @@ class MemoryEnhancedChat:
             # Post-process the response
             response = self._post_process_response(response)
 
-            # Apply response filtering if not already handled during streaming
-            # if self.response_filter is not None and not fallback_shown:
-            #     current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
-            #     # Update the user context with information about this exchange
-            #     if hasattr(self.response_filter, 'update_user_context'):
-            #         self.response_filter.update_user_context(user_query, response, current_metrics)
-            #     # Apply filtering
-            #     response = self.response_filter.filter_response(
-            #         response=response,
-            #         metrics=current_metrics,
-            #         query=user_query,
-            #         preserve_mcp=True,
-            #         allow_override=True
-            #     )
-
             # Save to memory if enabled
-            if memory_enabled and user_query and response and not ignore_fallback_answer:
+            if memory_enabled and user_query and response:
                 print("\n")
                 self._save_to_memory(user_query, response)
 
@@ -995,10 +838,6 @@ class MemoryEnhancedChat:
             # Clean up terminal settings
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
-            # Show heatmap legend if enabled
-            # if show_confidence and not self.stop_event.is_set() and not fallback_shown:
-                # Calculate token usage
-            
             prompt_tokens = len(tokenized['input_ids'][0])
             response_tokens_count = len(token_buffer) if 'token_buffer' in locals() else 0
             total_tokens = prompt_tokens + response_tokens_count
@@ -1155,7 +994,7 @@ class MemoryEnhancedChat:
             print(f"{self.get_time()} Error saving to memory: {e}")
             return False
 
-    def _generate_with_streaming(self, input_ids, streamer, generation_config, use_draft_model):
+    def _generate_with_streaming(self, input_ids, streamer, generation_config):
         """Generate with proper device management."""
         try:
             # Ensure input_ids are on correct device
@@ -1515,19 +1354,9 @@ class MemoryEnhancedChat:
     def cleanup(self):
         """Release all resources properly."""
         try:
-            # Unload models
-            if hasattr(self, 'draft_model') and self.draft_model is not None:
-                self.resource_manager.unload_model(self.draft_model)
-                self.draft_model = None
-
             if hasattr(self, 'model') and self.model is not None:
                 self.resource_manager.unload_model(self.model)
                 self.model = None
-
-            # Clear speculative decoder references
-            if hasattr(self, 'spec_decoder') and self.spec_decoder:
-                self.spec_decoder.draft_model = None
-                self.spec_decoder.main_model = None
 
             # Final cleanup
             if hasattr(self, 'resource_manager'):
@@ -1573,8 +1402,6 @@ def main():
                        help="Show confidence heatmap")
     parser.add_argument("--do-sample", action="store_true", default=True,
                         help="Enable sampling-based generation")
-    parser.add_argument("--draft-model", action="store_true", default=False,
-                       help="Enable draft model for speculative decoding")
 
     # Advanced settings
     parser.add_argument("--output-dir", type=str, default="./output",
@@ -1609,7 +1436,6 @@ def main():
         do_sample=args.do_sample,
         top_p=args.top_p,
         top_k=args.top_k,
-        enable_draft_model=args.draft_model,
         system_message=args.system_prompt,
         no_filter=args.no_filter
     )
@@ -1639,7 +1465,6 @@ def main():
     print("  !toggle-memory - Toggle memory system on/off")
     print("  !toggle-memory-debug - Toggle memory debugging")
     print("  !toggle-heatmap - Toggle confidence heatmap visualization")
-    print("  !toggle-draft - Toggle draft model for speculative decoding")
     print("  !toggle-filter - Toggle confidence filtering")
     print("  !toggle-websearch - Toggle web search on/off")
     print("  !search: [query] - Force web search for a query")
@@ -1719,11 +1544,6 @@ def main():
             elif user_input.lower() == '!toggle-heatmap':
                 show_confidence = not show_confidence
                 print(f"{chat.get_time()} Confidence heatmap {'enabled' if show_confidence else 'disabled'}")
-                continue
-
-            elif user_input.lower() == '!toggle-draft':
-                is_enabled = chat.toggle_draft_model()
-                print(f"{chat.get_time()} Draft model {'enabled' if is_enabled else 'disabled'}")
                 continue
 
             elif user_input.lower().startswith('!enhance-factor:'):
