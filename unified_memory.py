@@ -179,38 +179,26 @@ class MemoryManager:
             print()
 
     def set_embedding_function(self, model, tokenizer, device="cuda"):
-        """
-        Set embedding function using the standardized batch embedding approach.
+        """Set embedding function using the consolidated batch processor."""
+        from batch_utils import get_batch_processor
+        
+        # Get the batch processor instance
+        batch_processor = get_batch_processor(device)
 
-        Args:
-            model: Model to use for embeddings
-            tokenizer: Tokenizer to use
-            device: Device to use
-        """
-        from batch_utils import batch_embed_texts, embed_single_text
-
-        # Get target dimension for memory system
-        target_dim = self.embedding_dim
-
-        # Define single embedding function
+        # Set embedding functions using the processor
         def generate_embedding(text: str) -> np.ndarray:
-            return embed_single_text(text, tokenizer, model, device, max_length=512, target_dim=target_dim)
-
-        # Define batch embedding function
-        def generate_embeddings_batch(texts: List[str]) -> List[np.ndarray]:
-            return batch_embed_texts(
-                texts,
-                tokenizer,
-                model,
-                device,
-                batch_size=self.batch_settings.get('batch_size', 32),
-                adaptive=self.batch_settings.get('adaptive', True),
-                handle_oom=self.batch_settings.get('handle_oom', True),
-                max_length=512,
-                target_dim=target_dim
+            return batch_processor.embed_single_text(
+                text, tokenizer, model, device, max_length=512, target_dim=self.embedding_dim
             )
 
-        # Store model and tokenizer references
+        def generate_embeddings_batch(texts: List[str]) -> List[np.ndarray]:
+            return batch_processor.batch_embed_texts(
+                texts, tokenizer, model, device,
+                batch_size=32, adaptive=True, handle_oom=True,
+                max_length=512, target_dim=self.embedding_dim
+            )
+
+        # Store references
         self.embedding_model = model
         self.embedding_tokenizer = tokenizer
         self.embedding_device = device

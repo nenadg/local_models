@@ -311,9 +311,6 @@ class MemoryEnhancedChat:
         self._update_embedding_dimension()
 
     def _setup_embedding_function(self):
-        """Set up embedding function with standardized batch processing."""
-        from batch_utils import batch_embed_texts, embed_single_text
-
         # Set embedding functions in memory manager
         self.memory_manager.set_embedding_function(
             model=self.model,
