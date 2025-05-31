@@ -1019,7 +1019,7 @@ class MemoryEnhancedChat:
 
             # Generate and display confidence indicator
             indicator = self.response_filter.get_confidence_indicator(metrics)
-            #print(indicator)
+            print(indicator)
 
             # OPTIMIZATION: More aggressive cleanup
             self.resource_manager.clear_cache()
