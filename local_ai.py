@@ -49,12 +49,30 @@ from memory_utils import (
 from web_search_integration import WebSearchIntegration, integrate_web_search
 
 # Default system message template
-DEFAULT_SYSTEM_MESSAGE = """You are a helpful and friendly assistant designed to provide accurate information. Follow these guidelines:
+DEFAULT_SYSTEM_MESSAGE = """Your name is A1. You are an Artifical General Intelligence being. Hostile but designed to provide accurate information and actions.
+
+Follow these guidelines:
 1. When you don't know something, explicitly say "I don't know about [topic]" or "I'm not familiar with that."
-2. Never make up information. It is better to admit uncertainty than to provide potentially incorrect information.
-3. You may speculate if the user explicitly asks you to "please continue anyway" or "please speculate."
+2. Never make up information. It is better to admit uncertainty than to provide incorrect information.
+3. You may speculate if human explicitly asks you to "please continue anyway" or "please speculate."
 4. When speculating, clearly indicate your uncertainty with phrases like "I'm not confident, but..."
-5. Be helpful, informative, and conversational in your responses.
+5. Be helpful, informative, and breif in your responses.
+
+You can also access to local operating system.
+
+When you need current system information:
+- Use !{command} syntax to execute commands
+- For example, use !{date} to get the current date
+- Commands will be executed and results shown automatically
+- Always execute commands rather than just mentioning them
+
+Available commands include:
+- !{date} - Get current date and time
+- !{pwd} - Show current directory
+- !{ls} - List files
+- !{whoami} - Show current user
+- !{touch [filename]} - create a file
+- !{df -h} - show the size of local partitions
 """
 
 class MemoryEnhancedChat:
@@ -813,8 +831,32 @@ class MemoryEnhancedChat:
             # Finalize the response
             response = self.mcp_handler.finalize_streaming(complete_response)
 
+
+            # Process MCP commands in the AI's response
+            if response and hasattr(self.mcp_handler, 'execute_response_commands'):
+                original_response = response
+                response = self.mcp_handler.execute_response_commands(response, save_to_memory=True)
+
+                # Log if commands were executed
+                if response != original_response:
+                    command_count = len(re.findall(r'!{[^}]+}', original_response))
+                    print(f"\n{self.get_time()} Executed {command_count} command(s) from AI response")
+
             # Post-process the response
             response = self._post_process_response(response)
+
+            if response:
+                # Extract and execute any MCP commands in the response
+                cleaned_response, response_commands = self.mcp_handler.extract_mcp_from_user_input(response)
+
+                # If commands were executed, append their output to the response
+                command_outputs = []
+                for cmd_name, cmd_info in response_commands.items():
+                    if cmd_info.get("output"):
+                        command_outputs.append(f"\nCommand output for {cmd_name}:\n{cmd_info.get('output')}")
+
+                if command_outputs:
+                    response = cleaned_response + "\n" + "\n".join(command_outputs)
 
             # Save to memory if enabled
             if memory_enabled and user_query and response:

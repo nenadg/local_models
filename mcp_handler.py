@@ -225,6 +225,107 @@ class MCPHandler:
 
         return results
 
+    def execute_response_commands(self, response: str, save_to_memory=True) -> str:
+        """
+        Execute MCP commands found in AI responses and replace them with outputs.
+
+        Args:
+            response: The AI's response containing MCP commands
+            save_to_memory: Whether to save command outputs to memory
+
+        Returns:
+            Response with commands replaced by their outputs
+        """
+        if not self.allow_shell_commands:
+            return response
+
+        # Find all !{command} patterns
+        import re
+        command_pattern = r'!{([^}]+)}'
+
+        def execute_and_replace(match):
+            command = match.group(1)
+            try:
+                # Execute command
+                result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=10)
+                output = result.stdout.strip()
+                error = result.stderr.strip()
+
+                # Save to memory if requested
+                if save_to_memory and self.memory_manager and output:
+                    try:
+                        classification = classify_content(output, self.question_classifier)
+                        metadata = generate_memory_metadata(output, classification)
+                        metadata["command"] = command
+                        metadata["content_type"] = self._detect_content_type(output)
+
+                        self.memory_manager.add(
+                            content=f"Command '{command}' output: {output}",
+                            metadata=metadata
+                        )
+                    except Exception as e:
+                        print(f"Error saving command output to memory: {e}")
+
+                # Return formatted output
+                if output:
+                    return f"!{{{command}}} → {output}"
+                elif error:
+                    return f"!{{{command}}} → Error: {error}"
+                else:
+                    return f"!{{{command}}} → [No output]"
+
+            except subprocess.TimeoutExpired:
+                return f"!{{{command}}} → [Timed out]"
+            except Exception as e:
+                return f"!{{{command}}} → [Error: {str(e)}]"
+
+        # Replace all command patterns with their outputs
+        processed_response = re.sub(command_pattern, execute_and_replace, response)
+        return processed_response
+
+    def process_response_commands(self, response: str) -> Tuple[str, Dict[str, Any]]:
+        """
+        Process MCP commands embedded in assistant responses.
+        Similar to extract_mcp_from_user_input but handles response context.
+
+        Args:
+            response: The assistant's response text
+
+        Returns:
+            Tuple of (processed_response, command_results)
+        """
+        command_results = {}
+        processed_response = response
+
+        # Find all command patterns in the response
+        command_matches = re.findall(self.shell_command_pattern, response)
+
+        for match in command_matches:
+            if self.allow_shell_commands:
+                try:
+                    # Execute the command
+                    result = subprocess.run(match, shell=True, capture_output=True, text=True)
+                    output = result.stdout
+                    error = result.stderr
+
+                    # Store the result
+                    command_results[match] = {
+                        "output": output,
+                        "error": error,
+                        "timestamp": datetime.now().isoformat()
+                    }
+
+                    # Replace the command pattern with the output
+                    processed_response = processed_response.replace(
+                        f"!{{{match}}}",
+                        f"!{{{match}}} returned:\n{output}"
+                    )
+
+                except Exception as e:
+                    print(f"[Error executing command in response: {str(e)}]")
+
+        return processed_response, command_results
+
     def _sanitize_filename(self, filename: str) -> str:
         """
         Sanitize filename to prevent directory traversal.

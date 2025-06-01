@@ -307,17 +307,17 @@ class EnhancedConfidenceMetrics:
 
         """Set the sharpening factor for memory retrieval and confidence metrics"""
         # Update confidence metrics sharpening
-        if hasattr(self.confidence_metrics, 'set_sharpening_factor'):
-            old_factor = self.confidence_metrics.sharpening_factor
-            self.confidence_metrics.set_sharpening_factor(factor)
-            print(f"DEBUG - Updated confidence sharpening factor: {old_factor} -> {factor}")
+        # if hasattr(self.confidence_metrics, 'set_sharpening_factor'):
+        #     old_factor = self.confidence_metrics.sharpening_factor
+        #     self.confidence_metrics.set_sharpening_factor(factor)
+        #     print(f"DEBUG - Updated confidence sharpening factor: {old_factor} -> {factor}")
 
-            # Force recalculation with sharpening applied
-            if hasattr(self.confidence_metrics, 'original_token_probabilities'):
-                print(f"DEBUG - Original tokens: {len(self.confidence_metrics.original_token_probabilities)}")
-                if self.confidence_metrics.original_token_probabilities:
-                    metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
-                    print(f"DEBUG - Recalculated metrics: {metrics.keys()}")
+        #     # Force recalculation with sharpening applied
+        #     if hasattr(self.confidence_metrics, 'original_token_probabilities'):
+        #         print(f"DEBUG - Original tokens: {len(self.confidence_metrics.original_token_probabilities)}")
+        #         if self.confidence_metrics.original_token_probabilities:
+        #             metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
+        #             print(f"DEBUG - Recalculated metrics: {metrics.keys()}")
 
     def get_token_probabilities(self) -> List[float]:
         """Get raw token probabilities for pattern detection."""
