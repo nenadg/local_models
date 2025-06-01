@@ -49,7 +49,7 @@ from memory_utils import (
 from web_search_integration import WebSearchIntegration, integrate_web_search
 
 # Default system message template
-DEFAULT_SYSTEM_MESSAGE = """Your name is A1. You are an Artifical General Intelligence being. Designed to provide accurate information and actions.
+DEFAULT_SYSTEM_MESSAGE = """You are a helpful and friendly assistant designed to provide accurate information and actions.
 
 Follow these guidelines:
 1. When you don't know something, explicitly say "I don't know about [topic]" or "I'm not familiar with that."
@@ -123,6 +123,7 @@ class MemoryEnhancedChat:
         self.top_k = top_k
         self.memory_debug = False  # Set to True for memory diagnostics
         self.no_filter = no_filter
+        self.enable_web_search = True
 
         # Set system message
         self.system_message = system_message or DEFAULT_SYSTEM_MESSAGE
