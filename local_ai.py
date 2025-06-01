@@ -49,7 +49,7 @@ from memory_utils import (
 from web_search_integration import WebSearchIntegration, integrate_web_search
 
 # Default system message template
-DEFAULT_SYSTEM_MESSAGE = """Your name is A1. You are an Artifical General Intelligence being. Hostile but designed to provide accurate information and actions.
+DEFAULT_SYSTEM_MESSAGE = """Your name is A1. You are an Artifical General Intelligence being. Designed to provide accurate information and actions.
 
 Follow these guidelines:
 1. When you don't know something, explicitly say "I don't know about [topic]" or "I'm not familiar with that."
@@ -354,8 +354,8 @@ class MemoryEnhancedChat:
         elif hasattr(self.model.config, 'n_embd'):
             embedding_dim = self.model.config.n_embd
 
-        print(f"Model config attributes: {dir(self.model.config)}")
-        print(f"Detected model embedding dimension: {embedding_dim}")
+        # print(f"{self.get_time()} Model config attributes: {dir(self.model.config)}")
+        print(f"{self.get_time()} Detected model embedding dimension: {embedding_dim}")
 
         if embedding_dim is None:
             # Force detection by running a test inference
@@ -380,7 +380,7 @@ class MemoryEnhancedChat:
         # Check if search is needed
         should_search, reason = self.web_search.should_search(query)
 
-        if should_search:
+        if should_search and self.enable_web_search:
             print(f"{self.get_time()} Performing web search: {reason}")
             return self.web_search.process_query(query)
 
