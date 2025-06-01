@@ -99,8 +99,7 @@ class MemoryManager:
                 embedding_dim: int = None,  # Make this optional (384 default)
                 enable_enhanced_embeddings: bool = True,
                 max_enhancement_levels: int = 3,
-                auto_save: bool = True,
-                similarity_enhancement_factor: float = 0.3):
+                auto_save: bool = True):
         """
         Initialize the memory manager.
 
@@ -110,14 +109,12 @@ class MemoryManager:
             enable_enhanced_embeddings: Whether to use enhanced embeddings (previously "fractal")
             max_enhancement_levels: Maximum number of enhancement levels if enabled
             auto_save: Whether to automatically save changes
-            similarity_enhancement_factor: Factor for non-linear similarity enhancement (0.0-1.0)
         """
         self.storage_path = storage_path
         self.embedding_dim = embedding_dim
         self.enable_enhanced_embeddings = enable_enhanced_embeddings
         self.max_enhancement_levels = max_enhancement_levels
         self.auto_save = auto_save
-        self.similarity_enhancement_factor = similarity_enhancement_factor
 
         # Create storage directory if it doesn't exist
         os.makedirs(storage_path, exist_ok=True)
@@ -658,36 +655,6 @@ class MemoryManager:
         self.index = faiss.IndexFlatIP(self.embedding_dim)  # Inner product (cosine on normalized vectors)
 
         print(f"{self.get_time()} Created new FAISS index with dimension {self.embedding_dim}")
-
-    def _enhance_similarity(self, similarity: float) -> float:
-        """
-        Apply non-linear enhancement to similarity scores.
-
-        Args:
-            similarity: Raw similarity score (0.0-1.0)
-
-        Returns:
-            Enhanced similarity score
-        """
-        # Skip if no enhancement requested
-        if self.similarity_enhancement_factor <= 0:
-            return similarity
-
-        # Apply non-linear enhancement
-        if similarity > 0.50:
-            # Boost high similarities (more confident matches)
-            boost = (similarity - 0.6) * self.similarity_enhancement_factor * 2.0
-            enhanced = min(1.0, similarity + boost)
-        elif similarity < 0.50:
-            # Reduce low similarities (less confident matches)
-            reduction = (0.4 - similarity) * self.similarity_enhancement_factor * 2.0
-            enhanced = max(0.0, similarity - reduction)
-        else:
-            # Middle range - moderate effect
-            deviation = (similarity - 0.5) * self.similarity_enhancement_factor
-            enhanced = 0.5 + deviation
-
-        return enhanced
 
     def retrieve(self,
                 query: str,

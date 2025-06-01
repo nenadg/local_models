@@ -87,7 +87,6 @@ class MemoryEnhancedChat:
                 output_dir: str = "./output",
                 confidence_threshold: float = 0.45,
                 enable_memory: bool = True,
-                similarity_enhancement_factor: float = 0.3,
                 enable_enhanced_embeddings: bool = True,
                 do_sample: bool = True,
                 top_p: float = 1.0,
@@ -104,7 +103,6 @@ class MemoryEnhancedChat:
             output_dir: Directory for output files
             confidence_threshold: Threshold for confidence filtering
             enable_memory: Whether to enable memory
-            similarity_enhancement_factor: Factor for enhancing similarity (0.0-1.0)
             enable_enhanced_embeddings: Whether to use enhanced embeddings
             do_sample: Whether to use sampling for generation
             top_p: Top-p sampling parameter
@@ -116,7 +114,6 @@ class MemoryEnhancedChat:
         self.output_dir = output_dir
         self.confidence_threshold = confidence_threshold
         self.enable_memory = enable_memory
-        self.similarity_enhancement_factor = similarity_enhancement_factor
         self.enable_enhanced_embeddings = enable_enhanced_embeddings
         self.do_sample = do_sample
         self.top_p = top_p
@@ -191,9 +188,7 @@ class MemoryEnhancedChat:
         self.mcp_completer = MCPCompleter(self.output_dir)
 
         # Confidence metrics tracker
-        self.confidence_metrics = EnhancedConfidenceMetrics(
-            sharpening_factor=self.similarity_enhancement_factor
-        )
+        self.confidence_metrics = EnhancedConfidenceMetrics()
 
         # Question classifier for domain-specific handling
         self.question_classifier = QuestionClassifier()
@@ -215,7 +210,6 @@ class MemoryEnhancedChat:
                 perplexity_threshold=60.0,   # Much higher
                 user_context={"model_name": self.model_name},
                 question_classifier=self.question_classifier,
-                sharpening_factor=0.1,       # Lower sharpening
                 window_size=3,
                 use_relative_filtering=False, # Disable pattern detection
                 pattern_detection_weight=0.1, # Much lower
@@ -227,7 +221,6 @@ class MemoryEnhancedChat:
                 # perplexity_threshold=40.0, # Much higher than default 25.0
                 # user_context={"model_name": self.model_name},
                 # question_classifier=self.question_classifier,
-                # sharpening_factor=self.similarity_enhancement_factor,
                 # window_size=3,
                 # use_relative_filtering=True,
                 # pattern_detection_weight=0.3,  # Lower from 0.6
@@ -242,7 +235,6 @@ class MemoryEnhancedChat:
                 perplexity_threshold=25.0,     # Up from 15.0
                 user_context={"model_name": self.model_name},
                 question_classifier=self.question_classifier,
-                sharpening_factor=self.similarity_enhancement_factor,
                 window_size=3,
                 use_relative_filtering=True,
                 pattern_detection_weight=0.6,
@@ -319,8 +311,7 @@ class MemoryEnhancedChat:
             embedding_dim=2048,  # Adjust based on model's hidden size (initially 384)
             enable_enhanced_embeddings=self.enable_enhanced_embeddings,
             max_enhancement_levels=4,
-            auto_save=True,
-            similarity_enhancement_factor=self.similarity_enhancement_factor
+            auto_save=True
         )
 
         # Create embedding function
@@ -556,23 +547,6 @@ class MemoryEnhancedChat:
         """Toggle memory system on/off."""
         self.enable_memory = not self.enable_memory
         return self.enable_memory
-
-    def set_similarity_enhancement(self, factor: float) -> None:
-        """Set the similarity enhancement factor for memory and confidence."""
-        # Validate range
-        factor = max(0.0, min(1.0, factor))
-
-        # Update settings
-        self.similarity_enhancement_factor = factor
-
-        # Update confidence metrics
-        if hasattr(self.confidence_metrics, 'set_sharpening_factor'):
-            self.confidence_metrics.set_sharpening_factor(factor)
-
-        # Update memory manager
-        self.memory_manager.similarity_enhancement_factor = factor
-
-        print(f"{self.get_time()} Similarity enhancement factor set to {factor}")
 
     def chat(self, messages: List[Dict[str, str]], max_new_tokens: int = 128, temperature: float = 0.7, enable_memory: Optional[bool] = None, show_confidence: bool = False) -> str:
         """
@@ -889,7 +863,7 @@ class MemoryEnhancedChat:
             heatmap.print_legend(current_tokens=total_tokens, max_tokens=max_tokens)
 
             print()  # Add a newline
-            confidence_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
+            confidence_metrics = self.confidence_metrics.get_metrics()
             normalized_metrics = self.response_filter.normalize_confidence_metrics(confidence_metrics)
             should_filter, reason, details = self.response_filter.should_filter(normalized_metrics, response, user_query, tokens_received)
             # print("DETAILS", json.dumps(details))
@@ -920,7 +894,7 @@ class MemoryEnhancedChat:
             # Retrieve memories
             memories = self.memory_manager.retrieve(
                 query=query,
-                top_k=5,
+                top_k=10,
                 min_similarity=0.3,
                 metadata_filter={"main_category": main_category, "subcategory": subcategory},
             )
@@ -994,7 +968,7 @@ class MemoryEnhancedChat:
         """
         try:
             # Get current metrics to check for hallucination
-            current_metrics = self.confidence_metrics.get_metrics(apply_sharpening=True)
+            current_metrics = self.confidence_metrics.get_metrics()
             normalized_metrics = self.response_filter.normalize_confidence_metrics(current_metrics)
 
             # Check if response was flagged as hallucination
@@ -1448,8 +1422,6 @@ def main():
                        help="Directory for output files")
     parser.add_argument("--confidence-threshold", type=float, default=0.45,
                        help="Confidence threshold for filtering")
-    parser.add_argument("--enhancement-factor", type=float, default=0.3,
-                       help="Similarity enhancement factor (0.0-1.0)")
     parser.add_argument("--top-p", type=float, default=1.0,
                         help="Top-p sampling parameter")
     parser.add_argument("--top-k", type=int, default=50,
@@ -1471,7 +1443,6 @@ def main():
         output_dir=args.output_dir,
         confidence_threshold=args.confidence_threshold,
         enable_memory=not args.no_memory,
-        similarity_enhancement_factor=args.enhancement_factor,
         enable_enhanced_embeddings=True,
         do_sample=args.do_sample,
         top_p=args.top_p,
@@ -1510,7 +1481,6 @@ def main():
     print("  !search: [query] - Force web search for a query")
     print("  !mcp-help - Show MCP commands for file output")
     print("  !memory-stats - Display info about memories")
-    print("  !enhance-factor: [0.0-1.0] - Set similarity enhancement factor")
 
     print("="*50 + "\n")
 
@@ -1584,19 +1554,6 @@ def main():
             elif user_input.lower() == '!toggle-heatmap':
                 show_confidence = not show_confidence
                 print(f"{chat.get_time()} Confidence heatmap {'enabled' if show_confidence else 'disabled'}")
-                continue
-
-            elif user_input.lower().startswith('!enhance-factor:'):
-                try:
-                    factor = float(user_input.split(':')[1].strip())
-                    if 0.0 <= factor <= 1.0:
-                        chat.set_similarity_enhancement(factor)
-                        # Update response filter too
-                        self.response_filter.sharpening_factor = factor
-                    else:
-                        print(f"{chat.get_time()} Factor must be between 0.0 and 1.0")
-                except Exception as e:
-                    print(f"{chat.get_time()} Invalid value: {e}")
                 continue
 
             elif user_input.lower() == '!toggle-filter':

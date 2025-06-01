@@ -20,7 +20,6 @@ class ResponseFilter:
         perplexity_threshold: float = 25.0,  # Increased from 15.0
         continuation_phrases: Optional[List[str]] = None,
         user_context: Optional[Dict[str, Any]] = None,
-        sharpening_factor: float = 0.3,
         window_size: int = 5,
         question_classifier=None,
         debug_mode: bool = False,
@@ -32,7 +31,6 @@ class ResponseFilter:
         self.entropy_threshold = entropy_threshold
         self.perplexity_threshold = perplexity_threshold
         self.user_context = user_context or {}
-        self.sharpening_factor = sharpening_factor
         self.window_size = window_size
         self.question_classifier = question_classifier
         self.debug_mode = debug_mode
@@ -460,65 +458,7 @@ class ResponseFilter:
         normalized_metrics = metrics.copy()
         normalized_metrics["normalized_confidence"] = normalized_confidence
 
-        # Apply sharpening if requested
-        if self.sharpening_factor > 0:
-            normalized_metrics = self.apply_sharpening(normalized_metrics)
-
         return normalized_metrics
-
-    def apply_sharpening(self, metrics: Dict[str, float]) -> Dict[str, float]:
-        """
-        Apply non-linear sharpening to metrics.
-
-        Args:
-            metrics: Dictionary of metrics to sharpen
-
-        Returns:
-            Dictionary with sharpened metrics
-        """
-        # Skip if no sharpening requested
-        if self.sharpening_factor <= 0:
-            return metrics
-
-        # Get key metrics
-        confidence = metrics.get('normalized_confidence', metrics.get('confidence', 0.5))
-        perplexity = metrics.get('perplexity', 1.0)
-        entropy = metrics.get('entropy', 0.0)
-
-        # Apply sharpening to each metric
-        sharpened = metrics.copy()
-
-        # Sharpen confidence (higher is better)
-        if confidence > 0.5:
-            # Boost high confidence
-            boost = (confidence - 0.5) * self.sharpening_factor * 1.5
-            sharpened['sharpened_confidence'] = min(1.0, confidence + boost)
-        else:
-            # Reduce low confidence
-            reduction = (0.5 - confidence) * self.sharpening_factor * 1.5
-            sharpened['sharpened_confidence'] = max(0.1, confidence - reduction)
-
-        # Sharpen perplexity (lower is better)
-        if perplexity < 5.0:
-            # Decrease low perplexity (good)
-            reduction = perplexity * self.sharpening_factor * 0.3
-            sharpened['sharpened_perplexity'] = max(1.0, perplexity - reduction)
-        else:
-            # Increase high perplexity (bad)
-            boost = (perplexity - 5.0) * self.sharpening_factor * 0.3
-            sharpened['sharpened_perplexity'] = perplexity + boost
-
-        # Sharpen entropy (lower is better)
-        if entropy < 1.0:
-            # Decrease low entropy (good)
-            reduction = entropy * self.sharpening_factor * 0.4
-            sharpened['sharpened_entropy'] = max(0.0, entropy - reduction)
-        else:
-            # Increase high entropy (bad)
-            boost = (entropy - 1.0) * self.sharpening_factor * 0.4
-            sharpened['sharpened_entropy'] = entropy + boost
-
-        return sharpened
 
     def detect_context_overflow(self, response: str) -> Dict[str, Any]:
         """
@@ -1159,15 +1099,11 @@ class ResponseFilter:
         normalized_metrics = self.normalize_confidence_metrics(metrics)
 
         # Get normalized confidence values
-        confidence = normalized_metrics.get('sharpened_confidence',
-                                           normalized_metrics.get('normalized_confidence',
-                                                                normalized_metrics.get('confidence', 0.5)))
+        confidence = normalized_metrics.get('normalized_confidence', normalized_metrics.get('confidence', 0.5))
 
-        entropy = float(normalized_metrics.get('sharpened_entropy',
-                                             normalized_metrics.get('entropy', 2.0)))
+        entropy = float(normalized_metrics.get('entropy', 2.0))
 
-        perplexity = float(normalized_metrics.get('sharpened_perplexity',
-                                                normalized_metrics.get('perplexity', 10.0)))
+        perplexity = float(normalized_metrics.get('perplexity', 10.0))
 
         # Get domain-specific thresholds
         thresholds = self.get_domain_thresholds(query)

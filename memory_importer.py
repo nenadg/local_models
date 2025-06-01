@@ -100,8 +100,7 @@ class MemoryImporter:
             embedding_dim=None,
             enable_enhanced_embeddings=self.enable_enhanced_embeddings,
             max_enhancement_levels=4,
-            auto_save=True,
-            similarity_enhancement_factor=0.3
+            auto_save=True
         )
     
     def _setup_model_and_tokenizer(self):

@@ -550,14 +550,13 @@ class QuestionClassifier:
             question: The question text
 
         Returns:
-            dict: Settings including sharpening parameters, confidence thresholds, etc.
+            dict: Settings including confidence thresholds, etc.
         """
         domain, confidence, subcategory, subcategory_confidence = self.classify(question)
 
         # Default settings
         settings = {
             'memory_weight': 0.8,            # How much to weight memory vs. model knowledge
-            'sharpening_factor': 0.3,        # Default sharpening factor
             'confidence_threshold': 0.6,     # Minimum confidence to accept answer
             'domain': domain,                # Detected domain
             'domain_confidence': confidence, # Confidence in domain classification
@@ -573,7 +572,6 @@ class QuestionClassifier:
         if domain == 'declarative':
             settings.update({
                 'memory_weight': 0.9,        # High weight on memory for facts
-                'sharpening_factor': 0.5,    # Strong sharpening
                 'confidence_threshold': 0.5,
                 'post_process': False,
                 'retrieval_count': 12
@@ -582,7 +580,6 @@ class QuestionClassifier:
         elif domain == 'procedural_knowledge':
             settings.update({
                 'memory_weight': 0.7,
-                'sharpening_factor': 0.3,
                 'confidence_threshold': 0.5,
                 'post_process': False,
                 'retrieval_count': 10
@@ -591,7 +588,6 @@ class QuestionClassifier:
         elif domain == 'experiential':
             settings.update({
                 'memory_weight': 0.8,        # High reliance on memory for personal experiences
-                'sharpening_factor': 0.4,    # More aggressive sharpening
                 'confidence_threshold': 0.5,
                 'post_process': False,
                 'retrieval_count': 6
@@ -600,7 +596,6 @@ class QuestionClassifier:
         elif domain == 'tacit':
             settings.update({
                 'memory_weight': 0.5,        # Balanced mix of model knowledge and memory
-                'sharpening_factor': 0.2,    # Lighter sharpening for subjective content
                 'confidence_threshold': 0.4,  # Lower threshold due to subjective nature
                 'post_process': False,
                 'retrieval_count': 5
@@ -609,7 +604,6 @@ class QuestionClassifier:
         elif domain == 'explicit':
             settings.update({
                 'memory_weight': 0.9,        # Very high reliance on memory for documented knowledge
-                'sharpening_factor': 0.6,    # Strong sharpening for documented facts
                 'confidence_threshold': 0.6,
                 'post_process': False,
                 'retrieval_count': 8
@@ -618,7 +612,6 @@ class QuestionClassifier:
         elif domain == 'conceptual_knowledge':
             settings.update({
                 'memory_weight': 0.6,         # Balanced approach
-                'sharpening_factor': 0.3,     # Moderate sharpening
                 'confidence_threshold': 0.4,  # Lower threshold for concepts
                 'post_process': False,
                 'retrieval_count': 8
@@ -627,7 +620,6 @@ class QuestionClassifier:
         elif domain == 'contextual':
             settings.update({
                 'memory_weight': 0.7,        # Significant memory weight for contextual information
-                'sharpening_factor': 0.3,    # Moderate sharpening
                 'confidence_threshold': 0.5,
                 'post_process': False,
                 'retrieval_count': 10        # More memories to build context
@@ -637,7 +629,6 @@ class QuestionClassifier:
         if confidence < 0.4:
             settings.update({
                 'memory_weight': 0.5,
-                'sharpening_factor': 0.2,
                 'confidence_threshold': 0.6,
                 'retrieval_count': 6
             })
