@@ -46,6 +46,15 @@ from memory_utils import (
     format_memories_by_category
 )
 
+from fast_kernel_optimizations import  integrate_safe_extreme_kernels
+
+# try:
+#     from fast_kernel_optimizations import integrate_fast_kernels, integrate_extreme_kernels
+#     FAST_KERNELS_AVAILABLE = True
+# except ImportError:
+FAST_KERNELS_AVAILABLE = False
+# print("[Warning] Fast kernel optimizations not found. Install fast_kernel_optimizations.py for 3-10x speedup.")
+
 from web_search_integration import WebSearchIntegration, integrate_web_search
 
 # Default system message template
@@ -88,6 +97,7 @@ class MemoryEnhancedChat:
                 confidence_threshold: float = 0.45,
                 enable_memory: bool = True,
                 enable_enhanced_embeddings: bool = True,
+                enable_fast_kernels: bool = True,
                 do_sample: bool = True,
                 top_p: float = 1.0,
                 top_k: int = 50,
@@ -136,6 +146,13 @@ class MemoryEnhancedChat:
         # Initialize stats and state
         self.memory_stats = {"items_added": 0, "retrievals": 0}
         self.stop_event = threading.Event()
+
+        # if enable_fast_kernels and FAST_KERNELS_AVAILABLE:
+        #     try:
+        #         integrate_fast_kernels(self)
+        #         print(f"{self.get_time()} Fast kernel optimizations enabled - expecting 3-10x speedup")
+        #     except Exception as e:
+        #         print(f"{self.get_time()} Warning: Could not enable fast kernels: {e}")
 
     def _setup_device(self, device: Optional[str]):
         """Set up the device for processing."""
@@ -625,16 +642,18 @@ class MemoryEnhancedChat:
         is_gemma = "gemma" in self.model_name.lower()
         is_qwen = "qwen" in self.model_name.lower()
 
+        is_bloomz = "bloomz" in self.model_name.lower()
         print(f"{self.get_time()} Model used: {self.model_name.lower()}")
 
-        if is_gemma:
+        if is_gemma or is_bloomz:
             prompt = self._format_chat_prompt(messages)
         else:
             prompt = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=is_qwen
+                enable_thinking=is_qwen,
+                return_tensors="pt"
             )
 
         if self.memory_debug:
@@ -902,26 +921,17 @@ class MemoryEnhancedChat:
             # Check if we're using Gemma or Qwen
             is_gemma = "gemma" in self.model_name.lower()
             is_qwen = "qwen" in self.model_name.lower()
+            is_yi_coder = "yi-coder" in self.model_name.lower()
+
 
             # Format memory content appropriately for the model type
-            if is_gemma:
+            if is_gemma or is_qwen:
                 memory_text = ""
                 for memory in memories:
                     content = memory.get("content", "").strip()
                     similarity = memory.get("similarity", 0)
                     if similarity > 0.5:  # Only include highly relevant memories
                         memory_text += f"- {content}\n"
-            elif is_qwen:
-                # Wrap memory in Qwen-specific format
-                # memory_text = "<|im_start|>memories\n"
-                memory_text = ""
-                for memory in memories:
-                    content = memory.get("content", "").strip()
-                    similarity = memory.get("similarity", 0)
-                    if similarity > 0.5:  # Only include highly relevant memories
-                        memory_text += f"- {content}\n"
-
-                # memory_text += f"<|im_end|>"
             else:
                 # Standard formatting for other models
                 memory_text = format_memories_by_category(memories, main_category, subcategory)
@@ -1451,6 +1461,8 @@ def main():
         no_filter=args.no_filter
     )
 
+    chat = integrate_safe_extreme_kernels(chat)
+
     # Set up history
     history_file = setup_readline_history(chat.memory_dir)
     print(f"{chat.get_time()} Command history stored in: {history_file}")
@@ -1478,6 +1490,7 @@ def main():
     print("  !toggle-heatmap - Toggle confidence heatmap visualization")
     print("  !toggle-filter - Toggle confidence filtering")
     print("  !toggle-websearch - Toggle web search on/off")
+    print("  !toggle-fast-kernels - Toggle fast kernel optimizations")
     print("  !search: [query] - Force web search for a query")
     print("  !mcp-help - Show MCP commands for file output")
     print("  !memory-stats - Display info about memories")
@@ -1595,6 +1608,26 @@ def main():
                     for i, content in enumerate(results['content'][:3]):
                         print(f"  {i+1}. {content['title']} - {content['domain']}")
                 continue
+
+            # elif user_input.lower() == '!toggle-fast-kernels':
+            #     if FAST_KERNELS_AVAILABLE:
+            #         # Toggle the optimization
+            #         if hasattr(chat.memory_manager, '_hierarchical_search'):
+            #             # Currently enabled, disable it
+            #             # Note: Full disable requires restart, but we can switch to fallback
+            #             chat.memory_manager._use_fast_kernels = not getattr(chat.memory_manager, '_use_fast_kernels', True)
+            #             status = "disabled" if chat.memory_manager._use_fast_kernels else "enabled"
+            #             print(f"{chat.get_time()} Fast kernels {status} (requires restart for full effect)")
+            #         else:
+            #             # Try to enable
+            #             try:
+            #                 integrate_fast_kernels(chat)
+            #                 print(f"{chat.get_time()} Fast kernels enabled")
+            #             except Exception as e:
+            #                 print(f"{chat.get_time()} Could not enable fast kernels: {e}")
+            #     else:
+            #         print(f"{chat.get_time()} Fast kernels not available. Install fast_kernel_optimizations.py")
+            #     continue
 
             # Add user message to conversation
             user_message = {"role": "user", "content": user_input}
