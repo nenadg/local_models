@@ -46,15 +46,7 @@ from memory_utils import (
     format_memories_by_category
 )
 
-from fast_kernel_optimizations import  integrate_safe_extreme_kernels
-
-# try:
-#     from fast_kernel_optimizations import integrate_fast_kernels, integrate_extreme_kernels
-#     FAST_KERNELS_AVAILABLE = True
-# except ImportError:
-FAST_KERNELS_AVAILABLE = False
-# print("[Warning] Fast kernel optimizations not found. Install fast_kernel_optimizations.py for 3-10x speedup.")
-
+from optimizations import optimize
 from web_search_integration import WebSearchIntegration, integrate_web_search
 
 # Default system message template
@@ -97,7 +89,6 @@ class MemoryEnhancedChat:
                 confidence_threshold: float = 0.45,
                 enable_memory: bool = True,
                 enable_enhanced_embeddings: bool = True,
-                enable_fast_kernels: bool = True,
                 do_sample: bool = True,
                 top_p: float = 1.0,
                 top_k: int = 50,
@@ -146,13 +137,6 @@ class MemoryEnhancedChat:
         # Initialize stats and state
         self.memory_stats = {"items_added": 0, "retrievals": 0}
         self.stop_event = threading.Event()
-
-        # if enable_fast_kernels and FAST_KERNELS_AVAILABLE:
-        #     try:
-        #         integrate_fast_kernels(self)
-        #         print(f"{self.get_time()} Fast kernel optimizations enabled - expecting 3-10x speedup")
-        #     except Exception as e:
-        #         print(f"{self.get_time()} Warning: Could not enable fast kernels: {e}")
 
     def _setup_device(self, device: Optional[str]):
         """Set up the device for processing."""
@@ -1461,7 +1445,7 @@ def main():
         no_filter=args.no_filter
     )
 
-    chat = integrate_safe_extreme_kernels(chat)
+    chat = optimize(chat)
 
     # Set up history
     history_file = setup_readline_history(chat.memory_dir)
@@ -1490,7 +1474,6 @@ def main():
     print("  !toggle-heatmap - Toggle confidence heatmap visualization")
     print("  !toggle-filter - Toggle confidence filtering")
     print("  !toggle-websearch - Toggle web search on/off")
-    print("  !toggle-fast-kernels - Toggle fast kernel optimizations")
     print("  !search: [query] - Force web search for a query")
     print("  !mcp-help - Show MCP commands for file output")
     print("  !memory-stats - Display info about memories")
@@ -1601,33 +1584,53 @@ def main():
                 continue
 
             elif user_input.lower().startswith('!search:'):
-                query = user_input[8:].strip()
-                if query and hasattr(chat, 'web_search'):
-                    results = chat.web_search.process_query(query)
-                    print(f"{chat.get_time()} Search results: {results['results_found']} found, {results['saved_to_memory']} saved")
-                    for i, content in enumerate(results['content'][:3]):
-                        print(f"  {i+1}. {content['title']} - {content['domain']}")
-                continue
+                # Extract URL or query from command
+                content = user_input[8:].strip()
 
-            # elif user_input.lower() == '!toggle-fast-kernels':
-            #     if FAST_KERNELS_AVAILABLE:
-            #         # Toggle the optimization
-            #         if hasattr(chat.memory_manager, '_hierarchical_search'):
-            #             # Currently enabled, disable it
-            #             # Note: Full disable requires restart, but we can switch to fallback
-            #             chat.memory_manager._use_fast_kernels = not getattr(chat.memory_manager, '_use_fast_kernels', True)
-            #             status = "disabled" if chat.memory_manager._use_fast_kernels else "enabled"
-            #             print(f"{chat.get_time()} Fast kernels {status} (requires restart for full effect)")
-            #         else:
-            #             # Try to enable
-            #             try:
-            #                 integrate_fast_kernels(chat)
-            #                 print(f"{chat.get_time()} Fast kernels enabled")
-            #             except Exception as e:
-            #                 print(f"{chat.get_time()} Could not enable fast kernels: {e}")
-            #     else:
-            #         print(f"{chat.get_time()} Fast kernels not available. Install fast_kernel_optimizations.py")
-            #     continue
+                if not content:
+                    print(f"{chat.get_time()} Please provide a URL or search query")
+                    continue
+
+                if hasattr(chat, 'web_search'):
+                    # Check if it's a URL
+                    if content.startswith(('http://', 'https://')):
+                        # Direct URL fetch
+                        result = chat.web_search.fetch_url_content(content)
+
+                        if result['success']:
+                            print(f"\n{chat.get_time()} Fetched: {result['title']}")
+                            print(f"Domain: {result['domain']}")
+                            print(f"Saved to memory: {'Yes' if result['saved_to_memory'] else 'No'}")
+
+                            # Show preview of content
+                            preview = result['content'][:300] + "..." if len(result['content']) > 300 else result['content']
+                            print(f"\nPreview:\n{preview}")
+                        else:
+                            print(f"{chat.get_time()} Failed to fetch content")
+                            if 'error' in result:
+                                print(f"Error: {result['error']}")
+                    else:
+                        # It's a search query - perform search and fetch first result
+                        print(f"{chat.get_time()} Searching for: {content}")
+                        search_results = chat.web_search.search_google(content, num_results=1)
+
+                        if search_results:
+                            first_result = search_results[0]
+                            print(f"{chat.get_time()} Found: {first_result['title']}")
+                            print(f"URL: {first_result['url']}")
+
+                            # Fetch the first result
+                            result = chat.web_search.fetch_url_content(first_result['url'], query=content)
+
+                            if result['success']:
+                                print(f"Saved to memory: {'Yes' if result['saved_to_memory'] else 'No'}")
+                            else:
+                                print(f"{chat.get_time()} Failed to fetch content")
+                        else:
+                            print(f"{chat.get_time()} No search results found")
+                else:
+                    print(f"{chat.get_time()} Web search not available")
+                continue
 
             # Add user message to conversation
             user_message = {"role": "user", "content": user_input}

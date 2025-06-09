@@ -7,7 +7,7 @@ Uses Google Custom Search API for search and python-readability for content extr
 import re
 import requests
 import time
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from datetime import datetime
 from urllib.parse import quote_plus, urlparse
 from readability import parse
@@ -246,14 +246,14 @@ class WebSearchIntegration:
             print(f"{self.get_time()} Final content length: {len(content)}")
 
             # Limit content length to avoid token limits
-            max_content_length = 2000
-            if len(content) > max_content_length:
-                content = content[:max_content_length] + "..."
+            # max_content_length = 2000
+            # if len(content) > max_content_length:
+            #     content = content[:max_content_length] + "..."
 
-            # Check if we have valid content
-            if not content or len(content.strip()) < 50:
-                print(f"{self.get_time()} Content too short or empty, skipping")
-                return None
+            # # Check if we have valid content
+            # if not content or len(content.strip()) < 50:
+            #     print(f"{self.get_time()} Content too short or empty, skipping")
+            #     return None
 
             result = {
                 'title': title,
@@ -458,6 +458,64 @@ class WebSearchIntegration:
             import traceback
             traceback.print_exc()
             return False
+
+    def fetch_url_content(self, url: str, query: str = None) -> Dict[str, Any]:
+        """
+        Fetch content from a URL and automatically save to memory.
+
+        Args:
+            url: URL to fetch content from
+            query: Optional query context for better classification
+
+        Returns:
+            Dictionary with fetch results and memory status
+        """
+        result = {
+            'success': False,
+            'content_found': False,
+            'saved_to_memory': False,
+            'title': '',
+            'content': '',
+            'domain': ''
+        }
+
+        print(f"{self.get_time()} Fetching content from: {url}")
+
+        try:
+            # Extract content using existing method
+            content_data = self.extract_content(url)
+
+            if content_data:
+                result['success'] = True
+                result['content_found'] = True
+                result['title'] = content_data['title']
+                result['content'] = content_data['content']
+                result['domain'] = content_data['domain']
+
+                # Save to memory if memory manager is available
+                if self.memory_manager:
+                    # Use the provided query or create one from URL
+                    save_query = query or f"Information from {content_data['domain']}"
+
+                    # Save using existing save_to_memory method
+                    if self.save_to_memory(content_data, save_query):
+                        result['saved_to_memory'] = True
+                        print(f"{self.get_time()} Content saved to memory")
+                    else:
+                        print(f"{self.get_time()} Failed to save to memory")
+
+                # Display summary
+                print(f"{self.get_time()} Successfully fetched: {content_data['title']}")
+                print(f"{self.get_time()} Content length: {len(content_data['content'])} characters")
+
+            else:
+                print(f"{self.get_time()} Could not extract content from URL")
+
+        except Exception as e:
+            print(f"{self.get_time()} Error fetching URL: {e}")
+            result['error'] = str(e)
+
+        return result
 
     def process_query(self, query: str) -> Dict[str, any]:
         """
